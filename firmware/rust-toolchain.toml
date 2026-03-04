@@ -1,0 +1,6 @@
+# Firmware requires the Espressif Rust fork for the Xtensa target.
+# Install via: cargo install espup && espup install && . $HOME/export-esp.sh
+[toolchain]
+channel    = "esp"
+components = ["rust-src", "rustfmt", "clippy"]
+targets    = ["xtensa-esp32s3-none-elf"]

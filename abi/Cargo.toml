@@ -1,0 +1,13 @@
+[package]
+name    = "abi"
+version = "0.1.0"
+edition = "2021"
+description = "Host-Guest ABI definitions for SandOS (no_std + std)"
+license = "MIT"
+
+[features]
+default = ["std"]
+# Enable std support (e.g. for host-side tests / tooling).
+std = []
+
+[dependencies]

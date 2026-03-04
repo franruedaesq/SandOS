@@ -1,0 +1,23 @@
+# Build artifacts
+/target
+**/target/
+
+# Lock files for library crates (keep for firmware / workspace)
+# Cargo.lock is tracked for reproducible builds
+
+# Editor metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Generated binaries / flash images
+*.bin
+*.elf
+*.map
+
+# espflash
+*.dtb

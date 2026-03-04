@@ -1,0 +1,11 @@
+[package]
+name    = "host-tests"
+version = "0.1.0"
+edition = "2021"
+description = "SandOS host-side TDD test suite (runs on x86_64, no hardware needed)"
+license = "MIT"
+
+[dependencies]
+abi   = { path = "../abi", features = ["std"] }
+wasmi = "0.31"
+wat   = "1"
