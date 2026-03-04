@@ -200,8 +200,8 @@ fn build_linker(engine: &Engine) -> Linker<Rc<RefCell<MockHost>>> {
                 return status::ERR_BOUNDS;
             }
             let n = max_len as usize;
-            let mut tmp = vec![0u8; n];
-            let copied = caller.data().borrow_mut().read_audio(&mut tmp) as usize;
+            let mut tmp = [0u8; MAX_AUDIO_READ as usize];
+            let copied = caller.data().borrow_mut().read_audio(&mut tmp[..n]) as usize;
             mem.data_mut(&mut caller)[ptr as usize..ptr as usize + copied]
                 .copy_from_slice(&tmp[..copied]);
             copied as i32

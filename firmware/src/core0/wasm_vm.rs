@@ -278,9 +278,9 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 // Temporarily extract audio into a scratch buffer, then
                 // write it into Wasm memory.
                 let n = max_len as usize;
-                let mut tmp = vec![0u8; n];
+                let mut tmp = [0u8; MAX_AUDIO_READ as usize];
                 let host = unsafe { &mut **caller.data() };
-                let copied = host.read_audio(&mut tmp) as usize;
+                let copied = host.read_audio(&mut tmp[..n]) as usize;
                 mem.data_mut(&mut caller)[ptr as usize..ptr as usize + copied]
                     .copy_from_slice(&tmp[..copied]);
                 copied as i32
