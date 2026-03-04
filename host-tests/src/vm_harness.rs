@@ -8,8 +8,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use abi::{
-    status, validate_ptr_len, HOST_MODULE,
-    FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_UPTIME_MS,
+    status, validate_ptr_len, ImuReading, HOST_MODULE,
+    FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS,
     FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_START_AUDIO, FN_STOP_AUDIO,
     FN_TOGGLE_LED, FN_WRITE_TEXT, MAX_AUDIO_READ, MAX_TEXT_BYTES,
 };
@@ -71,6 +71,14 @@ impl WasmHarness {
             .get_typed_func::<(), i32>(&self.store, name)
             .unwrap_or_else(|_| panic!("export '{}' not found", name));
         f.call(&mut self.store, ()).unwrap_or_else(|_| panic!("call '{}' failed", name))
+    }
+
+    /// Call a typed exported function `(param: i32, param: i32) -> i32`.
+    pub fn call_i32i32_i32(&mut self, instance: &wasmi::Instance, name: &str, a: i32, b: i32) -> i32 {
+        let f = instance
+            .get_typed_func::<(i32, i32), i32>(&self.store, name)
+            .unwrap_or_else(|_| panic!("export '{}' not found", name));
+        f.call(&mut self.store, (a, b)).unwrap_or_else(|_| panic!("call '{}' failed", name))
     }
 }
 
@@ -180,6 +188,32 @@ fn build_linker(engine: &Engine) -> Linker<Rc<RefCell<MockHost>>> {
             mem.data_mut(&mut caller)[ptr as usize..ptr as usize + copied]
                 .copy_from_slice(&tmp[..copied]);
             copied as i32
+        }
+    ).unwrap();
+
+    // ── Phase 3 — Sensors ─────────────────────────────────────────────────────
+
+    linker.func_wrap(HOST_MODULE, FN_GET_PITCH_ROLL,
+        |mut caller: Caller<'_, Rc<RefCell<MockHost>>>, pitch_ptr: i32, roll_ptr: i32| -> i32 {
+            let mem = match get_memory(&caller) {
+                Some(m) => m,
+                None    => return status::ERR_BOUNDS,
+            };
+            let mem_size = mem.data(&caller).len() as u32;
+            if validate_ptr_len(pitch_ptr as u32, 4, mem_size).is_err() {
+                return status::ERR_BOUNDS;
+            }
+            if validate_ptr_len(roll_ptr as u32, 4, mem_size).is_err() {
+                return status::ERR_BOUNDS;
+            }
+            let ImuReading { pitch_millideg, roll_millideg } =
+                caller.data().borrow().get_pitch_roll();
+            let data = mem.data_mut(&mut caller);
+            data[pitch_ptr as usize..pitch_ptr as usize + 4]
+                .copy_from_slice(&pitch_millideg.to_le_bytes());
+            data[roll_ptr as usize..roll_ptr as usize + 4]
+                .copy_from_slice(&roll_millideg.to_le_bytes());
+            status::OK
         }
     ).unwrap();
 

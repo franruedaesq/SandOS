@@ -5,7 +5,7 @@
 //! that will run on the chip.
 
 use abi::{
-    status, EyeExpression, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_TEXT_BYTES,
+    status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_TEXT_BYTES,
 };
 
 // ── Mock display ──────────────────────────────────────────────────────────────
@@ -71,6 +71,10 @@ pub struct MockHost {
 
     /// Simulated uptime in milliseconds (controlled by tests).
     pub simulated_uptime_ms: u64,
+
+    // Phase 3 — Sensors
+    /// Simulated IMU reading (set by tests to inject sensor data).
+    pub imu_reading: ImuReading,
 }
 
 impl Default for MockHost {
@@ -83,6 +87,7 @@ impl Default for MockHost {
             audio_buf: std::collections::VecDeque::new(),
             log_messages: Vec::new(),
             simulated_uptime_ms: 0,
+            imu_reading: ImuReading::default(),
         }
     }
 }
@@ -173,5 +178,14 @@ impl MockHost {
     /// Feed raw PCM bytes into the mock audio ring buffer.
     pub fn feed_audio(&mut self, data: &[u8]) {
         self.audio_buf.extend(data.iter().copied());
+    }
+
+    // ── Phase 3 — Sensors ─────────────────────────────────────────────────────
+
+    /// Return the current simulated IMU reading.
+    ///
+    /// Tests set [`MockHost::imu_reading`] directly to inject sensor data.
+    pub fn get_pitch_roll(&self) -> ImuReading {
+        self.imu_reading
     }
 }

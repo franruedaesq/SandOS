@@ -17,12 +17,16 @@
 //! - [`AbiHost::stop_audio_capture`]
 //! - [`AbiHost::get_audio_avail`]
 //! - [`AbiHost::read_audio`]
+//!
+//! ## Phase 3 functions
+//! - [`AbiHost::get_pitch_roll`]
 use abi::{
-    status, EyeExpression, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_TEXT_BYTES,
+    status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_TEXT_BYTES,
 };
 use esp_hal::gpio::Io;
 
 use crate::display::DisplayDriver;
+use crate::sensors;
 
 // ── Host state ────────────────────────────────────────────────────────────────
 
@@ -161,5 +165,18 @@ impl AbiHost {
             *byte = self.audio_buf.pop_front().unwrap_or(0);
         }
         n as i32
+    }
+
+    // ── Phase 3 — Sensors ─────────────────────────────────────────────────────
+
+    /// Return the latest IMU reading from the shared atomic bridge.
+    ///
+    /// The value is written by Core 1's 500 Hz real-time polling loop; this
+    /// method reads it with `Acquire` ordering so it always reflects the
+    /// most recently *completed* write.
+    ///
+    /// Returns an [`ImuReading`] with `pitch_millideg` and `roll_millideg`.
+    pub fn get_pitch_roll(&self) -> ImuReading {
+        sensors::load_imu()
     }
 }

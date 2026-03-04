@@ -48,6 +48,9 @@ pub const FN_STOP_AUDIO:         &str = "host_stop_audio_capture";
 pub const FN_GET_AUDIO_AVAIL:    &str = "host_get_audio_avail";
 pub const FN_READ_AUDIO:         &str = "host_read_audio";
 
+// Phase 3 — Sensor functions
+pub const FN_GET_PITCH_ROLL:     &str = "host_get_pitch_roll";
+
 // ── Status Codes ──────────────────────────────────────────────────────────────
 
 /// ABI status codes returned from every host function as `i32`.
@@ -150,6 +153,42 @@ pub mod cmd {
     pub const CLEAR_DISPLAY: u8 = 0x12;
 }
 
+// ── IMU Sensor Data ───────────────────────────────────────────────────────────
+
+/// A pitch/roll reading from the IMU, expressed in millidegrees.
+///
+/// Using millidegrees (i32) avoids floating-point in `no_std` contexts while
+/// providing ±2,147,483 degrees of range — far more than any physical angle.
+///
+/// The integer discriminants are stable ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ImuReading {
+    /// Pitch angle in millidegrees (positive = nose up).
+    pub pitch_millideg: i32,
+    /// Roll angle in millidegrees (positive = right side down).
+    pub roll_millideg: i32,
+}
+
+impl ImuReading {
+    /// Pack the reading into a single `u64` for atomic storage.
+    ///
+    /// Layout: `[pitch_millideg as u32][roll_millideg as u32]`
+    /// (pitch in bits 63–32, roll in bits 31–0).
+    #[inline]
+    pub fn encode(self) -> u64 {
+        ((self.pitch_millideg as u32 as u64) << 32) | (self.roll_millideg as u32 as u64)
+    }
+
+    /// Unpack a reading previously encoded with [`ImuReading::encode`].
+    #[inline]
+    pub fn decode(raw: u64) -> Self {
+        Self {
+            pitch_millideg: (raw >> 32) as u32 as i32,
+            roll_millideg:  (raw & 0xFFFF_FFFF) as u32 as i32,
+        }
+    }
+}
+
 // ── Constraint Constants ──────────────────────────────────────────────────────
 
 /// Maximum byte length accepted by `host_write_text`.
@@ -244,5 +283,33 @@ mod tests {
             payload: [0; ESPNOW_MAX_PAYLOAD - 4],
         };
         assert!(!cmd.is_valid());
+    }
+
+    #[test]
+    fn imu_reading_encode_decode_roundtrip() {
+        let reading = ImuReading {
+            pitch_millideg: 45_000,
+            roll_millideg: -12_500,
+        };
+        let decoded = ImuReading::decode(reading.encode());
+        assert_eq!(decoded.pitch_millideg, 45_000);
+        assert_eq!(decoded.roll_millideg, -12_500);
+    }
+
+    #[test]
+    fn imu_reading_zero_roundtrip() {
+        let reading = ImuReading::default();
+        assert_eq!(ImuReading::decode(reading.encode()), reading);
+    }
+
+    #[test]
+    fn imu_reading_negative_pitch_roundtrip() {
+        let reading = ImuReading {
+            pitch_millideg: -90_000,
+            roll_millideg: 180_000,
+        };
+        let decoded = ImuReading::decode(reading.encode());
+        assert_eq!(decoded.pitch_millideg, -90_000);
+        assert_eq!(decoded.roll_millideg, 180_000);
     }
 }
