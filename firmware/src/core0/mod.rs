@@ -16,14 +16,14 @@ pub mod abi;
 pub mod espnow;
 pub mod wasm_vm;
 
-use abi::AbiHost;
+use abi::{AbiHost, MotorCmdSender};
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use esp_hal::{gpio::Io, peripherals::WIFI};
 
 use crate::display::DisplayDriver;
 
-// ── Inter-task channel ────────────────────────────────────────────────────────
+// ── Inter-task channel (PC → Brain) ───────────────────────────────────────────
 
 /// A command queued from the ESP-NOW receiver for the Wasm task to process.
 #[derive(Clone)]
@@ -41,6 +41,20 @@ const CMD_QUEUE_DEPTH: usize = 8;
 static CMD_CHANNEL: Channel<CriticalSectionRawMutex, WasmCommand, CMD_QUEUE_DEPTH> =
     Channel::new();
 
+// ── Inter-task channel (Brain ABI → ESP-NOW transmitter) ─────────────────────
+
+/// Capacity of the outgoing motor command queue.
+///
+/// A depth of 4 absorbs short command bursts while keeping memory use low.
+const MOTOR_OUT_DEPTH: usize = 4;
+
+/// Static channel that carries validated `(left, right)` speed pairs from the
+/// Wasm ABI layer to the ESP-NOW transmitter task.
+///
+/// Core 0 (Wasm ABI) writes; the ESP-NOW task reads and forwards to the Worker.
+static MOTOR_OUT_CHANNEL: Channel<CriticalSectionRawMutex, (i16, i16), MOTOR_OUT_DEPTH> =
+    Channel::new();
+
 // ── Main Brain task ───────────────────────────────────────────────────────────
 
 /// Core 0 top-level task.
@@ -52,12 +66,18 @@ pub async fn brain_task(spawner: Spawner, wifi: WIFI, io: Io) {
     // Initialise the display (Phase 2).
     let display = DisplayDriver::new(&io);
 
-    // Build the ABI host context (LED pin, display handle, …).
-    let abi_host = AbiHost::new(io, display);
+    // Build the ABI host context (LED pin, display handle, motor TX channel).
+    let motor_tx: MotorCmdSender = MOTOR_OUT_CHANNEL.sender();
+    let abi_host = AbiHost::new(io, display, motor_tx);
 
-    // Start the ESP-NOW receiver task.
+    // Start the ESP-NOW receiver/transmitter task (Phase 5: also receives the
+    // motor command receiver so it can forward commands to the Worker).
     spawner
-        .spawn(espnow::espnow_rx_task(wifi, CMD_CHANNEL.sender()))
+        .spawn(espnow::espnow_rx_task(
+            wifi,
+            CMD_CHANNEL.sender(),
+            MOTOR_OUT_CHANNEL.receiver(),
+        ))
         .unwrap();
 
     // Start the Wasm engine task.

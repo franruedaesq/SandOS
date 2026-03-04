@@ -27,10 +27,20 @@ use abi::{
     status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED,
     MAX_TEXT_BYTES,
 };
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 use esp_hal::gpio::Io;
 
 use crate::display::DisplayDriver;
 use crate::{motors, sensors};
+
+// ── Phase 5: outgoing motor command sender type ───────────────────────────────
+
+/// Sender half of the static channel that carries `(left, right)` motor speed
+/// pairs from the Wasm ABI layer to the ESP-NOW transmitter task.
+///
+/// The channel depth of 4 provides a small burst buffer while keeping memory
+/// usage minimal.  If the channel is full the ABI returns [`status::ERR_BUSY`].
+pub type MotorCmdSender = Sender<'static, CriticalSectionRawMutex, (i16, i16), 4>;
 
 // ── Host state ────────────────────────────────────────────────────────────────
 
@@ -57,11 +67,18 @@ pub struct AbiHost {
 
     /// GPIO IO handle (kept alive for LED control).
     _io: Io,
+
+    // Phase 5 — outgoing motor command queue
+    /// Sender that forwards validated motor speed pairs to the ESP-NOW task.
+    ///
+    /// The ESP-NOW task drains this channel and sends each pair to the Worker
+    /// chip as a [`abi::WorkerPacket::motor_speed`] packet.
+    motor_tx: MotorCmdSender,
 }
 
 impl AbiHost {
     /// Construct a new [`AbiHost`] with all peripherals in their reset state.
-    pub fn new(io: Io, display: DisplayDriver) -> Self {
+    pub fn new(io: Io, display: DisplayDriver, motor_tx: MotorCmdSender) -> Self {
         Self {
             led_on: false,
             boot_time_ms: 0,
@@ -69,6 +86,7 @@ impl AbiHost {
             audio_active: false,
             audio_buf: heapless::Deque::new(),
             _io: io,
+            motor_tx,
         }
     }
 
@@ -184,33 +202,42 @@ impl AbiHost {
         sensors::load_imu()
     }
 
-    // ── Phase 4 — Motors ──────────────────────────────────────────────────────
+    // ── Phase 4 / Phase 5 — Motors ────────────────────────────────────────────
 
     /// Set the target speed for the left and right drive motors.
     ///
-    /// Speeds are in the signed range `[-MAX_MOTOR_SPEED, MAX_MOTOR_SPEED]`
-    /// where positive values drive the wheel forward and negative values drive
-    /// it backward.
+    /// ## Phase 5 behaviour
     ///
-    /// The Wasm guest uses this to issue *steering* commands.  Core 1 applies
-    /// these as an offset on top of its PID balance correction, so the robot
-    /// keeps balancing even while turning.
+    /// Instead of writing to the local `MOTOR_COMMAND` atomic (which drove
+    /// Core 1's on-board PWM in Phase 4), this method now **queues an
+    /// ESP-NOW packet** for the Worker chip.  The ESP-NOW task picks up the
+    /// `(left, right)` pair and transmits a [`abi::WorkerPacket::motor_speed`]
+    /// frame to the Worker, which translates it to motor PWM output.
+    ///
+    /// The ULP safe-shutdown flag is still checked: if the Brain's ULP
+    /// paramedic signals a critical voltage drop, new motor commands are
+    /// rejected to protect the battery.
     ///
     /// ## Return codes
     ///
-    /// | Value                   | Meaning                                      |
-    /// |-------------------------|----------------------------------------------|
-    /// | [`status::OK`]          | Command accepted and stored.                 |
-    /// | [`status::ERR_INVALID_ARG`] | Speed out of `[-255, 255]` range.        |
-    /// | [`status::ERR_BUSY`]    | Motors disabled (ULP safe-shutdown active).  |
+    /// | Value                       | Meaning                                        |
+    /// |-----------------------------|------------------------------------------------|
+    /// | [`status::OK`]              | Command accepted and enqueued for transmission.|
+    /// | [`status::ERR_INVALID_ARG`] | Speed out of `[-255, 255]` range.              |
+    /// | [`status::ERR_BUSY`]        | ULP safe-shutdown active *or* TX queue full.   |
     pub fn set_motor_speed(&self, left: i32, right: i32) -> i32 {
         if left.abs() > MAX_MOTOR_SPEED || right.abs() > MAX_MOTOR_SPEED {
             return status::ERR_INVALID_ARG;
         }
-        if motors::store_motor_command(left as i16, right as i16) {
-            status::OK
-        } else {
-            status::ERR_BUSY
+        // Phase 4 ULP safety: still reject commands when the Brain detects a
+        // critical voltage drop.
+        if !motors::is_motor_enabled() {
+            return status::ERR_BUSY;
+        }
+        // Phase 5: enqueue for the ESP-NOW transmitter task.
+        match self.motor_tx.try_send((left as i16, right as i16)) {
+            Ok(()) => status::OK,
+            Err(_) => status::ERR_BUSY, // TX queue full
         }
     }
 }
