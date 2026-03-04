@@ -54,6 +54,8 @@ pub const FN_GET_PITCH_ROLL:     &str = "host_get_pitch_roll";
 // Phase 4 — Motor functions
 pub const FN_SET_MOTOR_SPEED:    &str = "host_set_motor_speed";
 
+// Phase 5 — Distributed robotics (no new Wasm ABI; the change is internal to the Brain)
+
 // ── Status Codes ──────────────────────────────────────────────────────────────
 
 /// ABI status codes returned from every host function as `i32`.
@@ -242,7 +244,137 @@ pub mod ulp_mem {
     pub const LAST_VOLTAGE_MV: usize = 12;
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── Phase 5 — Distributed Robotics (Brain → Worker protocol) ─────────────────
+
+/// How often the Brain sends a keep-alive heartbeat to the Worker (ms).
+///
+/// Set below the Worker timeout so the Worker never misses two consecutive
+/// heartbeats under normal operating conditions.
+pub const HEARTBEAT_INTERVAL_MS: u64 = 40;
+
+/// Worker dead-man's switch timeout (ms).
+///
+/// If the Worker does not receive **any** valid packet from the Brain within
+/// this window, it zeroes all motor outputs to prevent a runaway robot.
+pub const WORKER_TIMEOUT_MS: u64 = 50;
+
+/// Worker command IDs used in Brain → Worker ESP-NOW packets.
+///
+/// These share the same SandOS magic header (`0x5A 0x4E`) as the PC → Brain
+/// packets but use a distinct command-ID range (`0x30–0x3F`) to avoid
+/// collisions with PC-originated commands.
+pub mod worker_cmd {
+    /// Motor speed command: payload = `[left_hi, left_lo, right_hi, right_lo]`
+    /// where left/right are signed `i16` values encoded big-endian.
+    pub const MOTOR_SPEED: u8 = 0x30;
+
+    /// Heartbeat: 4-byte header only (zero-length payload).
+    ///
+    /// Sent by the Brain every [`super::HEARTBEAT_INTERVAL_MS`] to prove it is
+    /// alive.  The Worker resets its dead-man's switch timer on receipt.
+    pub const HEARTBEAT: u8 = 0x31;
+
+    /// Emergency stop: Worker must zero all motor outputs immediately.
+    pub const EMERGENCY_STOP: u8 = 0x32;
+}
+
+/// An encoded Brain → Worker ESP-NOW packet.
+///
+/// Provides helper constructors that produce correctly framed byte arrays
+/// ready to pass to `esp_now.send_async()`.  All packets share the same
+/// SandOS magic header so the Worker can validate them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerPacket;
+
+impl WorkerPacket {
+    /// Build an 8-byte motor-speed packet.
+    ///
+    /// Layout: `[MAGIC[0], MAGIC[1], MOTOR_SPEED, 0x04, left_hi, left_lo, right_hi, right_lo]`
+    ///
+    /// Left and right speeds are `i16` encoded **big-endian** so byte 4 is
+    /// always the most-significant byte of `left`.
+    #[inline]
+    pub fn motor_speed(left: i16, right: i16) -> [u8; 8] {
+        let [lh, ll] = left.to_be_bytes();
+        let [rh, rl] = right.to_be_bytes();
+        [
+            EspNowCommand::MAGIC[0],
+            EspNowCommand::MAGIC[1],
+            worker_cmd::MOTOR_SPEED,
+            0x04, // payload length
+            lh, ll, rh, rl,
+        ]
+    }
+
+    /// Build a 4-byte heartbeat packet (header only, zero payload).
+    #[inline]
+    pub fn heartbeat() -> [u8; 4] {
+        [
+            EspNowCommand::MAGIC[0],
+            EspNowCommand::MAGIC[1],
+            worker_cmd::HEARTBEAT,
+            0x00, // payload length
+        ]
+    }
+
+    /// Build a 4-byte emergency-stop packet.
+    #[inline]
+    pub fn emergency_stop() -> [u8; 4] {
+        [
+            EspNowCommand::MAGIC[0],
+            EspNowCommand::MAGIC[1],
+            worker_cmd::EMERGENCY_STOP,
+            0x00,
+        ]
+    }
+
+    /// Decode a raw packet from the Worker's receiver buffer.
+    ///
+    /// Returns `None` if the data is too short or has an invalid magic header.
+    /// On success returns `(cmd_id, payload)` where `payload` is the slice
+    /// of bytes after the 4-byte header.
+    #[inline]
+    pub fn decode(data: &[u8]) -> Option<(u8, &[u8])> {
+        if data.len() < 4 {
+            return None;
+        }
+        if data[0] != EspNowCommand::MAGIC[0] || data[1] != EspNowCommand::MAGIC[1] {
+            return None;
+        }
+        let cmd_id = data[2];
+        let payload_len = data[3] as usize;
+        if 4 + payload_len > data.len() {
+            return None;
+        }
+        Some((cmd_id, &data[4..4 + payload_len]))
+    }
+
+    /// Parse motor speeds from a `MOTOR_SPEED` payload.
+    ///
+    /// `payload` must be the 4-byte slice returned by [`WorkerPacket::decode`].
+    /// Returns `None` if the payload is shorter than 4 bytes.
+    #[inline]
+    pub fn parse_motor_speed(payload: &[u8]) -> Option<(i16, i16)> {
+        if payload.len() < 4 {
+            return None;
+        }
+        let left  = i16::from_be_bytes([payload[0], payload[1]]);
+        let right = i16::from_be_bytes([payload[2], payload[3]]);
+        Some((left, right))
+    }
+}
+
+/// Determine whether the dead-man's switch should be triggered.
+///
+/// This pure function encapsulates the Worker's timeout check so it can be
+/// tested on the host without requiring ESP32 hardware.
+///
+/// Returns `true` when `elapsed_ms >= timeout_ms`, indicating the Brain has
+/// gone silent and all motors must be halted.
+#[inline]
+pub fn deadman_triggered(elapsed_ms: u64, timeout_ms: u64) -> bool {
+    elapsed_ms >= timeout_ms
+}
 
 #[cfg(test)]
 mod tests {
@@ -347,5 +479,111 @@ mod tests {
         for id in ids {
             assert!(seen.insert(id), "duplicate command ID: 0x{:02X}", id);
         }
+    }
+
+    // ── Phase 5 — Worker protocol ─────────────────────────────────────────────
+
+    #[test]
+    fn worker_packet_motor_speed_round_trips() {
+        let pkt = WorkerPacket::motor_speed(127, -200);
+        assert_eq!(pkt[0], EspNowCommand::MAGIC[0]);
+        assert_eq!(pkt[1], EspNowCommand::MAGIC[1]);
+        assert_eq!(pkt[2], worker_cmd::MOTOR_SPEED);
+        assert_eq!(pkt[3], 4); // payload length
+
+        let (cmd, payload) = WorkerPacket::decode(&pkt).expect("valid packet");
+        assert_eq!(cmd, worker_cmd::MOTOR_SPEED);
+        let (left, right) = WorkerPacket::parse_motor_speed(payload).expect("valid payload");
+        assert_eq!(left, 127);
+        assert_eq!(right, -200);
+    }
+
+    #[test]
+    fn worker_packet_heartbeat_format() {
+        let pkt = WorkerPacket::heartbeat();
+        assert_eq!(pkt.len(), 4);
+        assert_eq!(pkt[2], worker_cmd::HEARTBEAT);
+        assert_eq!(pkt[3], 0); // zero-length payload
+        let (cmd, payload) = WorkerPacket::decode(&pkt).expect("valid heartbeat");
+        assert_eq!(cmd, worker_cmd::HEARTBEAT);
+        assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn worker_packet_emergency_stop_format() {
+        let pkt = WorkerPacket::emergency_stop();
+        assert_eq!(pkt[2], worker_cmd::EMERGENCY_STOP);
+        let (cmd, _) = WorkerPacket::decode(&pkt).expect("valid e-stop");
+        assert_eq!(cmd, worker_cmd::EMERGENCY_STOP);
+    }
+
+    #[test]
+    fn worker_packet_decode_rejects_short_data() {
+        assert!(WorkerPacket::decode(&[]).is_none());
+        assert!(WorkerPacket::decode(&[0x5A, 0x4E, 0x30]).is_none());
+    }
+
+    #[test]
+    fn worker_packet_decode_rejects_bad_magic() {
+        let bad = [0xFF, 0xFF, worker_cmd::MOTOR_SPEED, 0x00];
+        assert!(WorkerPacket::decode(&bad).is_none());
+    }
+
+    #[test]
+    fn worker_packet_decode_rejects_truncated_payload() {
+        // Claims 4 bytes of payload but only 2 are present.
+        let bad = [EspNowCommand::MAGIC[0], EspNowCommand::MAGIC[1], worker_cmd::MOTOR_SPEED, 0x04, 0x00, 0x01];
+        assert!(WorkerPacket::decode(&bad).is_none());
+    }
+
+    #[test]
+    fn worker_packet_motor_speed_extreme_values() {
+        let pkt = WorkerPacket::motor_speed(i16::MAX, i16::MIN);
+        let (_, payload) = WorkerPacket::decode(&pkt).unwrap();
+        let (left, right) = WorkerPacket::parse_motor_speed(payload).unwrap();
+        assert_eq!(left, i16::MAX);
+        assert_eq!(right, i16::MIN);
+    }
+
+    #[test]
+    fn worker_cmd_ids_do_not_clash_with_brain_cmd_ids() {
+        let worker_ids = [
+            worker_cmd::MOTOR_SPEED,
+            worker_cmd::HEARTBEAT,
+            worker_cmd::EMERGENCY_STOP,
+        ];
+        let brain_ids = [
+            cmd::TOGGLE_LED,
+            cmd::LOAD_WASM,
+            cmd::DRAW_EYE,
+            cmd::WRITE_TEXT,
+            cmd::CLEAR_DISPLAY,
+            cmd::SET_MOTOR_SPEED,
+            cmd::EMERGENCY_STOP,
+        ];
+        for wid in worker_ids {
+            for bid in brain_ids {
+                assert_ne!(wid, bid,
+                    "worker cmd 0x{:02X} clashes with brain cmd 0x{:02X}", wid, bid);
+            }
+        }
+    }
+
+    #[test]
+    fn deadman_triggered_at_and_after_timeout() {
+        assert!(!deadman_triggered(0, WORKER_TIMEOUT_MS));
+        assert!(!deadman_triggered(WORKER_TIMEOUT_MS - 1, WORKER_TIMEOUT_MS));
+        assert!(deadman_triggered(WORKER_TIMEOUT_MS, WORKER_TIMEOUT_MS));
+        assert!(deadman_triggered(WORKER_TIMEOUT_MS + 1, WORKER_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn heartbeat_interval_is_less_than_worker_timeout() {
+        assert!(
+            HEARTBEAT_INTERVAL_MS < WORKER_TIMEOUT_MS,
+            "heartbeat interval ({} ms) must be shorter than worker timeout ({} ms)",
+            HEARTBEAT_INTERVAL_MS,
+            WORKER_TIMEOUT_MS,
+        );
     }
 }

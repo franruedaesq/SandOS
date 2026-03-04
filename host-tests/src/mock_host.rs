@@ -6,7 +6,7 @@
 
 use abi::{
     status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED,
-    MAX_TEXT_BYTES,
+    MAX_TEXT_BYTES, WorkerPacket,
 };
 
 // ── Mock display ──────────────────────────────────────────────────────────────
@@ -90,6 +90,14 @@ pub struct MockHost {
     /// Number of times the watchdog has been fed (incremented per ABI call
     /// in the harness to simulate the firmware's post-command WDT feed).
     pub watchdog_feed_count: u32,
+
+    // Phase 5 — Distributed robotics
+    /// Motor speed pairs queued for transmission to the Worker as ESP-NOW packets.
+    ///
+    /// Each entry represents a `WorkerPacket::motor_speed(left, right)` that the
+    /// Brain would send over the air.  Tests can inspect this queue to verify
+    /// that `set_motor_speed` encodes and enqueues the command correctly.
+    pub outgoing_worker_cmds: Vec<[u8; 8]>,
 }
 
 impl Default for MockHost {
@@ -107,6 +115,7 @@ impl Default for MockHost {
             motor_right_speed: 0,
             motors_enabled: true,
             watchdog_feed_count: 0,
+            outgoing_worker_cmds: Vec::new(),
         }
     }
 }
@@ -212,6 +221,15 @@ impl MockHost {
 
     /// Set the target speed for both drive motors.
     ///
+    /// ## Phase 5 behaviour
+    ///
+    /// In addition to updating `motor_left_speed` / `motor_right_speed` (kept
+    /// for backward compatibility with Phase 4 tests), this method now also
+    /// encodes a [`WorkerPacket::motor_speed`] frame and pushes it to
+    /// [`MockHost::outgoing_worker_cmds`].  Phase 5 tests can inspect this
+    /// queue to verify that the Brain correctly encodes and enqueues motor
+    /// commands for the Worker.
+    ///
     /// Validates the range `[-MAX_MOTOR_SPEED, MAX_MOTOR_SPEED]` and the
     /// `motors_enabled` flag, mirroring the firmware's `AbiHost::set_motor_speed`.
     ///
@@ -227,6 +245,9 @@ impl MockHost {
         self.motor_left_speed = left;
         self.motor_right_speed = right;
         self.watchdog_feed_count += 1;
+        // Phase 5: also encode as a WorkerPacket and push to the outgoing queue.
+        self.outgoing_worker_cmds
+            .push(WorkerPacket::motor_speed(left as i16, right as i16));
         status::OK
     }
 }

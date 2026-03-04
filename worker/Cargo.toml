@@ -1,0 +1,67 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name    = "worker"
+version = "0.1.0"
+edition = "2021"
+description = "SandOS Worker firmware for ESP32-S3 — stripped-down motor controller"
+license = "MIT"
+
+# This crate targets xtensa-esp32s3-none-elf.
+# Build with:  cd worker && cargo build --release
+# (requires the ESP Rust toolchain: cargo install espup && espup install)
+
+[dependencies]
+# ── Espressif HAL & Embassy ───────────────────────────────────────────────────
+esp-hal         = { version = "0.22", features = ["esp32s3"] }
+esp-hal-embassy = { version = "0.5",  features = ["esp32s3"] }
+embassy-executor = { version = "0.7", features = ["task-arena-size-32768"] }
+embassy-time    = { version = "0.4" }
+embassy-sync    = { version = "0.6" }
+
+# ── ESP-NOW wireless ─────────────────────────────────────────────────────────
+esp-wifi = { version = "0.10", features = [
+    "esp32s3",
+    "wifi",
+    "esp-now",
+    "async",
+] }
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+static_cell = { version = "2", features = ["nightly"] }
+heapless    = "0.8"
+
+# Shared ABI definitions (Worker protocol types + constants)
+abi = { path = "../abi", default-features = false }
+
+[build-dependencies]
+esp-build = "0.2"
+
+[features]
+default = []
+
+# Enable defmt logging (connect a probe for output)
+defmt = [
+    "dep:defmt",
+    "esp-hal/defmt",
+    "embassy-executor/defmt",
+    "embassy-time/defmt",
+]
+
+[dependencies.defmt]
+version  = "0.3"
+optional = true
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+debug         = false
+panic         = "abort"
+
+[profile.dev]
+opt-level = 0
+debug     = true
+panic     = "abort"
