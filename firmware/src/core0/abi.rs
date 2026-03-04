@@ -20,13 +20,17 @@
 //!
 //! ## Phase 3 functions
 //! - [`AbiHost::get_pitch_roll`]
+//!
+//! ## Phase 4 functions
+//! - [`AbiHost::set_motor_speed`]
 use abi::{
-    status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_TEXT_BYTES,
+    status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED,
+    MAX_TEXT_BYTES,
 };
 use esp_hal::gpio::Io;
 
 use crate::display::DisplayDriver;
-use crate::sensors;
+use crate::{motors, sensors};
 
 // ── Host state ────────────────────────────────────────────────────────────────
 
@@ -178,5 +182,35 @@ impl AbiHost {
     /// Returns an [`ImuReading`] with `pitch_millideg` and `roll_millideg`.
     pub fn get_pitch_roll(&self) -> ImuReading {
         sensors::load_imu()
+    }
+
+    // ── Phase 4 — Motors ──────────────────────────────────────────────────────
+
+    /// Set the target speed for the left and right drive motors.
+    ///
+    /// Speeds are in the signed range `[-MAX_MOTOR_SPEED, MAX_MOTOR_SPEED]`
+    /// where positive values drive the wheel forward and negative values drive
+    /// it backward.
+    ///
+    /// The Wasm guest uses this to issue *steering* commands.  Core 1 applies
+    /// these as an offset on top of its PID balance correction, so the robot
+    /// keeps balancing even while turning.
+    ///
+    /// ## Return codes
+    ///
+    /// | Value                   | Meaning                                      |
+    /// |-------------------------|----------------------------------------------|
+    /// | [`status::OK`]          | Command accepted and stored.                 |
+    /// | [`status::ERR_INVALID_ARG`] | Speed out of `[-255, 255]` range.        |
+    /// | [`status::ERR_BUSY`]    | Motors disabled (ULP safe-shutdown active).  |
+    pub fn set_motor_speed(&self, left: i32, right: i32) -> i32 {
+        if left.abs() > MAX_MOTOR_SPEED || right.abs() > MAX_MOTOR_SPEED {
+            return status::ERR_INVALID_ARG;
+        }
+        if motors::store_motor_command(left as i16, right as i16) {
+            status::OK
+        } else {
+            status::ERR_BUSY
+        }
     }
 }

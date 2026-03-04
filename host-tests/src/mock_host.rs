@@ -5,7 +5,8 @@
 //! that will run on the chip.
 
 use abi::{
-    status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_TEXT_BYTES,
+    status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED,
+    MAX_TEXT_BYTES,
 };
 
 // ── Mock display ──────────────────────────────────────────────────────────────
@@ -75,6 +76,20 @@ pub struct MockHost {
     // Phase 3 — Sensors
     /// Simulated IMU reading (set by tests to inject sensor data).
     pub imu_reading: ImuReading,
+
+    // Phase 4 — Motors
+    /// Most recently commanded left motor speed (−255 … +255).
+    pub motor_left_speed: i32,
+
+    /// Most recently commanded right motor speed (−255 … +255).
+    pub motor_right_speed: i32,
+
+    /// Whether the motors are currently enabled (false = safe-shutdown active).
+    pub motors_enabled: bool,
+
+    /// Number of times the watchdog has been fed (incremented per ABI call
+    /// in the harness to simulate the firmware's post-command WDT feed).
+    pub watchdog_feed_count: u32,
 }
 
 impl Default for MockHost {
@@ -88,6 +103,10 @@ impl Default for MockHost {
             log_messages: Vec::new(),
             simulated_uptime_ms: 0,
             imu_reading: ImuReading::default(),
+            motor_left_speed: 0,
+            motor_right_speed: 0,
+            motors_enabled: true,
+            watchdog_feed_count: 0,
         }
     }
 }
@@ -187,5 +206,27 @@ impl MockHost {
     /// Tests set [`MockHost::imu_reading`] directly to inject sensor data.
     pub fn get_pitch_roll(&self) -> ImuReading {
         self.imu_reading
+    }
+
+    // ── Phase 4 — Motors ──────────────────────────────────────────────────────
+
+    /// Set the target speed for both drive motors.
+    ///
+    /// Validates the range `[-MAX_MOTOR_SPEED, MAX_MOTOR_SPEED]` and the
+    /// `motors_enabled` flag, mirroring the firmware's `AbiHost::set_motor_speed`.
+    ///
+    /// Increments `watchdog_feed_count` to simulate the post-command WDT feed
+    /// that the firmware performs in `wasm_run_task`.
+    pub fn set_motor_speed(&mut self, left: i32, right: i32) -> i32 {
+        if left.abs() > MAX_MOTOR_SPEED || right.abs() > MAX_MOTOR_SPEED {
+            return status::ERR_INVALID_ARG;
+        }
+        if !self.motors_enabled {
+            return status::ERR_BUSY;
+        }
+        self.motor_left_speed = left;
+        self.motor_right_speed = right;
+        self.watchdog_feed_count += 1;
+        status::OK
     }
 }

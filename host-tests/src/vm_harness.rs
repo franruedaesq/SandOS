@@ -10,8 +10,8 @@ use std::rc::Rc;
 use abi::{
     status, validate_ptr_len, ImuReading, HOST_MODULE,
     FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS,
-    FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_START_AUDIO, FN_STOP_AUDIO,
-    FN_TOGGLE_LED, FN_WRITE_TEXT, MAX_AUDIO_READ, MAX_TEXT_BYTES,
+    FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO,
+    FN_TOGGLE_LED, FN_WRITE_TEXT, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
 };
 use wasmi::{Caller, Engine, Linker, Memory, Module, Store};
 
@@ -79,6 +79,23 @@ impl WasmHarness {
             .get_typed_func::<(i32, i32), i32>(&self.store, name)
             .unwrap_or_else(|_| panic!("export '{}' not found", name));
         f.call(&mut self.store, (a, b)).unwrap_or_else(|_| panic!("call '{}' failed", name))
+    }
+
+    /// Invoke a WAT export that is expected to trap (e.g., `unreachable`).
+    ///
+    /// Returns `Ok(result)` if the call succeeded without trapping, or
+    /// `Err(wasmi::Error)` if the guest trapped.  This is used by Phase 4
+    /// sandbox-isolation tests to verify that a Wasm trap does *not* crash
+    /// the host harness.
+    pub fn try_call_unit_i32(
+        &mut self,
+        instance: &wasmi::Instance,
+        name: &str,
+    ) -> Result<i32, wasmi::Error> {
+        let f = instance
+            .get_typed_func::<(), i32>(&self.store, name)
+            .map_err(wasmi::Error::from)?;
+        f.call(&mut self.store, ()).map_err(wasmi::Error::from)
     }
 }
 
@@ -214,6 +231,17 @@ fn build_linker(engine: &Engine) -> Linker<Rc<RefCell<MockHost>>> {
             data[roll_ptr as usize..roll_ptr as usize + 4]
                 .copy_from_slice(&roll_millideg.to_le_bytes());
             status::OK
+        }
+    ).unwrap();
+
+    // ── Phase 4 — Motors ──────────────────────────────────────────────────────
+
+    linker.func_wrap(HOST_MODULE, FN_SET_MOTOR_SPEED,
+        |caller: Caller<'_, Rc<RefCell<MockHost>>>, left: i32, right: i32| -> i32 {
+            if left.abs() > MAX_MOTOR_SPEED || right.abs() > MAX_MOTOR_SPEED {
+                return status::ERR_INVALID_ARG;
+            }
+            caller.data().borrow_mut().set_motor_speed(left, right)
         }
     ).unwrap();
 
