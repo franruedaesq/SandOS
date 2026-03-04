@@ -23,14 +23,23 @@
 //!
 //! ## Phase 4 functions
 //! - [`AbiHost::set_motor_speed`]
+//!
+//! ## Phase 5 — Message Bus
+//!
+//! `set_motor_speed` no longer writes to the motor-command bridge directly.
+//! Instead it creates a [`abi::MovementIntent`] and publishes it to the OS
+//! Message Bus ([`crate::message_bus`]).  The Routing Engine
+//! ([`crate::router`]) then dispatches the intent to either Core 1's local
+//! balancing loop (Single-Board mode) or the ESP-NOW radio stack (Distributed
+//! mode) — the Wasm sandbox never knows the difference.
 use abi::{
-    status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED,
-    MAX_TEXT_BYTES,
+    status, EyeExpression, ImuReading, MovementIntent, MAX_AUDIO_READ, MAX_BRIGHTNESS,
+    MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
 };
 use esp_hal::gpio::Io;
 
 use crate::display::DisplayDriver;
-use crate::{motors, sensors};
+use crate::{message_bus, motors, sensors};
 
 // ── Host state ────────────────────────────────────────────────────────────────
 
@@ -184,7 +193,7 @@ impl AbiHost {
         sensors::load_imu()
     }
 
-    // ── Phase 4 — Motors ──────────────────────────────────────────────────────
+    // ── Phase 4 / Phase 5 — Motors ────────────────────────────────────────────
 
     /// Set the target speed for the left and right drive motors.
     ///
@@ -192,22 +201,41 @@ impl AbiHost {
     /// where positive values drive the wheel forward and negative values drive
     /// it backward.
     ///
-    /// The Wasm guest uses this to issue *steering* commands.  Core 1 applies
-    /// these as an offset on top of its PID balance correction, so the robot
-    /// keeps balancing even while turning.
+    /// ## Phase 5 — Message Bus abstraction
+    ///
+    /// This method no longer writes to the motor-command bridge directly.
+    /// Instead it publishes a [`MovementIntent`] to the OS Message Bus so that
+    /// the Routing Engine ([`crate::router::router_task`]) can decide whether
+    /// to forward the intent to Core 1's local balancing loop (Single-Board
+    /// mode) or serialise it for ESP-NOW transmission (Distributed mode).
+    /// The Wasm sandbox is completely unaware of which backend is active.
+    ///
+    /// ## Motors-enabled gate
+    ///
+    /// The ULP safe-shutdown check (`MOTOR_ENABLED`) is applied here at the
+    /// ABI boundary — before the intent is published — so that a locked-out
+    /// safe-shutdown immediately surfaces as [`status::ERR_BUSY`] to the Wasm
+    /// guest rather than silently queueing intents that the Router would then
+    /// have to discard.  This matches the Phase 4 behaviour where
+    /// `store_motor_command` performed the same check.
     ///
     /// ## Return codes
     ///
-    /// | Value                   | Meaning                                      |
-    /// |-------------------------|----------------------------------------------|
-    /// | [`status::OK`]          | Command accepted and stored.                 |
-    /// | [`status::ERR_INVALID_ARG`] | Speed out of `[-255, 255]` range.        |
-    /// | [`status::ERR_BUSY`]    | Motors disabled (ULP safe-shutdown active).  |
+    /// | Value                       | Meaning                                    |
+    /// |-----------------------------|------------------------------------------- |
+    /// | [`status::OK`]              | Intent published and enqueued.             |
+    /// | [`status::ERR_INVALID_ARG`] | Speed out of `[-255, 255]` range.          |
+    /// | [`status::ERR_BUSY`]        | Motors disabled (ULP safe-shutdown active),|
+    /// |                             | or the intent queue is momentarily full.   |
     pub fn set_motor_speed(&self, left: i32, right: i32) -> i32 {
         if left.abs() > MAX_MOTOR_SPEED || right.abs() > MAX_MOTOR_SPEED {
             return status::ERR_INVALID_ARG;
         }
-        if motors::store_motor_command(left as i16, right as i16) {
+        if !motors::is_motor_enabled() {
+            return status::ERR_BUSY;
+        }
+        let intent = MovementIntent::new(left as i16, right as i16);
+        if message_bus::publish_intent(intent) {
             status::OK
         } else {
             status::ERR_BUSY
