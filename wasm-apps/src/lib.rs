@@ -213,7 +213,7 @@ pub extern "C" fn balance_handler() -> i32 {
         return imu_status;
     }
     // Scale pitch (millideg) to a PWM duty cycle in [-255, 255].
-    // 255 000 millideg = 255 degrees maps to full speed.
+    // 255_000 millideg = 255 degrees maps to full speed.
     let duty = (pitch / 1_000).clamp(-255, 255);
     unsafe { host_set_motor_speed(duty, duty) }
 }

@@ -29,7 +29,7 @@ pub struct PidController {
     kd: f32,
     /// Accumulated error × dt sum (integral term).
     integral: f32,
-    /// Error value from the previous [`update`] call (for the derivative term).
+    /// Error value from the previous [`PidController::update`] call (for the derivative term).
     prev_error: f32,
     /// Minimum allowed output value.
     output_min: f32,

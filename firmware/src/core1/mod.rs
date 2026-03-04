@@ -102,8 +102,15 @@ pub async fn realtime_task() {
             // (e.g., +50 left, -50 right to turn right).  The PID correction
             // is applied on top of this so the robot never stops balancing.
             let (cmd_left, cmd_right) = motors::load_motor_command();
-            let left = clamp_i16(balance_output as i32 + cmd_left as i32);
-            let right = clamp_i16(balance_output as i32 + cmd_right as i32);
+            // Use saturating addition before clamping to i16 to guard against
+            // the (unlikely) case where the PID output and command are both
+            // at their extreme values simultaneously.
+            let left = clamp_i16(
+                (balance_output as i32).saturating_add(cmd_left as i32),
+            );
+            let right = clamp_i16(
+                (balance_output as i32).saturating_add(cmd_right as i32),
+            );
 
             // ── 5. Apply PWM ──────────────────────────────────────────────────
             // In production: write `left` and `right` to the LEDC / MCPWM

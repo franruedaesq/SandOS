@@ -214,8 +214,8 @@ fn wasm_set_motor_speed_left_out_of_range_returns_error() {
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::ERR_INVALID_ARG);
-    assert_eq!(harness.host().motor_left_speed, 0, "speed must not change on error");
-    assert_eq!(harness.host().motor_right_speed, 0, "speed must not change on error");
+    assert_eq!(harness.host().motor_left_speed, 0, "left speed must not change on error");
+    assert_eq!(harness.host().motor_right_speed, 0, "right speed must not change on error");
 }
 
 /// `host_set_motor_speed` with an out-of-range right speed returns ERR_INVALID_ARG.
@@ -260,8 +260,8 @@ fn wasm_set_motor_speed_blocked_by_safe_shutdown() {
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::ERR_BUSY);
-    assert_eq!(harness.host().motor_left_speed, 0, "speed must remain 0 during shutdown");
-    assert_eq!(harness.host().motor_right_speed, 0);
+    assert_eq!(harness.host().motor_left_speed, 0, "left speed must remain 0 during shutdown");
+    assert_eq!(harness.host().motor_right_speed, 0, "right speed must remain 0 during shutdown");
 }
 
 // ── Sandbox isolation (Chaos Test) ────────────────────────────────────────────
