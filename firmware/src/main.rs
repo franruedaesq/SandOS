@@ -28,6 +28,7 @@ use static_cell::StaticCell;
 mod core0;
 mod core1;
 mod display;
+mod sensors;
 mod ulp;
 
 // ── Global heap allocator (PSRAM region for the Wasm engine) ─────────────────
@@ -35,17 +36,17 @@ mod ulp;
 #[global_allocator]
 static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
 
-/// Reserve 512 KiB of PSRAM for the Wasm engine heap.
+/// Initialise the heap allocator in external PSRAM.
 ///
-/// The internal SRAM is left untouched so Core 1's real-time stack and
-/// Embassy task arenas remain in fast memory.
+/// The Wasm engine (engine + store + module) is large and latency-tolerant,
+/// so it belongs in the slower external PSRAM rather than the scarce internal
+/// SRAM.  Internal SRAM is reserved for Core 1's stack, Embassy task arenas,
+/// and the IMU atomic variable so those paths stay deterministic.
+///
+/// The `psram_allocator!` macro locates the PSRAM region at the address
+/// provided by `esp_hal::psram` and registers it with the allocator.
 fn init_heap() {
-    use core::mem::MaybeUninit;
-    const HEAP_SIZE: usize = 512 * 1024;
-    static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
-    unsafe {
-        ALLOCATOR.init(HEAP.as_mut_ptr() as *mut u8, HEAP_SIZE);
-    }
+    esp_alloc::psram_allocator!(esp_hal::psram::psram(), esp_hal::psram);
 }
 
 // ── Core 1 stack ──────────────────────────────────────────────────────────────
