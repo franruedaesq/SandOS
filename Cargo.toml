@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "abi",
+    "host-tests",
+    "wasm-apps",
+    # NOTE: "firmware" requires the ESP toolchain + xtensa-esp32s3-none-elf target.
+    # Build via: cargo install espup && espup install && . $HOME/export-esp.sh
+    #            cd firmware && cargo build --release
+]
+resolver = "2"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "fat"
+codegen-units = 1
+
+# Wasm guest app release profile (size-optimized for embedding in firmware).
+[profile.release-wasm]
+inherits  = "release"
+opt-level = "z"
+lto       = true
+strip     = true

@@ -1,0 +1,11 @@
+# Firmware-specific build configuration.
+# Requires the ESP Rust toolchain: cargo install espup && espup install
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[target.xtensa-esp32s3-none-elf]
+runner    = "espflash flash --monitor"
+rustflags = [
+    "-C", "link-arg=-nostartfiles",
+]

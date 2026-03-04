@@ -1,0 +1,11 @@
+# Host-side development uses the standard stable toolchain.
+# Run `cargo test -p host-tests` with this toolchain.
+#
+# For firmware compilation (xtensa-esp32s3-none-elf target), install the
+# Espressif Rust fork:
+#   cargo install espup && espup install && . $HOME/export-esp.sh
+# Then build via:
+#   cd firmware && cargo +esp build --release
+[toolchain]
+channel    = "stable"
+components = ["rustfmt", "clippy"]
