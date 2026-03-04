@@ -51,6 +51,9 @@ pub const FN_READ_AUDIO:         &str = "host_read_audio";
 // Phase 3 — Sensor functions
 pub const FN_GET_PITCH_ROLL:     &str = "host_get_pitch_roll";
 
+// Phase 4 — Motor functions
+pub const FN_SET_MOTOR_SPEED:    &str = "host_set_motor_speed";
+
 // ── Status Codes ──────────────────────────────────────────────────────────────
 
 /// ABI status codes returned from every host function as `i32`.
@@ -151,6 +154,10 @@ pub mod cmd {
     pub const WRITE_TEXT: u8 = 0x11;
     /// Flush / clear the display (Phase 2).
     pub const CLEAR_DISPLAY: u8 = 0x12;
+    /// Set motor speeds (Phase 4): payload = [left_hi, left_lo, right_hi, right_lo].
+    pub const SET_MOTOR_SPEED: u8 = 0x20;
+    /// Emergency stop — zero all motors immediately (Phase 4).
+    pub const EMERGENCY_STOP: u8 = 0x21;
 }
 
 // ── IMU Sensor Data ───────────────────────────────────────────────────────────
@@ -199,6 +206,12 @@ pub const MAX_BRIGHTNESS: i32 = 255;
 
 /// Maximum audio chunk size for a single `host_read_audio` call (bytes).
 pub const MAX_AUDIO_READ: u32 = 1024;
+
+/// Maximum motor speed magnitude accepted by `host_set_motor_speed`.
+///
+/// Speeds are in the signed range `[-MAX_MOTOR_SPEED, MAX_MOTOR_SPEED]`
+/// where positive values drive forward and negative values drive backward.
+pub const MAX_MOTOR_SPEED: i32 = 255;
 
 /// Wasm linear memory page size (64 KiB).
 pub const WASM_PAGE_SIZE: u32 = 65_536;
@@ -311,5 +324,28 @@ mod tests {
         let decoded = ImuReading::decode(reading.encode());
         assert_eq!(decoded.pitch_millideg, -90_000);
         assert_eq!(decoded.roll_millideg, 180_000);
+    }
+
+    #[test]
+    fn motor_speed_bounds_are_symmetric() {
+        assert_eq!(MAX_MOTOR_SPEED, 255);
+        assert!(-MAX_MOTOR_SPEED <= 0);
+    }
+
+    #[test]
+    fn motor_cmd_ids_are_unique() {
+        let ids = [
+            cmd::TOGGLE_LED,
+            cmd::LOAD_WASM,
+            cmd::DRAW_EYE,
+            cmd::WRITE_TEXT,
+            cmd::CLEAR_DISPLAY,
+            cmd::SET_MOTOR_SPEED,
+            cmd::EMERGENCY_STOP,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for id in ids {
+            assert!(seen.insert(id), "duplicate command ID: 0x{:02X}", id);
+        }
     }
 }

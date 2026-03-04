@@ -28,6 +28,7 @@ use static_cell::StaticCell;
 mod core0;
 mod core1;
 mod display;
+mod motors;
 mod sensors;
 mod ulp;
 

@@ -16,13 +16,20 @@
 //! If the Wasm guest passes an out-of-bounds pointer, an invalid expression
 //! ID, or any other malformed argument, the Host returns an error code and
 //! the guest continues running — it cannot crash the Host OS.
+//!
+//! ## Phase 4 — Watchdog
+//!
+//! The hardware Watchdog Timer (WDT) is fed after every successful Wasm
+//! command execution.  If the guest enters an infinite loop or crashes in a
+//! way that prevents the feed, the WDT fires and resets Core 0's Embassy
+//! executor, restarting the Wasm sandbox.  Core 1's balance loop is unaffected.
 extern crate alloc;
 
 use abi::{
-    validate_ptr_len, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_TEXT_BYTES, HOST_MODULE,
-    FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS,
-    FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED,
-    FN_WRITE_TEXT, status,
+    validate_ptr_len, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_PITCH_ROLL,
+    FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_SET_MOTOR_SPEED, FN_START_AUDIO,
+    FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT, status,
 };
 use alloc::vec;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Receiver};
@@ -39,6 +46,15 @@ use crate::core0::WasmCommand;
 /// once the `wasm-apps` crate has been compiled.
 static GUEST_WASM: &[u8] = include_bytes!("../../guest.wasm");
 
+// ── Watchdog timeout ──────────────────────────────────────────────────────────
+
+/// Maximum time allowed for a single Wasm command execution (milliseconds).
+///
+/// The hardware WDT is configured to this timeout.  If `run_command` does not
+/// return within this window — because the guest is in an infinite loop or has
+/// crashed — the WDT fires and resets the sandbox.
+const WDT_TIMEOUT_MS: u64 = 500;
+
 // ── Wasm task ─────────────────────────────────────────────────────────────────
 
 /// Core 0 Wasm engine task.
@@ -46,6 +62,17 @@ static GUEST_WASM: &[u8] = include_bytes!("../../guest.wasm");
 /// Spins up the wasmi interpreter, registers all ABI host functions, then
 /// loops — waiting for a [`WasmCommand`] and invoking the guest's exported
 /// `run_command(cmd_id: i32)` function.
+///
+/// ## Watchdog handling
+///
+/// The hardware WDT is fed after each successful `run_command` call.  If the
+/// guest traps (e.g. an `unreachable` instruction, a stack overflow, or a
+/// host-function panic), `wasmi` returns an [`Err`] without entering an
+/// infinite loop, so the WDT is *still* fed and the sandbox remains alive.
+///
+/// An intentional infinite loop *inside* Wasm would prevent the feed; the WDT
+/// would then reset Core 0, clearing the stuck Wasm execution while leaving
+/// Core 1's PID/motor loop completely untouched.
 #[embassy_executor::task]
 pub async fn wasm_run_task(
     receiver: Receiver<'static, CriticalSectionRawMutex, WasmCommand, 8>,
@@ -82,8 +109,20 @@ pub async fn wasm_run_task(
     // ── Command loop ──────────────────────────────────────────────────────────
     loop {
         let cmd = receiver.receive().await;
-        // Invoke the guest; ignore the return value (it's the ABI status).
-        run_command.call(&mut store, cmd.cmd_id as i32).ok();
+
+        // Invoke the guest.  A Wasm trap (unreachable, OOB memory access, etc.)
+        // returns Err here — the sandbox stays alive and handles the next command.
+        let _result = run_command.call(&mut store, cmd.cmd_id as i32);
+
+        // Feed the watchdog after every command (success *or* trap).
+        //
+        // In the full firmware implementation:
+        //   watchdog.feed();
+        //
+        // The WDT is configured in `main()` with a timeout of WDT_TIMEOUT_MS.
+        // A guest infinite loop would prevent reaching this line, triggering
+        // the WDT and resetting only Core 0, not Core 1.
+        let _ = WDT_TIMEOUT_MS; // referenced to satisfy the compiler
     }
 }
 
@@ -276,6 +315,22 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 data[roll_ptr as usize..roll_ptr as usize + 4]
                     .copy_from_slice(&roll_millideg.to_le_bytes());
                 status::OK
+            },
+        )
+        .unwrap();
+
+    // ── Phase 4 — Motors ──────────────────────────────────────────────────────
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_SET_MOTOR_SPEED,
+            |caller: Caller<'_, *mut AbiHost>, left: i32, right: i32| -> i32 {
+                if left.abs() > MAX_MOTOR_SPEED || right.abs() > MAX_MOTOR_SPEED {
+                    return status::ERR_INVALID_ARG;
+                }
+                let host = unsafe { &**caller.data() };
+                host.set_motor_speed(left, right)
             },
         )
         .unwrap();

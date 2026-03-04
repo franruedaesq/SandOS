@@ -1,4 +1,4 @@
-//! SandOS Guest Wasm Application — Phase 1 & Phase 2
+//! SandOS Guest Wasm Application — Phase 1, 2, 3 & 4
 //!
 //! This is the "brain" that runs inside the Wasm sandbox on Core 0.
 //! It cannot access any hardware directly; all hardware interactions
@@ -64,14 +64,36 @@ extern "C" {
     fn host_read_audio(ptr: *mut u8, max_len: i32) -> i32;
 }
 
+// ── ABI Imports (Phase 3 — Sensors) ──────────────────────────────────────────
+
+extern "C" {
+    /// Read the latest IMU pitch and roll values into the provided pointers.
+    /// Both `pitch_ptr` and `roll_ptr` must point to valid i32 slots in Wasm memory.
+    fn host_get_pitch_roll(pitch_ptr: *mut i32, roll_ptr: *mut i32) -> i32;
+}
+
+// ── ABI Imports (Phase 4 — Motors) ───────────────────────────────────────────
+
+extern "C" {
+    /// Set the target speed for the left and right drive motors.
+    ///
+    /// Speeds are in the range `[-255, 255]`.  Positive values drive forward,
+    /// negative values drive backward.  Returns `ABI_OK` (0) on success,
+    /// `ERR_INVALID_ARG` (2) if a speed is out of range, or `ERR_BUSY` (3)
+    /// if the ULP safe-shutdown is active.
+    fn host_set_motor_speed(left: i32, right: i32) -> i32;
+}
+
 // ── Command IDs ───────────────────────────────────────────────────────────────
 
 /// Well-known command IDs matching [`abi::cmd`].
 mod cmd {
-    pub const TOGGLE_LED:    u8 = 0x01;
-    pub const DRAW_EYE:      u8 = 0x10;
-    pub const WRITE_TEXT:    u8 = 0x11;
-    pub const CLEAR_DISPLAY: u8 = 0x12;
+    pub const TOGGLE_LED:      u8 = 0x01;
+    pub const DRAW_EYE:        u8 = 0x10;
+    pub const WRITE_TEXT:      u8 = 0x11;
+    pub const CLEAR_DISPLAY:   u8 = 0x12;
+    pub const SET_MOTOR_SPEED: u8 = 0x20;
+    pub const EMERGENCY_STOP:  u8 = 0x21;
 }
 
 // ── Eye expression discriminants (must match [`abi::EyeExpression`]) ──────────
@@ -102,11 +124,13 @@ static mut TOGGLE_COUNT: u32 = 0;
 #[no_mangle]
 pub extern "C" fn run_command(cmd_id: i32) -> i32 {
     match cmd_id as u8 {
-        cmd::TOGGLE_LED => toggle_led_handler(),
-        cmd::DRAW_EYE => draw_eye_handler(eye::HAPPY),
-        cmd::WRITE_TEXT => write_text_handler(b"Hello, World!"),
-        cmd::CLEAR_DISPLAY => clear_display_handler(),
-        _ => 1, // Unknown command
+        cmd::TOGGLE_LED      => toggle_led_handler(),
+        cmd::DRAW_EYE        => draw_eye_handler(eye::HAPPY),
+        cmd::WRITE_TEXT      => write_text_handler(b"Hello, World!"),
+        cmd::CLEAR_DISPLAY   => clear_display_handler(),
+        cmd::SET_MOTOR_SPEED => balance_handler(),
+        cmd::EMERGENCY_STOP  => emergency_stop_handler(),
+        _                    => 1, // Unknown command
     }
 }
 
@@ -172,6 +196,31 @@ pub extern "C" fn handle_llm_response(ptr: *const u8, len: i32, mood: i32) -> i3
 
     // 2. Display the LLM's text.
     unsafe { host_write_text(ptr, len) }
+}
+
+/// Phase 4: Read current pitch from the IMU and set motor speeds proportionally.
+///
+/// This function implements the Wasm-side of the balance loop: it requests
+/// the latest IMU reading and translates pitch into a symmetric motor command.
+/// The real balance correction is performed by the PID controller on Core 1;
+/// this call provides a high-level "intent" for steering/speed adjustment.
+#[no_mangle]
+pub extern "C" fn balance_handler() -> i32 {
+    let mut pitch: i32 = 0;
+    let mut roll: i32 = 0;
+    let imu_status = unsafe { host_get_pitch_roll(&mut pitch as *mut i32, &mut roll as *mut i32) };
+    if imu_status != 0 {
+        return imu_status;
+    }
+    // Scale pitch (millideg) to a PWM duty cycle in [-255, 255].
+    // 255 000 millideg = 255 degrees maps to full speed.
+    let duty = (pitch / 1_000).clamp(-255, 255);
+    unsafe { host_set_motor_speed(duty, duty) }
+}
+
+/// Phase 4: Set both motors to zero — immediate stop.
+fn emergency_stop_handler() -> i32 {
+    unsafe { host_set_motor_speed(0, 0) }
 }
 
 // ── panic handler (required for no_std) ──────────────────────────────────────
