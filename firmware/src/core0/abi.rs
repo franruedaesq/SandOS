@@ -54,9 +54,9 @@
 //!   push audio snapshots into the fallback inference channel when the radio
 //!   link is detected as silent.
 use abi::{
-    status, EyeExpression, ImuReading, ImuTelemetry, InferenceResult, MovementIntent,
+    self, status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent,
     OdometryTelemetry, OtaState, OtaStatus, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
-    MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_STATUS_SIZE,
+    MAX_CMD_PAYLOAD, MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_STATUS_SIZE,
 };
 use esp_hal::gpio::Io;
 
@@ -73,9 +73,6 @@ pub struct AbiHost {
     /// Current state of the onboard LED.
     pub led_on: bool,
 
-    /// Millisecond timestamp of firmware boot (set in `brain_task`).
-    pub boot_time_ms: u64,
-
     // Phase 2
     /// Handle to the DMA display driver.
     pub display: DisplayDriver,
@@ -85,6 +82,14 @@ pub struct AbiHost {
 
     /// Simple ring buffer for incoming I2S audio data (8 KiB).
     pub audio_buf: heapless::Deque<u8, 8192>,
+
+    // Command payload bridge — set by the Wasm task before each run_command
+    // call so the guest can retrieve the raw ESP-NOW payload via
+    // host_get_cmd_payload().
+    /// Inline storage for the current command's payload bytes.
+    pub pending_cmd_payload: [u8; MAX_CMD_PAYLOAD],
+    /// Valid byte count within [`pending_cmd_payload`].
+    pub pending_cmd_payload_len: usize,
 
     // Phase 8 — OTA Hot-Swap Engine
     /// Current state of the OTA state machine.
@@ -108,10 +113,11 @@ impl AbiHost {
     pub fn new(io: Io, display: DisplayDriver) -> Self {
         Self {
             led_on: false,
-            boot_time_ms: 0,
             display,
             audio_active: false,
             audio_buf: heapless::Deque::new(),
+            pending_cmd_payload: [0u8; MAX_CMD_PAYLOAD],
+            pending_cmd_payload_len: 0,
             ota_state: OtaState::Idle,
             ota_expected_size: 0,
             ota_bytes_received: 0,
@@ -194,8 +200,15 @@ impl AbiHost {
     }
 
     /// Stop microphone streaming.
+    ///
+    /// Also pushes the captured audio buffer snapshot into the fallback
+    /// inference channel ([`AbiHost::push_audio_for_inference`]) so that
+    /// the Router can run a local inference pass when the radio link is silent.
     pub fn stop_audio_capture(&mut self) -> i32 {
         self.audio_active = false;
+        // Push whatever is in the buffer to the inference pipeline
+        // (best-effort: silently dropped if the inference channel is full).
+        self.push_audio_for_inference();
         status::OK
     }
 
@@ -230,6 +243,63 @@ impl AbiHost {
     /// Returns an [`ImuReading`] with `pitch_millideg` and `roll_millideg`.
     pub fn get_pitch_roll(&self) -> ImuReading {
         sensors::load_imu()
+    }
+
+    // ── Command Payload Access ────────────────────────────────────────────────
+
+    /// Return the raw payload bytes of the current Wasm command.
+    ///
+    /// Writes up to [`MAX_CMD_PAYLOAD`] bytes from the pending command payload
+    /// into the caller-supplied output buffer starting at `out`.  Returns the
+    /// number of bytes actually written.
+    ///
+    /// Called from the `host_get_cmd_payload(out_ptr, max_len) -> i32` ABI
+    /// function so the Wasm guest can inspect the raw ESP-NOW payload that
+    /// accompanied the most recent `run_command(cmd_id)` dispatch.
+    ///
+    /// ## Return codes
+    ///
+    /// | Value                  | Meaning                                       |
+    /// |------------------------|-----------------------------------------------|
+    /// | `≥ 0`                  | Number of bytes written into `out`.           |
+    /// | [`status::ERR_BOUNDS`] | `out.len()` < `pending_cmd_payload_len`.      |
+    pub fn get_cmd_payload(&self, out: &mut [u8]) -> i32 {
+        let n = self.pending_cmd_payload_len;
+        if out.len() < n {
+            return status::ERR_BOUNDS;
+        }
+        out[..n].copy_from_slice(&self.pending_cmd_payload[..n]);
+        n as i32
+    }
+
+    // ── Phase 5 — Routing Mode ────────────────────────────────────────────────
+
+    /// Return the current [`abi::RoutingMode`] as an `i32` (0 = SingleBoard,
+    /// 1 = Distributed).
+    pub fn get_routing_mode(&self) -> i32 {
+        message_bus::get_routing_mode() as i32
+    }
+
+    /// Set the routing mode from the Wasm guest.
+    ///
+    /// `mode_raw` must be 0 (SingleBoard) or 1 (Distributed).  Any other
+    /// value returns [`status::ERR_INVALID_ARG`].
+    ///
+    /// Takes `&self` for ABI uniformity — all host functions are dispatched
+    /// through `Caller::data()` and the same `AbiHost` receiver.  Future
+    /// phases may add routing-mode preferences to the host state.
+    pub fn set_routing_mode(&self, mode_raw: i32) -> i32 {
+        match mode_raw {
+            0 => {
+                message_bus::set_routing_mode(abi::RoutingMode::SingleBoard);
+                status::OK
+            }
+            1 => {
+                message_bus::set_routing_mode(abi::RoutingMode::Distributed);
+                status::OK
+            }
+            _ => status::ERR_INVALID_ARG,
+        }
     }
 
     // ── Phase 4 / Phase 5 — Motors ────────────────────────────────────────────

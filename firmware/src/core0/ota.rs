@@ -48,6 +48,7 @@ pub struct OtaReceiver {
     /// Running count of payload bytes written (for progress reporting).
     bytes_received: u32,
     /// Number of successful hot-swaps completed since firmware boot.
+    #[allow(dead_code)]
     swap_count: u32,
 }
 
@@ -64,24 +65,29 @@ impl OtaReceiver {
     }
 
     /// Current OTA state.
+    #[allow(dead_code)]
     #[inline]
     pub fn state(&self) -> OtaState { self.state }
 
     /// Bytes written to the staging buffer so far.
+    #[allow(dead_code)]
     #[inline]
     pub fn bytes_received(&self) -> u32 { self.bytes_received }
 
     /// Expected total size declared in `OTA_BEGIN`.
+    #[allow(dead_code)]
     #[inline]
     pub fn total_size(&self) -> u32 { self.total_size }
 
     /// Number of completed hot-swaps.
+    #[allow(dead_code)]
     #[inline]
     pub fn swap_count(&self) -> u32 { self.swap_count }
 
     /// Return an immutable reference to the verified binary, if ready.
     ///
     /// Returns `Some` only when `state == OtaState::Ready`; `None` otherwise.
+    #[allow(dead_code)]
     pub fn ready_binary(&self) -> Option<&[u8]> {
         if self.state == OtaState::Ready {
             Some(&self.buffer)
@@ -223,6 +229,7 @@ impl OtaReceiver {
     }
 
     /// Reset a `Failed` session so that a new `OTA_BEGIN` can be accepted.
+    #[allow(dead_code)]
     pub fn reset_failed(&mut self) {
         if self.state == OtaState::Failed {
             self.buffer.clear();

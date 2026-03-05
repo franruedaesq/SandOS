@@ -15,17 +15,19 @@
 //!
 //! The Wasm VM and the Router communicate through a lock-free Embassy channel
 //! (the OS Message Bus) so the real-time routing loop never blocks the engine.
+extern crate alloc;
+
 pub mod abi;
 pub mod espnow;
 pub mod ota;
 pub mod wasm_vm;
 
 use abi::AbiHost;
+use alloc::vec::Vec;
 use embassy_executor::Spawner;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::Channel,
-    signal::Signal,
 };
 use esp_hal::{gpio::Io, peripherals::WIFI};
 
@@ -50,15 +52,18 @@ const CMD_QUEUE_DEPTH: usize = 8;
 static CMD_CHANNEL: Channel<CriticalSectionRawMutex, WasmCommand, CMD_QUEUE_DEPTH> =
     Channel::new();
 
-// ── Phase 8 — OTA hot-swap signal ────────────────────────────────────────────
+// ── Phase 8 — OTA binary hand-off channel ────────────────────────────────────
 
-/// Signal sent from the ESP-NOW OTA handler to the Wasm engine task when a
-/// verified binary is ready for hot-swapping.
+/// Channel that carries the verified OTA Wasm binary from the ESP-NOW receiver
+/// task to the Wasm engine task.
 ///
-/// The signal carries the exact byte count of the new binary so the Wasm task
-/// can allocate the right amount of memory from PSRAM before reading the
-/// staging buffer.
-pub static OTA_SWAP_SIGNAL: Signal<CriticalSectionRawMutex, u32> = Signal::new();
+/// Capacity is 1: if a new binary arrives before the previous swap completes,
+/// the sender silently discards it (the new `OTA_BEGIN` will cancel the
+/// previous session anyway).  The receiver (`wasm_run_task`) polls this
+/// channel before each command dispatch and performs the hot-swap when a
+/// binary is available.
+pub static OTA_BINARY_CHANNEL: Channel<CriticalSectionRawMutex, Vec<u8>, 1> =
+    Channel::new();
 
 // ── Main Brain task ───────────────────────────────────────────────────────────
 
