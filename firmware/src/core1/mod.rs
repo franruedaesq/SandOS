@@ -28,11 +28,11 @@
 //! cannot override the balancing loop or exceed the PWM clamps.
 mod pid;
 
-use abi::ImuReading;
-use embassy_time::{Duration, Ticker};
+use abi::{ImuReading, ImuTelemetry, OdometryTelemetry, TelemetryPacket, TELEMETRY_DECIMATION};
+use embassy_time::{Duration, Instant, Ticker};
 use pid::PidController;
 
-use crate::{motors, sensors, ulp};
+use crate::{motors, sensors, telemetry, ulp};
 
 // ── Real-time loop period ─────────────────────────────────────────────────────
 
@@ -71,13 +71,19 @@ const PID_OUT_MAX: f32 = 255.0;
 /// 4. Runs the PID controller to compute a balance correction.
 /// 5. Blends the PID output with the steering command from Core 0.
 /// 6. Applies the result to the motor PWM hardware.
+/// 7. Every [`TELEMETRY_DECIMATION`] ticks, formats and pushes a structured
+///    [`ImuTelemetry`] and [`OdometryTelemetry`] packet to the radio TX queue.
 #[embassy_executor::task]
 pub async fn realtime_task() {
     let mut ticker = Ticker::every(Duration::from_millis(RT_LOOP_PERIOD_MS));
     let mut tick_count: u64 = 0;
+    let mut imu_seq:  u32 = 0;
+    let mut odom_seq: u32 = 0;
     let mut pid = PidController::new(PID_KP, PID_KI, PID_KD, PID_OUT_MIN, PID_OUT_MAX);
 
     loop {
+        let loop_start = Instant::now();
+
         // ── 1. IMU read ───────────────────────────────────────────────────────
         // Stub: synthesised oscillation until the real sensor is wired up.
         let reading = simulate_imu(tick_count);
@@ -92,6 +98,7 @@ pub async fn realtime_task() {
         }
 
         // ── 3. PID balance loop ───────────────────────────────────────────────
+        let (left, right);
         if motors::is_motor_enabled() {
             // Convert millidegrees → degrees for the PID (setpoint = 0 = upright).
             let pitch_deg = reading.pitch_millideg as f32 / 1000.0;
@@ -105,10 +112,10 @@ pub async fn realtime_task() {
             // Use saturating addition before clamping to i16 to guard against
             // the (unlikely) case where the PID output and command are both
             // at their extreme values simultaneously.
-            let left = clamp_i16(
+            left = clamp_i16(
                 (balance_output as i32).saturating_add(cmd_left as i32),
             );
-            let right = clamp_i16(
+            right = clamp_i16(
                 (balance_output as i32).saturating_add(cmd_right as i32),
             );
 
@@ -125,6 +132,41 @@ pub async fn realtime_task() {
         } else {
             // Motors are disabled — ensure hardware PWM outputs are zeroed.
             // In production: ledc_left.set_duty(0).ok(); ledc_right.set_duty(0).ok();
+            left  = 0;
+            right = 0;
+        }
+
+        // ── 6. Structured telemetry (Phase 6) ─────────────────────────────────
+        // Emit one packet every TELEMETRY_DECIMATION ticks (100 pps @ 500 Hz).
+        if tick_count % TELEMETRY_DECIMATION == 0 {
+            let now_us   = Instant::now().as_micros();
+            let elapsed  = loop_start.elapsed();
+            let loop_us  = elapsed.as_micros() as u32;
+
+            // IMU telemetry — ROS 2 sensor_msgs/Imu-inspired.
+            let imu_pkt = ImuTelemetry {
+                sequence:              imu_seq,
+                timestamp_us:          now_us,
+                loop_time_us:          loop_us,
+                pitch_millideg:        reading.pitch_millideg,
+                roll_millideg:         reading.roll_millideg,
+                yaw_rate_millideg_s:   0, // stub: requires gyroscope integration
+                linear_accel_x_mm_s2:  0, // stub: requires accelerometer integration
+                linear_accel_y_mm_s2:  0,
+            };
+            telemetry::push_telemetry(TelemetryPacket::Imu(imu_pkt));
+            imu_seq = imu_seq.wrapping_add(1);
+
+            // Odometry telemetry — ROS 2 nav_msgs/Odometry-inspired.
+            let odom_pkt = OdometryTelemetry {
+                sequence:     odom_seq,
+                timestamp_us: now_us,
+                loop_time_us: loop_us,
+                left_speed:   left,
+                right_speed:  right,
+            };
+            telemetry::push_telemetry(TelemetryPacket::Odometry(odom_pkt));
+            odom_seq = odom_seq.wrapping_add(1);
         }
 
         tick_count = tick_count.wrapping_add(1);

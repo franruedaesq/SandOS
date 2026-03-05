@@ -84,16 +84,44 @@ extern "C" {
     fn host_set_motor_speed(left: i32, right: i32) -> i32;
 }
 
+// ── ABI Imports (Phase 6 — Structured Telemetry) ─────────────────────────────
+
+extern "C" {
+    /// Emit a CDR-encoded ImuTelemetry payload from Wasm linear memory.
+    ///
+    /// `ptr` points to [`IMU_CDR_SIZE`] bytes of CDR data; `len` must equal
+    /// [`IMU_CDR_SIZE`].  The host deserializes the payload and pushes it to
+    /// the async radio TX queue.
+    ///
+    /// Returns `ABI_OK` (0) on success, `ERR_BOUNDS` (5) for wrong size, or
+    /// `ERR_BUSY` (3) when the TX queue is full.
+    fn host_emit_imu_telemetry(ptr: *const u8, len: i32) -> i32;
+
+    /// Emit a CDR-encoded OdometryTelemetry payload from Wasm linear memory.
+    ///
+    /// `ptr` points to [`ODOM_CDR_SIZE`] bytes of CDR data; `len` must equal
+    /// [`ODOM_CDR_SIZE`].
+    fn host_emit_odom_telemetry(ptr: *const u8, len: i32) -> i32;
+
+    /// Return the number of packets currently queued in the telemetry TX channel.
+    ///
+    /// The guest can poll this value for flow-control (e.g., back off if the
+    /// queue is nearly full).
+    fn host_get_telemetry_queue_len() -> i32;
+}
+
 // ── Command IDs ───────────────────────────────────────────────────────────────
 
 /// Well-known command IDs matching [`abi::cmd`].
 mod cmd {
-    pub const TOGGLE_LED:      u8 = 0x01;
-    pub const DRAW_EYE:        u8 = 0x10;
-    pub const WRITE_TEXT:      u8 = 0x11;
-    pub const CLEAR_DISPLAY:   u8 = 0x12;
-    pub const SET_MOTOR_SPEED: u8 = 0x20;
-    pub const EMERGENCY_STOP:  u8 = 0x21;
+    pub const TOGGLE_LED:         u8 = 0x01;
+    pub const DRAW_EYE:           u8 = 0x10;
+    pub const WRITE_TEXT:         u8 = 0x11;
+    pub const CLEAR_DISPLAY:      u8 = 0x12;
+    pub const SET_MOTOR_SPEED:    u8 = 0x20;
+    pub const EMERGENCY_STOP:     u8 = 0x21;
+    pub const EMIT_IMU_TELEMETRY: u8 = 0x30;
+    pub const EMIT_ODOM_TELEMETRY: u8 = 0x31;
 }
 
 // ── Eye expression discriminants (must match [`abi::EyeExpression`]) ──────────
@@ -113,6 +141,16 @@ mod eye {
 /// Number of LED toggles performed (for demo telemetry).
 static mut TOGGLE_COUNT: u32 = 0;
 
+/// Phase 6: CDR serialized size constants (must match `abi::ImuTelemetry::SERIALIZED_SIZE`).
+const IMU_CDR_SIZE:  usize = 36;
+/// Phase 6: CDR serialized size for OdometryTelemetry.
+const ODOM_CDR_SIZE: usize = 20;
+
+/// Phase 6: monotonic sequence counter for IMU telemetry packets.
+static mut IMU_SEQ: u32 = 0;
+/// Phase 6: monotonic sequence counter for Odometry telemetry packets.
+static mut ODOM_SEQ: u32 = 0;
+
 // ── Exported entry points ─────────────────────────────────────────────────────
 
 /// Dispatch a command received via ESP-NOW.
@@ -128,9 +166,11 @@ pub extern "C" fn run_command(cmd_id: i32) -> i32 {
         cmd::DRAW_EYE        => draw_eye_handler(eye::HAPPY),
         cmd::WRITE_TEXT      => write_text_handler(b"Hello, World!"),
         cmd::CLEAR_DISPLAY   => clear_display_handler(),
-        cmd::SET_MOTOR_SPEED => balance_handler(),
-        cmd::EMERGENCY_STOP  => emergency_stop_handler(),
-        _                    => 1, // Unknown command
+        cmd::SET_MOTOR_SPEED     => balance_handler(),
+        cmd::EMERGENCY_STOP      => emergency_stop_handler(),
+        cmd::EMIT_IMU_TELEMETRY  => emit_imu_telemetry_handler(),
+        cmd::EMIT_ODOM_TELEMETRY => emit_odom_telemetry_handler(),
+        _                        => 1, // Unknown command
     }
 }
 
@@ -221,6 +261,105 @@ pub extern "C" fn balance_handler() -> i32 {
 /// Phase 4: Set both motors to zero — immediate stop.
 fn emergency_stop_handler() -> i32 {
     unsafe { host_set_motor_speed(0, 0) }
+}
+
+// ── Phase 6 handlers ─────────────────────────────────────────────────────────
+
+/// Write a `u32` into `buf[offset..offset+4]` in little-endian byte order.
+#[inline]
+fn write_u32_le(buf: &mut [u8], offset: usize, val: u32) {
+    let b = val.to_le_bytes();
+    buf[offset..offset + 4].copy_from_slice(&b);
+}
+
+/// Write a `u64` into `buf[offset..offset+8]` in little-endian byte order.
+#[inline]
+fn write_u64_le(buf: &mut [u8], offset: usize, val: u64) {
+    let b = val.to_le_bytes();
+    buf[offset..offset + 8].copy_from_slice(&b);
+}
+
+/// Write an `i32` into `buf[offset..offset+4]` in little-endian byte order.
+#[inline]
+fn write_i32_le(buf: &mut [u8], offset: usize, val: i32) {
+    write_u32_le(buf, offset, val as u32);
+}
+
+/// Write an `i16` into `buf[offset..offset+2]` in little-endian byte order.
+#[inline]
+fn write_i16_le(buf: &mut [u8], offset: usize, val: i16) {
+    let b = (val as u16).to_le_bytes();
+    buf[offset..offset + 2].copy_from_slice(&b);
+}
+
+/// Phase 6: Construct an ImuTelemetry CDR payload from current sensor data and
+/// emit it to the host radio TX queue.
+///
+/// Reads the latest pitch/roll from the IMU, builds a 36-byte CDR-encoded
+/// `ImuTelemetry` in Wasm linear memory, and calls `host_emit_imu_telemetry`.
+#[no_mangle]
+pub extern "C" fn emit_imu_telemetry_handler() -> i32 {
+    let mut pitch: i32 = 0;
+    let mut roll:  i32 = 0;
+    let imu_status = unsafe {
+        host_get_pitch_roll(&mut pitch as *mut i32, &mut roll as *mut i32)
+    };
+    if imu_status != 0 {
+        return imu_status;
+    }
+
+    // Flow control: skip if the TX queue is nearly full (>= 28 of 32 slots used).
+    let qlen = unsafe { host_get_telemetry_queue_len() };
+    if qlen >= 28 {
+        return 0; // ABI_OK — silently drop rather than return an error
+    }
+
+    let uptime_us = unsafe { host_get_uptime_ms() as u64 } * 1_000;
+    let seq = unsafe {
+        let s = IMU_SEQ;
+        IMU_SEQ = IMU_SEQ.wrapping_add(1);
+        s
+    };
+
+    // Build ImuTelemetry CDR payload (36 bytes) on the stack.
+    let mut buf = [0u8; IMU_CDR_SIZE];
+    write_u32_le(&mut buf,  0, seq);                  // sequence
+    write_u64_le(&mut buf,  4, uptime_us);            // timestamp_us
+    write_u32_le(&mut buf, 12, 2_000);               // loop_time_us (2 ms nominal)
+    write_i32_le(&mut buf, 16, pitch);               // pitch_millideg
+    write_i32_le(&mut buf, 20, roll);                // roll_millideg
+    // yaw_rate_millideg_s, linear_accel_x/y remain zero (stubs)
+
+    unsafe { host_emit_imu_telemetry(buf.as_ptr(), IMU_CDR_SIZE as i32) }
+}
+
+/// Phase 6: Construct an OdometryTelemetry CDR payload from current motor
+/// state and emit it to the host radio TX queue.
+#[no_mangle]
+pub extern "C" fn emit_odom_telemetry_handler() -> i32 {
+    // Flow control: skip if the TX queue is nearly full.
+    let qlen = unsafe { host_get_telemetry_queue_len() };
+    if qlen >= 28 {
+        return 0;
+    }
+
+    let uptime_us = unsafe { host_get_uptime_ms() as u64 } * 1_000;
+    let seq = unsafe {
+        let s = ODOM_SEQ;
+        ODOM_SEQ = ODOM_SEQ.wrapping_add(1);
+        s
+    };
+
+    // Build OdometryTelemetry CDR payload (20 bytes) on the stack.
+    let mut buf = [0u8; ODOM_CDR_SIZE];
+    write_u32_le(&mut buf,  0, seq);        // sequence
+    write_u64_le(&mut buf,  4, uptime_us);  // timestamp_us
+    write_u32_le(&mut buf, 12, 2_000);     // loop_time_us (2 ms nominal)
+    // left_speed and right_speed are 0 (stub; real impl reads motor state)
+    write_i16_le(&mut buf, 16, 0);         // left_speed
+    write_i16_le(&mut buf, 18, 0);         // right_speed
+
+    unsafe { host_emit_odom_telemetry(buf.as_ptr(), ODOM_CDR_SIZE as i32) }
 }
 
 // ── panic handler (required for no_std) ──────────────────────────────────────

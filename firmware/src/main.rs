@@ -32,6 +32,7 @@ mod message_bus;
 mod motors;
 mod router;
 mod sensors;
+mod telemetry;
 mod ulp;
 
 // ── Global heap allocator (PSRAM region for the Wasm engine) ─────────────────
