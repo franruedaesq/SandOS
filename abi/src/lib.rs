@@ -65,6 +65,9 @@ pub const FN_GET_TELEMETRY_QUEUE_LEN: &str = "host_get_telemetry_queue_len";
 // Phase 7 — Local AI Subsystem
 pub const FN_GET_LOCAL_INFERENCE: &str = "host_get_local_inference";
 
+// Phase 8 — OTA Hot-Swap Engine
+pub const FN_GET_OTA_STATUS: &str = "host_get_ota_status";
+
 // ── Phase 5 — Message Bus Constants ──────────────────────────────────────────
 
 /// Dead-man's switch timeout in milliseconds.
@@ -183,6 +186,12 @@ pub mod cmd {
     pub const EMIT_ODOM_TELEMETRY: u8 = 0x31;
     /// Query the local inference engine (Phase 7).
     pub const QUERY_LOCAL_INFERENCE: u8 = 0x40;
+    /// Start an OTA session — payload `[total_size: u32 LE]` (Phase 8).
+    pub const OTA_BEGIN:    u8 = 0x50;
+    /// One OTA chunk — payload `[offset: u32 LE][data …]` (Phase 8).
+    pub const OTA_CHUNK:    u8 = 0x51;
+    /// Finalise OTA — payload `[expected_crc32: u32 LE]` (Phase 8).
+    pub const OTA_FINALIZE: u8 = 0x52;
 }
 
 // ── IMU Sensor Data ───────────────────────────────────────────────────────────
@@ -743,6 +752,151 @@ impl InferenceResult {
     }
 }
 
+// ── Phase 8 — OTA Hot-Swap Engine ────────────────────────────────────────────
+
+/// Maximum size of a Wasm binary accepted over OTA.
+///
+/// 512 KiB is well within the 8 MiB PSRAM available on the ESP32-S3-WROOM
+/// module.  Larger binaries are rejected by `ota_begin` before any memory is
+/// allocated.
+pub const OTA_MAX_BINARY_SIZE: usize = 512 * 1024;
+
+/// Maximum user-data bytes in a single OTA_CHUNK ESP-NOW frame.
+///
+/// Frame layout: `[magic: 2][cmd_id: 1][payload_len: 1][offset: u32 LE][data …]`.
+/// Total ESP-NOW payload is at most [`ESPNOW_MAX_PAYLOAD`] (250 bytes).
+/// Subtracting the 4-byte SandOS header and the 4-byte chunk offset leaves
+/// 242 bytes of chunk payload per packet.
+pub const OTA_CHUNK_MAX_PAYLOAD: usize = ESPNOW_MAX_PAYLOAD - 4 - 4;
+
+/// Serialized byte size of an [`OtaStatus`] written into Wasm memory by
+/// [`FN_GET_OTA_STATUS`].
+///
+/// Layout: `[state (u32 LE)][bytes_received (u32 LE)][total_size (u32 LE)][swap_count (u32 LE)]`
+pub const OTA_STATUS_SIZE: u32 = 16; // 4 × u32
+
+/// State of the OTA hot-swap state machine.
+///
+/// Advances monotonically during an OTA session:
+/// `Idle → Receiving → Ready → Swapping → Idle`.
+/// On a protocol or verification error the machine transitions to `Failed`
+/// and must be reset by a new `OTA_BEGIN` command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum OtaState {
+    /// No active OTA session; the running Wasm binary is current.
+    #[default]
+    Idle     = 0,
+    /// Binary chunks are being received and written to the PSRAM staging area.
+    Receiving = 1,
+    /// All chunks received and CRC-32 verified; hot-swap is pending.
+    Ready    = 2,
+    /// Hot-swap in progress: old VM paused, new binary being instantiated.
+    Swapping = 3,
+    /// Protocol error or CRC-32 mismatch; the session must be restarted.
+    Failed   = 4,
+}
+
+impl OtaState {
+    /// Parse an [`OtaState`] from its `u8` discriminant.
+    ///
+    /// Returns `None` for unknown values.
+    #[inline]
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Idle),
+            1 => Some(Self::Receiving),
+            2 => Some(Self::Ready),
+            3 => Some(Self::Swapping),
+            4 => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// Snapshot of the OTA hot-swap subsystem exposed to the Wasm guest.
+///
+/// Serialized as four consecutive `u32` little-endian values (16 bytes total).
+/// The Wasm guest queries this struct via [`FN_GET_OTA_STATUS`] to monitor
+/// update progress and detect when a hot-swap has completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OtaStatus {
+    /// Current state of the OTA state machine.
+    pub state: OtaState,
+    /// Number of payload bytes successfully written to the PSRAM staging area.
+    pub bytes_received: u32,
+    /// Total expected binary size declared in the `OTA_BEGIN` command.
+    pub total_size: u32,
+    /// Number of successful hot-swaps completed since firmware boot.
+    pub swap_count: u32,
+}
+
+impl OtaStatus {
+    /// Serialized size in bytes.
+    ///
+    /// Layout:
+    /// - `[0..4]`   `state`          (u32 LE, [`OtaState`] discriminant)
+    /// - `[4..8]`   `bytes_received` (u32 LE)
+    /// - `[8..12]`  `total_size`     (u32 LE)
+    /// - `[12..16]` `swap_count`     (u32 LE)
+    pub const SERIALIZED_SIZE: usize = 16;
+
+    /// Serialize this status into `buf`.
+    ///
+    /// Returns the number of bytes written, or `0` if `buf` is too small.
+    pub fn to_bytes(&self, buf: &mut [u8]) -> usize {
+        if buf.len() < Self::SERIALIZED_SIZE {
+            return 0;
+        }
+        buf[0..4].copy_from_slice(&(self.state as u32).to_le_bytes());
+        buf[4..8].copy_from_slice(&self.bytes_received.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.total_size.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.swap_count.to_le_bytes());
+        Self::SERIALIZED_SIZE
+    }
+
+    /// Deserialize an [`OtaStatus`] from bytes written by [`OtaStatus::to_bytes`].
+    ///
+    /// Returns `None` if `buf` is shorter than [`SERIALIZED_SIZE`] or contains
+    /// an unknown [`OtaState`] discriminant.
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::SERIALIZED_SIZE {
+            return None;
+        }
+        let state_raw = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as u8;
+        let state = OtaState::from_u8(state_raw)?;
+        Some(Self {
+            state,
+            bytes_received: u32::from_le_bytes([buf[4],  buf[5],  buf[6],  buf[7]]),
+            total_size:     u32::from_le_bytes([buf[8],  buf[9],  buf[10], buf[11]]),
+            swap_count:     u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
+        })
+    }
+}
+
+/// Compute a CRC-32/ISO-HDLC checksum of `data`.
+///
+/// Uses the reflected polynomial `0xEDB8_8320` and the standard initial
+/// value `0xFFFF_FFFF`, matching `zlib`'s `crc32()`.
+///
+/// ## No-std, table-free
+///
+/// Processes each bit in software to avoid a 1 KiB lookup table.  Suitable
+/// for validating multi-kilobyte Wasm binaries during OTA transfers where
+/// code-size efficiency is more important than throughput.
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            // `wrapping_neg` of 1 is 0xFFFF_FFFF, of 0 is 0x0000_0000.
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1176,5 +1330,145 @@ mod tests {
     #[test]
     fn inference_tensor_size_is_1024() {
         assert_eq!(INFERENCE_TENSOR_SIZE, 1024);
+    }
+
+    // ── Phase 8 tests — CRC-32 ───────────────────────────────────────────────
+
+    #[test]
+    fn crc32_empty_slice_is_known_value() {
+        // CRC-32/ISO-HDLC of empty input is 0x00000000.
+        assert_eq!(crc32(&[]), 0x0000_0000);
+    }
+
+    #[test]
+    fn crc32_known_vector() {
+        // CRC-32 of ASCII "123456789" is 0xCBF43926 (standard test vector).
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn crc32_single_byte() {
+        // Smoke-test: non-zero input should not be 0x00000000.
+        assert_ne!(crc32(&[0xAB]), 0);
+    }
+
+    #[test]
+    fn crc32_detects_bit_flip() {
+        let data = [0x01u8, 0x02, 0x03, 0x04];
+        let mut corrupted = data;
+        corrupted[2] ^= 0x01;
+        assert_ne!(crc32(&data), crc32(&corrupted));
+    }
+
+    // ── Phase 8 tests — OtaState ─────────────────────────────────────────────
+
+    #[test]
+    fn ota_state_default_is_idle() {
+        assert_eq!(OtaState::default(), OtaState::Idle);
+    }
+
+    #[test]
+    fn ota_state_discriminants_are_stable() {
+        assert_eq!(OtaState::Idle     as u8, 0);
+        assert_eq!(OtaState::Receiving as u8, 1);
+        assert_eq!(OtaState::Ready    as u8, 2);
+        assert_eq!(OtaState::Swapping as u8, 3);
+        assert_eq!(OtaState::Failed   as u8, 4);
+    }
+
+    #[test]
+    fn ota_state_from_u8_round_trips() {
+        for v in 0u8..=4 {
+            let s = OtaState::from_u8(v).expect("valid discriminant");
+            assert_eq!(s as u8, v);
+        }
+        assert!(OtaState::from_u8(5).is_none());
+        assert!(OtaState::from_u8(255).is_none());
+    }
+
+    // ── Phase 8 tests — OtaStatus serialization ───────────────────────────────
+
+    #[test]
+    fn ota_status_serialized_size_is_16() {
+        assert_eq!(OtaStatus::SERIALIZED_SIZE, 16);
+    }
+
+    #[test]
+    fn ota_status_to_bytes_from_bytes_roundtrip() {
+        let original = OtaStatus {
+            state:          OtaState::Receiving,
+            bytes_received: 1024,
+            total_size:     4096,
+            swap_count:     3,
+        };
+        let mut buf = [0u8; OtaStatus::SERIALIZED_SIZE];
+        let written = original.to_bytes(&mut buf);
+        assert_eq!(written, OtaStatus::SERIALIZED_SIZE);
+        let decoded = OtaStatus::from_bytes(&buf).expect("must decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn ota_status_to_bytes_short_buffer_returns_zero() {
+        let s = OtaStatus::default();
+        let mut buf = [0u8; 8]; // too short — needs 16 bytes
+        assert_eq!(s.to_bytes(&mut buf), 0);
+    }
+
+    #[test]
+    fn ota_status_from_bytes_short_buffer_returns_none() {
+        let buf = [0u8; 8]; // too short
+        assert!(OtaStatus::from_bytes(&buf).is_none());
+    }
+
+    #[test]
+    fn ota_status_default_is_idle_zeros() {
+        let s = OtaStatus::default();
+        assert_eq!(s.state, OtaState::Idle);
+        assert_eq!(s.bytes_received, 0);
+        assert_eq!(s.total_size, 0);
+        assert_eq!(s.swap_count, 0);
+    }
+
+    // ── Phase 8 tests — constants ────────────────────────────────────────────
+
+    #[test]
+    fn ota_max_binary_size_is_512k() {
+        assert_eq!(OTA_MAX_BINARY_SIZE, 512 * 1024);
+    }
+
+    #[test]
+    fn ota_chunk_max_payload_fits_in_espnow_frame() {
+        // 4-byte SandOS header + 4-byte chunk offset + data ≤ ESPNOW_MAX_PAYLOAD
+        assert!(4 + 4 + OTA_CHUNK_MAX_PAYLOAD <= ESPNOW_MAX_PAYLOAD);
+    }
+
+    #[test]
+    fn ota_cmd_ids_are_unique_and_non_overlapping() {
+        let ids = [
+            cmd::OTA_BEGIN,
+            cmd::OTA_CHUNK,
+            cmd::OTA_FINALIZE,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for id in ids {
+            assert!(seen.insert(id), "duplicate OTA command ID: 0x{:02X}", id);
+        }
+        // Must not collide with pre-Phase-8 commands.
+        let existing = [
+            cmd::TOGGLE_LED,
+            cmd::LOAD_WASM,
+            cmd::DRAW_EYE,
+            cmd::WRITE_TEXT,
+            cmd::CLEAR_DISPLAY,
+            cmd::SET_MOTOR_SPEED,
+            cmd::EMERGENCY_STOP,
+            cmd::EMIT_IMU_TELEMETRY,
+            cmd::EMIT_ODOM_TELEMETRY,
+            cmd::QUERY_LOCAL_INFERENCE,
+        ];
+        for id in ids {
+            assert!(!existing.contains(&id), "OTA cmd 0x{:02X} collides with existing cmd", id);
+        }
     }
 }

@@ -6,8 +6,9 @@
 //!
 //! ```text
 //! brain_task
-//!   ├─ espnow_rx_task  (receives commands from PC)
-//!   ├─ wasm_run_task   (runs the Wasm app; calls ABI on behalf of guest)
+//!   ├─ espnow_rx_task  (receives commands from PC; handles OTA packets)
+//!   ├─ wasm_run_task   (runs the Wasm app; calls ABI on behalf of guest;
+//!   │                   performs hot-swap when OTA_READY signal fires)
 //!   └─ router_task     (reads MovementIntents from the OS Message Bus;
 //!                        routes to Core 1 or ESP-NOW based on RoutingMode)
 //! ```
@@ -16,11 +17,16 @@
 //! (the OS Message Bus) so the real-time routing loop never blocks the engine.
 pub mod abi;
 pub mod espnow;
+pub mod ota;
 pub mod wasm_vm;
 
 use abi::AbiHost;
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    channel::Channel,
+    signal::Signal,
+};
 use esp_hal::{gpio::Io, peripherals::WIFI};
 
 use crate::display::DisplayDriver;
@@ -44,6 +50,16 @@ const CMD_QUEUE_DEPTH: usize = 8;
 static CMD_CHANNEL: Channel<CriticalSectionRawMutex, WasmCommand, CMD_QUEUE_DEPTH> =
     Channel::new();
 
+// ── Phase 8 — OTA hot-swap signal ────────────────────────────────────────────
+
+/// Signal sent from the ESP-NOW OTA handler to the Wasm engine task when a
+/// verified binary is ready for hot-swapping.
+///
+/// The signal carries the exact byte count of the new binary so the Wasm task
+/// can allocate the right amount of memory from PSRAM before reading the
+/// staging buffer.
+pub static OTA_SWAP_SIGNAL: Signal<CriticalSectionRawMutex, u32> = Signal::new();
+
 // ── Main Brain task ───────────────────────────────────────────────────────────
 
 /// Core 0 top-level task.
@@ -58,12 +74,12 @@ pub async fn brain_task(spawner: Spawner, wifi: WIFI, io: Io) {
     // Build the ABI host context (LED pin, display handle, …).
     let abi_host = AbiHost::new(io, display);
 
-    // Start the ESP-NOW receiver task.
+    // Start the ESP-NOW receiver task (also owns the OTA receiver).
     spawner
         .spawn(espnow::espnow_rx_task(wifi, CMD_CHANNEL.sender()))
         .unwrap();
 
-    // Start the Wasm engine task.
+    // Start the Wasm engine task (also handles OTA hot-swap signals).
     spawner
         .spawn(wasm_vm::wasm_run_task(CMD_CHANNEL.receiver(), abi_host))
         .unwrap();

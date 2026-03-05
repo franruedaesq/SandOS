@@ -6,8 +6,9 @@
 
 use abi::{
     status, EyeExpression, ImuReading, ImuTelemetry, InferenceResult, MovementIntent,
-    OdometryTelemetry, RoutingMode, TelemetryPacket, DEAD_MANS_SWITCH_MS, INFERENCE_RESULT_SIZE,
-    MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES, TELEMETRY_TX_CAPACITY,
+    OdometryTelemetry, OtaState, OtaStatus, RoutingMode, TelemetryPacket,
+    crc32, DEAD_MANS_SWITCH_MS, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
+    MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_MAX_BINARY_SIZE, OTA_STATUS_SIZE, TELEMETRY_TX_CAPACITY,
 };
 
 // ── Mock display ──────────────────────────────────────────────────────────────
@@ -144,6 +145,34 @@ pub struct MockHost {
     /// Audio snapshots queued for fallback inference (mirrors the firmware's
     /// `AUDIO_INFERENCE_CHANNEL`).
     pub audio_inference_queue: Vec<Vec<i8>>,
+
+    // Phase 8 — OTA Hot-Swap Engine
+    /// Current state of the OTA state machine.
+    pub ota_state: OtaState,
+
+    /// PSRAM staging buffer for the incoming Wasm binary.
+    ///
+    /// Pre-allocated to `ota_expected_size` on `ota_begin`, then filled
+    /// by successive `ota_receive_chunk` calls.
+    pub ota_buffer: Vec<u8>,
+
+    /// Total expected binary size declared in `OTA_BEGIN`.
+    pub ota_expected_size: u32,
+
+    /// Running count of payload bytes written to `ota_buffer`.
+    pub ota_bytes_received: u32,
+
+    /// Number of successful hot-swaps completed since the host was created.
+    pub hot_swap_count: u32,
+
+    /// Whether the Wasm VM is currently paused during a hot-swap.
+    pub vm_paused: bool,
+
+    /// The binary currently loaded in the simulated Wasm VM.
+    ///
+    /// Starts empty (the static `guest.wasm` binary is assumed pre-loaded).
+    /// After a successful hot-swap this field holds the newly installed binary.
+    pub active_wasm_binary: Vec<u8>,
 }
 
 impl Default for MockHost {
@@ -170,6 +199,13 @@ impl Default for MockHost {
             inference_result: InferenceResult::default(),
             radio_link_alive: true,
             audio_inference_queue: Vec::new(),
+            ota_state: OtaState::Idle,
+            ota_buffer: Vec::new(),
+            ota_expected_size: 0,
+            ota_bytes_received: 0,
+            hot_swap_count: 0,
+            vm_paused: false,
+            active_wasm_binary: Vec::new(),
         }
     }
 }
@@ -431,6 +467,139 @@ impl MockHost {
         let snapshot = self.audio_inference_queue.remove(0);
         self.inference_result = run_stub_inference(&snapshot);
         true
+    }
+
+    // ── Phase 8 — OTA Hot-Swap Engine ─────────────────────────────────────────
+
+    /// Begin an OTA session.
+    ///
+    /// Declares the total binary size, resets the staging buffer, and
+    /// transitions the state machine to [`OtaState::Receiving`].
+    ///
+    /// An in-progress `Receiving` session is silently cancelled and replaced
+    /// by the new one, allowing the PC to restart a failed transfer without
+    /// a manual reset.
+    ///
+    /// Returns [`status::ERR_INVALID_ARG`] if `total_size` is zero or exceeds
+    /// [`OTA_MAX_BINARY_SIZE`].  Returns [`status::ERR_BUSY`] when a hot-swap
+    /// is currently in progress.
+    pub fn ota_begin(&mut self, total_size: u32) -> i32 {
+        if total_size == 0 || total_size as usize > OTA_MAX_BINARY_SIZE {
+            return status::ERR_INVALID_ARG;
+        }
+        if self.ota_state == OtaState::Swapping {
+            return status::ERR_BUSY;
+        }
+        self.ota_state = OtaState::Receiving;
+        self.ota_expected_size = total_size;
+        self.ota_bytes_received = 0;
+        // Pre-allocate the staging buffer filled with zeros so chunks can be
+        // written at any offset without gaps.
+        self.ota_buffer = vec![0u8; total_size as usize];
+        status::OK
+    }
+
+    /// Write one chunk of OTA binary data into the PSRAM staging buffer.
+    ///
+    /// `offset` is the byte offset within the final binary.  `data` must not
+    /// extend beyond `ota_expected_size`.
+    ///
+    /// Returns [`status::ERR_BUSY`] if no session is active,
+    /// [`status::ERR_BOUNDS`] if `offset + data.len() > ota_expected_size`, or
+    /// [`status::ERR_INVALID_ARG`] if `data` is empty.
+    pub fn ota_receive_chunk(&mut self, offset: u32, data: &[u8]) -> i32 {
+        if self.ota_state != OtaState::Receiving {
+            return status::ERR_BUSY;
+        }
+        if data.is_empty() {
+            return status::ERR_INVALID_ARG;
+        }
+        let end = (offset as usize).saturating_add(data.len());
+        if end > self.ota_expected_size as usize {
+            return status::ERR_BOUNDS;
+        }
+        self.ota_buffer[offset as usize..end].copy_from_slice(data);
+        self.ota_bytes_received += data.len() as u32;
+        status::OK
+    }
+
+    /// Finalise the OTA session by verifying the CRC-32 of the staged binary.
+    ///
+    /// If the computed CRC matches `expected_crc32` the state machine advances
+    /// to [`OtaState::Ready`]; otherwise it transitions to [`OtaState::Failed`]
+    /// and returns [`status::ERR_INVALID_ARG`].
+    ///
+    /// Returns [`status::ERR_BUSY`] if no session is in progress.
+    pub fn ota_finalize(&mut self, expected_crc32: u32) -> i32 {
+        if self.ota_state != OtaState::Receiving {
+            return status::ERR_BUSY;
+        }
+        let actual = crc32(&self.ota_buffer);
+        if actual != expected_crc32 {
+            self.ota_state = OtaState::Failed;
+            return status::ERR_INVALID_ARG;
+        }
+        self.ota_state = OtaState::Ready;
+        status::OK
+    }
+
+    /// Execute the Wasm hot-swap routine.
+    ///
+    /// Implements the four-step Core 0 critical section:
+    /// 1. **Pause** — signal the Wasm VM to stop accepting new commands.
+    /// 2. **Flush** — drop the old Wasm linear memory sandbox.
+    /// 3. **Instantiate** — load the new binary from the staging buffer.
+    /// 4. **Resume** — unblock the Wasm VM command loop.
+    ///
+    /// Because this mock runs on a single host thread, Core 1's motor state is
+    /// never touched — demonstrating that the hot-swap is isolated to Core 0.
+    ///
+    /// Returns [`status::ERR_BUSY`] if the binary has not yet been verified
+    /// (i.e. `ota_state != Ready`).
+    pub fn hot_swap_wasm(&mut self) -> i32 {
+        if self.ota_state != OtaState::Ready {
+            return status::ERR_BUSY;
+        }
+
+        // Step 1: Gracefully pause the VM (no new commands accepted).
+        self.vm_paused = true;
+        self.ota_state = OtaState::Swapping;
+
+        // Step 2: Flush the old Wasm sandbox to prevent memory leaks.
+        self.active_wasm_binary.clear();
+
+        // Step 3: Instantiate the new binary from the PSRAM staging area.
+        // In the real firmware this rebuilds the wasmi Engine + Store + Module
+        // + Instance chain from the bytes in the PSRAM staging sector.
+        self.active_wasm_binary = core::mem::take(&mut self.ota_buffer);
+
+        // Step 4: Resume execution.
+        self.vm_paused = false;
+        self.hot_swap_count += 1;
+        self.ota_state = OtaState::Idle;
+        self.ota_expected_size = 0;
+        self.ota_bytes_received = 0;
+
+        status::OK
+    }
+
+    /// Return a serialized [`OtaStatus`] snapshot into `out`.
+    ///
+    /// Mirrors `AbiHost::get_ota_status` on the firmware.  Writes
+    /// [`OTA_STATUS_SIZE`] bytes into `out` and returns [`status::OK`], or
+    /// [`status::ERR_BOUNDS`] if `out` is too small.
+    pub fn get_ota_status(&self, out: &mut [u8]) -> i32 {
+        if out.len() < OTA_STATUS_SIZE as usize {
+            return status::ERR_BOUNDS;
+        }
+        let snapshot = OtaStatus {
+            state:          self.ota_state,
+            bytes_received: self.ota_bytes_received,
+            total_size:     self.ota_expected_size,
+            swap_count:     self.hot_swap_count,
+        };
+        snapshot.to_bytes(out);
+        status::OK
     }
 }
 
