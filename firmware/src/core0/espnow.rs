@@ -11,13 +11,45 @@
 //! (built by Core 1) are serialised into ESP-NOW frames and broadcast to any
 //! listening PC, enabling high-frequency (100 pps) data streams without
 //! blocking Core 0's Wasm engine loop.
-use abi::{EspNowCommand, TelemetryPacket, ESPNOW_MAX_PAYLOAD};
+//!
+//! ## Phase 7 — Radio Link Monitoring
+//!
+//! [`espnow_rx_task`] records the timestamp of every successfully received
+//! command packet in [`RADIO_LAST_RX_MS`].  The fallback router queries
+//! [`is_radio_link_alive`] to decide whether to activate the local
+//! inference pipeline.
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use abi::{EspNowCommand, TelemetryPacket, ESPNOW_MAX_PAYLOAD, RADIO_SILENCE_THRESHOLD_MS};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 use esp_hal::peripherals::WIFI;
 use esp_wifi::esp_now::{EspNow, EspNowReceiver, BROADCAST_ADDRESS};
 
 use crate::core0::WasmCommand;
 use crate::telemetry;
+
+// ── Radio link state ──────────────────────────────────────────────────────────
+
+/// Millisecond timestamp of the most recently received valid command packet.
+///
+/// Written by [`espnow_rx_task`] every time a well-formed SandOS frame arrives.
+/// Read by [`is_radio_link_alive`] to decide whether the fallback inference
+/// pipeline should be activated.
+///
+/// Initialised to `0` so the link is considered silent until the first packet
+/// arrives.
+pub static RADIO_LAST_RX_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Return `true` when a valid command was received within the radio-silence
+/// threshold window.
+///
+/// `now_ms` should be the current uptime in milliseconds (e.g. from
+/// `embassy_time::Instant::now().as_millis()`).
+#[inline]
+pub fn is_radio_link_alive(now_ms: u64) -> bool {
+    let last = RADIO_LAST_RX_MS.load(Ordering::Acquire);
+    now_ms.saturating_sub(last) < RADIO_SILENCE_THRESHOLD_MS
+}
 
 // ── Broadcast address used to announce the device ────────────────────────────
 
@@ -87,7 +119,9 @@ pub async fn espnow_rx_task(
         .await
         {
             Ok(Ok(frame)) => {
-                handle_frame(frame.data(), &sender);
+                // Phase 7: record the arrival time for radio-link monitoring.
+                let now_ms = embassy_time::Instant::now().as_millis();
+                handle_frame(frame.data(), &sender, now_ms);
             }
             Ok(Err(_)) => {
                 // Radio error — keep running.
@@ -105,9 +139,13 @@ pub async fn espnow_rx_task(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Parse and validate a raw ESP-NOW payload, then push to the command queue.
+///
+/// `now_ms` is the current uptime used to update [`RADIO_LAST_RX_MS`] when a
+/// valid command is received.
 fn handle_frame(
     data: &[u8],
     sender: &Sender<'static, CriticalSectionRawMutex, WasmCommand, 8>,
+    now_ms: u64,
 ) {
     // Need at least the 4-byte header.
     if data.len() < 4 {
@@ -134,6 +172,9 @@ fn handle_frame(
     // well-formed Phase 1/2 commands, but protects the heapless Vec).
     let copy_len = payload_slice.len().min(64);
     payload.extend_from_slice(&payload_slice[..copy_len]).ok();
+
+    // Phase 7: update radio-link timestamp on every valid command.
+    RADIO_LAST_RX_MS.store(now_ms, Ordering::Release);
 
     // Best-effort enqueue — drop if queue is full (back-pressure).
     sender.try_send(WasmCommand { cmd_id, payload }).ok();

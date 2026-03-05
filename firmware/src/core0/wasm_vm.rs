@@ -27,9 +27,9 @@ extern crate alloc;
 
 use abi::{
     validate_ptr_len, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
-    HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_PITCH_ROLL,
-    FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_SET_MOTOR_SPEED, FN_START_AUDIO,
-    FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT, status,
+    HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
+    FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_SET_MOTOR_SPEED,
+    FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT, INFERENCE_RESULT_SIZE, status,
 };
 use alloc::vec;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Receiver};
@@ -331,6 +331,34 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 }
                 let host = unsafe { &**caller.data() };
                 host.set_motor_speed(left, right)
+            },
+        )
+        .unwrap();
+
+    // ── Phase 7 — Local AI Subsystem ──────────────────────────────────────────
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_GET_LOCAL_INFERENCE,
+            |mut caller: Caller<'_, *mut AbiHost>, out_ptr: i32| -> i32 {
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(out_ptr as u32, INFERENCE_RESULT_SIZE, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                let host = unsafe { &**caller.data() };
+                let mut tmp = [0u8; INFERENCE_RESULT_SIZE as usize];
+                let status = host.get_local_inference(&mut tmp);
+                if status == status::OK {
+                    let end = out_ptr as usize + INFERENCE_RESULT_SIZE as usize;
+                    mem.data_mut(&mut caller)[out_ptr as usize..end]
+                        .copy_from_slice(&tmp);
+                }
+                status
             },
         )
         .unwrap();

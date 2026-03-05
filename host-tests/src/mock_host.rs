@@ -5,9 +5,9 @@
 //! that will run on the chip.
 
 use abi::{
-    status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent, OdometryTelemetry,
-    RoutingMode, TelemetryPacket, DEAD_MANS_SWITCH_MS, MAX_AUDIO_READ, MAX_BRIGHTNESS,
-    MAX_MOTOR_SPEED, MAX_TEXT_BYTES, TELEMETRY_TX_CAPACITY,
+    status, EyeExpression, ImuReading, ImuTelemetry, InferenceResult, MovementIntent,
+    OdometryTelemetry, RoutingMode, TelemetryPacket, DEAD_MANS_SWITCH_MS, INFERENCE_RESULT_SIZE,
+    MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES, TELEMETRY_TX_CAPACITY,
 };
 
 // ── Mock display ──────────────────────────────────────────────────────────────
@@ -127,6 +127,23 @@ pub struct MockHost {
     /// Acts as the mock telemetry TX queue.  Tests can inspect this to verify
     /// that telemetry packets are correctly constructed and enqueued.
     pub telemetry_queue: Vec<TelemetryPacket>,
+
+    // Phase 7 — Local AI Subsystem
+    /// Most recent result from the local inference engine.
+    ///
+    /// Tests set this directly to simulate what the embedded `TinyMlEngine`
+    /// would have written; [`MockHost::get_local_inference`] returns it.
+    pub inference_result: InferenceResult,
+
+    /// Simulated radio link state.
+    ///
+    /// When `false` (link silent), `check_radio_link_alive` treats the link
+    /// as lost and the fallback inference pipeline becomes eligible to run.
+    pub radio_link_alive: bool,
+
+    /// Audio snapshots queued for fallback inference (mirrors the firmware's
+    /// `AUDIO_INFERENCE_CHANNEL`).
+    pub audio_inference_queue: Vec<Vec<i8>>,
 }
 
 impl Default for MockHost {
@@ -150,6 +167,9 @@ impl Default for MockHost {
             dead_mans_active: false,
             distributed_intents: Vec::new(),
             telemetry_queue: Vec::new(),
+            inference_result: InferenceResult::default(),
+            radio_link_alive: true,
+            audio_inference_queue: Vec::new(),
         }
     }
 }
@@ -365,4 +385,89 @@ impl MockHost {
             self.motor_right_speed = 0;
         }
     }
+
+    // ── Phase 7 — Local AI Subsystem ─────────────────────────────────────────
+
+    /// Return the current inference result.
+    ///
+    /// Mirrors `AbiHost::get_local_inference` on the firmware.  Writes the
+    /// 12-byte serialized [`InferenceResult`] into `out` and returns
+    /// [`status::OK`], or [`status::ERR_BOUNDS`] if `out` is too small.
+    pub fn get_local_inference(&self, out: &mut [u8]) -> i32 {
+        if out.len() < INFERENCE_RESULT_SIZE as usize {
+            return status::ERR_BOUNDS;
+        }
+        self.inference_result.to_bytes(out);
+        status::OK
+    }
+
+    /// Return `true` when the simulated radio link is alive.
+    ///
+    /// Uses `simulated_uptime_ms` as the "current time" and compares the
+    /// last received packet timestamp (approximated here by `last_intent_ms`
+    /// for simplicity — in the firmware this is `RADIO_LAST_RX_MS`).
+    pub fn is_radio_link_alive(&self) -> bool {
+        self.radio_link_alive
+    }
+
+    /// Push audio samples into the fallback inference queue.
+    ///
+    /// Mirrors `AbiHost::push_audio_for_inference`.  The samples are stored
+    /// in `audio_inference_queue` so tests can assert that the fallback
+    /// pipeline received the correct data.
+    pub fn push_audio_for_inference(&mut self, samples: Vec<i8>) {
+        self.audio_inference_queue.push(samples);
+    }
+
+    /// Run the fallback inference stub on the most recent audio snapshot.
+    ///
+    /// Pops one snapshot from `audio_inference_queue`, runs the same
+    /// deterministic stub as `TinyMlEngine::run`, and stores the result in
+    /// `inference_result`.  Returns `true` if a snapshot was available.
+    pub fn run_fallback_inference(&mut self) -> bool {
+        if self.audio_inference_queue.is_empty() {
+            return false;
+        }
+        let snapshot = self.audio_inference_queue.remove(0);
+        self.inference_result = run_stub_inference(&snapshot);
+        true
+    }
+}
+
+// ── Phase 7 helpers ───────────────────────────────────────────────────────────
+
+/// Stub inference matching `TinyMlEngine::run` in `firmware/src/inference.rs`.
+///
+/// This is the same deterministic algorithm, reproduced here for the test
+/// harness so tests can compute expected outputs without depending on the
+/// firmware crate.
+pub fn run_stub_inference(tensor: &[i8]) -> InferenceResult {
+    use abi::INFERENCE_TENSOR_SIZE;
+
+    if tensor.is_empty() {
+        return InferenceResult::default();
+    }
+
+    let mut freq = [0u32; 256];
+    for &s in tensor.iter().take(INFERENCE_TENSOR_SIZE) {
+        freq[s as u8 as usize] += 1;
+    }
+    let top_byte = freq
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &count)| count)
+        .map(|(idx, _)| idx)
+        .unwrap_or(0) as u8;
+    let top_class = top_byte % 8;
+
+    let sum: u32 = tensor
+        .iter()
+        .take(INFERENCE_TENSOR_SIZE)
+        .map(|&s| s.unsigned_abs() as u32)
+        .sum();
+    let n = tensor.len().min(INFERENCE_TENSOR_SIZE) as u32;
+    let mean_abs = sum / n;
+    let confidence_pct = ((mean_abs * 100) / 127).min(100) as u8;
+
+    InferenceResult { active: true, top_class, confidence_pct }
 }

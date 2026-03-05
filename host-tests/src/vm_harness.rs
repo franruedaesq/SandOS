@@ -10,9 +10,11 @@ use std::rc::Rc;
 use abi::{
     status, validate_ptr_len, ImuReading, ImuTelemetry, OdometryTelemetry, HOST_MODULE,
     FN_DEBUG_LOG, FN_DRAW_EYE, FN_EMIT_IMU_TELEMETRY, FN_EMIT_ODOM_TELEMETRY,
-    FN_GET_AUDIO_AVAIL, FN_GET_PITCH_ROLL, FN_GET_TELEMETRY_QUEUE_LEN, FN_GET_UPTIME_MS,
+    FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE, FN_GET_PITCH_ROLL,
+    FN_GET_TELEMETRY_QUEUE_LEN, FN_GET_UPTIME_MS,
     FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO,
-    FN_TOGGLE_LED, FN_WRITE_TEXT, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    FN_TOGGLE_LED, FN_WRITE_TEXT, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_MOTOR_SPEED,
+    MAX_TEXT_BYTES,
 };
 use wasmi::{Caller, Engine, Linker, Memory, Module, Store};
 
@@ -287,6 +289,29 @@ fn build_linker(engine: &Engine) -> Linker<Rc<RefCell<MockHost>>> {
     linker.func_wrap(HOST_MODULE, FN_GET_TELEMETRY_QUEUE_LEN,
         |caller: Caller<'_, Rc<RefCell<MockHost>>>| -> i32 {
             caller.data().borrow().get_telemetry_queue_len()
+        }
+    ).unwrap();
+
+    // ── Phase 7 — Local AI Subsystem ─────────────────────────────────────────
+
+    linker.func_wrap(HOST_MODULE, FN_GET_LOCAL_INFERENCE,
+        |mut caller: Caller<'_, Rc<RefCell<MockHost>>>, out_ptr: i32| -> i32 {
+            let mem = match get_memory(&caller) {
+                Some(m) => m,
+                None    => return status::ERR_BOUNDS,
+            };
+            let mem_size = mem.data(&caller).len() as u32;
+            if validate_ptr_len(out_ptr as u32, INFERENCE_RESULT_SIZE, mem_size).is_err() {
+                return status::ERR_BOUNDS;
+            }
+            let mut tmp = [0u8; INFERENCE_RESULT_SIZE as usize];
+            let result = caller.data().borrow().get_local_inference(&mut tmp);
+            if result == status::OK {
+                let end = out_ptr as usize + INFERENCE_RESULT_SIZE as usize;
+                mem.data_mut(&mut caller)[out_ptr as usize..end]
+                    .copy_from_slice(&tmp);
+            }
+            result
         }
     ).unwrap();
 

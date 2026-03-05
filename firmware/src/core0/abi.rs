@@ -41,14 +41,27 @@
 //! - [`AbiHost::emit_odom_telemetry`] — same for [`abi::OdometryTelemetry`].
 //! - [`AbiHost::get_telemetry_queue_len`] — returns the number of packets
 //!   currently queued in the telemetry TX channel.
+//!
+//! ## Phase 7 — Local AI Subsystem
+//!
+//! - [`AbiHost::get_local_inference`] — returns the latest result from the
+//!   embedded [`crate::inference::TinyMlEngine`].  When the radio link is
+//!   alive this returns an inactive result (`active = false`).  Once the
+//!   fallback router engages (link silent) the field is populated with the
+//!   most recent class prediction and confidence score.
+//! - [`AbiHost::push_audio_for_inference`] — called internally by
+//!   [`AbiHost::start_audio_capture`] / [`AbiHost::stop_audio_capture`] to
+//!   push audio snapshots into the fallback inference channel when the radio
+//!   link is detected as silent.
 use abi::{
-    status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent, OdometryTelemetry,
-    TelemetryPacket, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    status, EyeExpression, ImuReading, ImuTelemetry, InferenceResult, MovementIntent,
+    OdometryTelemetry, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
+    MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
 };
 use esp_hal::gpio::Io;
 
 use crate::display::DisplayDriver;
-use crate::{message_bus, motors, sensors, telemetry};
+use crate::{inference, message_bus, motors, router, sensors, telemetry};
 
 // ── Host state ────────────────────────────────────────────────────────────────
 
@@ -319,5 +332,63 @@ impl AbiHost {
     /// flooding the radio queue.
     pub fn get_telemetry_queue_len(&self) -> i32 {
         telemetry::TELEMETRY_TX_CHANNEL.len() as i32
+    }
+
+    // ── Phase 7 — Local AI Subsystem ─────────────────────────────────────────
+
+    /// Return the latest result from the local inference engine.
+    ///
+    /// Writes three `i32` little-endian values into `out`:
+    ///
+    /// | Offset  | Field            | Range     |
+    /// |---------|------------------|-----------|
+    /// | `[0..4]`  | `active`       | 0 or 1    |
+    /// | `[4..8]`  | `top_class`    | 0 – 255   |
+    /// | `[8..12]` | `confidence_pct` | 0 – 100 |
+    ///
+    /// `active` is `1` only when the fallback inference pipeline has run at
+    /// least once since the radio link went silent.  While the radio link is
+    /// alive `active` is `0` and the other fields are zero-filled.
+    ///
+    /// ## Return codes
+    ///
+    /// | Value                  | Meaning                                       |
+    /// |------------------------|-----------------------------------------------|
+    /// | [`status::OK`]         | Result written to `out`.                      |
+    /// | [`status::ERR_BOUNDS`] | `out.len()` < [`INFERENCE_RESULT_SIZE`] (12). |
+    pub fn get_local_inference(&self, out: &mut [u8]) -> i32 {
+        if out.len() < INFERENCE_RESULT_SIZE as usize {
+            return status::ERR_BOUNDS;
+        }
+        let result = inference::load_inference_result();
+        result.to_bytes(out);
+        status::OK
+    }
+
+    /// Push a snapshot of the current audio buffer into the fallback inference
+    /// channel so the Router can feed it to the [`inference::TinyMlEngine`].
+    ///
+    /// This is called internally whenever audio data has been written to
+    /// `audio_buf` and the radio link is detected as silent.  The audio bytes
+    /// are reinterpreted as signed 8-bit samples (the quantised format expected
+    /// by TFLite Micro INT8 models).
+    ///
+    /// The channel is non-blocking: if it is full the snapshot is silently
+    /// dropped.  This is intentional — old snapshots are less useful than fresh
+    /// ones, so we prefer freshness over completeness.
+    pub fn push_audio_for_inference(&mut self) {
+        use abi::INFERENCE_TENSOR_SIZE;
+        let n = self.audio_buf.len().min(INFERENCE_TENSOR_SIZE);
+        if n == 0 {
+            return;
+        }
+        let mut snapshot = router::AudioSnapshot::new();
+        for i in 0..n {
+            // Reinterpret the raw PCM byte as a signed i8 sample.
+            let sample = *self.audio_buf.get(i).unwrap_or(&0) as i8;
+            snapshot.push(sample).ok();
+        }
+        // Non-blocking: silently discard if the queue is full.
+        router::AUDIO_INFERENCE_CHANNEL.try_send(snapshot).ok();
     }
 }
