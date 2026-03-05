@@ -24,6 +24,14 @@ use crate::telemetry;
 /// Interval between keep-alive beacons (milliseconds).
 const BEACON_INTERVAL_MS: u64 = 1_000;
 
+/// Maximum number of queued telemetry packets to drain per loop iteration.
+///
+/// Limiting the drain count prevents the telemetry path from starving the
+/// ESP-NOW RX path.  At 100 pps and a 1 ms beacon interval, draining 8
+/// packets per iteration provides ample throughput while still servicing
+/// incoming commands promptly.
+const MAX_TELEMETRY_DRAIN_PER_ITER: usize = 8;
+
 // ── Task ──────────────────────────────────────────────────────────────────────
 
 /// Receive ESP-NOW packets, validate them, enqueue Wasm commands, and
@@ -59,10 +67,10 @@ pub async fn espnow_rx_task(
 
     loop {
         // ── Phase 6: drain outgoing telemetry (non-blocking) ─────────────────
-        // Flush up to 8 pending telemetry packets before waiting for the next
-        // incoming frame.  Limiting the drain count per iteration prevents
-        // telemetry from starving the RX path.
-        for _ in 0..8 {
+        // Flush up to MAX_TELEMETRY_DRAIN_PER_ITER pending telemetry packets
+        // before waiting for the next incoming frame.  Limiting the drain
+        // count per iteration prevents telemetry from starving the RX path.
+        for _ in 0..MAX_TELEMETRY_DRAIN_PER_ITER {
             match telemetry::TELEMETRY_TX_CHANNEL.try_receive() {
                 Ok(packet) => {
                     send_telemetry_packet(&mut esp_now, &packet).await;

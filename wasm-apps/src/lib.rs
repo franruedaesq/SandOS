@@ -151,6 +151,20 @@ static mut IMU_SEQ: u32 = 0;
 /// Phase 6: monotonic sequence counter for Odometry telemetry packets.
 static mut ODOM_SEQ: u32 = 0;
 
+/// Nominal Core 1 loop period in microseconds (2 ms = 2 000 µs).
+///
+/// Used in stub telemetry packets; the real firmware measures the actual loop
+/// duration from `embassy_time::Instant`.
+const NOMINAL_LOOP_TIME_US: u32 = 2_000;
+
+/// Telemetry queue high-water mark for flow control.
+///
+/// When the host-side telemetry TX queue has this many (or more) packets
+/// pending, the guest skips the current emission cycle rather than risk
+/// returning `ERR_BUSY`.  This leaves 4 free slots (87.5% utilisation) as a
+/// safety margin for bursts from Core 1.
+const TELEMETRY_QUEUE_HIGH_WATER_MARK: i32 = 28;
+
 // ── Exported entry points ─────────────────────────────────────────────────────
 
 /// Dispatch a command received via ESP-NOW.
@@ -308,9 +322,9 @@ pub extern "C" fn emit_imu_telemetry_handler() -> i32 {
         return imu_status;
     }
 
-    // Flow control: skip if the TX queue is nearly full (>= 28 of 32 slots used).
+    // Flow control: skip if the TX queue is nearly full (>= high-water mark).
     let qlen = unsafe { host_get_telemetry_queue_len() };
-    if qlen >= 28 {
+    if qlen >= TELEMETRY_QUEUE_HIGH_WATER_MARK {
         return 0; // ABI_OK — silently drop rather than return an error
     }
 
@@ -323,11 +337,11 @@ pub extern "C" fn emit_imu_telemetry_handler() -> i32 {
 
     // Build ImuTelemetry CDR payload (36 bytes) on the stack.
     let mut buf = [0u8; IMU_CDR_SIZE];
-    write_u32_le(&mut buf,  0, seq);                  // sequence
-    write_u64_le(&mut buf,  4, uptime_us);            // timestamp_us
-    write_u32_le(&mut buf, 12, 2_000);               // loop_time_us (2 ms nominal)
-    write_i32_le(&mut buf, 16, pitch);               // pitch_millideg
-    write_i32_le(&mut buf, 20, roll);                // roll_millideg
+    write_u32_le(&mut buf,  0, seq);                      // sequence
+    write_u64_le(&mut buf,  4, uptime_us);                // timestamp_us
+    write_u32_le(&mut buf, 12, NOMINAL_LOOP_TIME_US);     // loop_time_us
+    write_i32_le(&mut buf, 16, pitch);                    // pitch_millideg
+    write_i32_le(&mut buf, 20, roll);                     // roll_millideg
     // yaw_rate_millideg_s, linear_accel_x/y remain zero (stubs)
 
     unsafe { host_emit_imu_telemetry(buf.as_ptr(), IMU_CDR_SIZE as i32) }
@@ -339,7 +353,7 @@ pub extern "C" fn emit_imu_telemetry_handler() -> i32 {
 pub extern "C" fn emit_odom_telemetry_handler() -> i32 {
     // Flow control: skip if the TX queue is nearly full.
     let qlen = unsafe { host_get_telemetry_queue_len() };
-    if qlen >= 28 {
+    if qlen >= TELEMETRY_QUEUE_HIGH_WATER_MARK {
         return 0;
     }
 
@@ -352,12 +366,12 @@ pub extern "C" fn emit_odom_telemetry_handler() -> i32 {
 
     // Build OdometryTelemetry CDR payload (20 bytes) on the stack.
     let mut buf = [0u8; ODOM_CDR_SIZE];
-    write_u32_le(&mut buf,  0, seq);        // sequence
-    write_u64_le(&mut buf,  4, uptime_us);  // timestamp_us
-    write_u32_le(&mut buf, 12, 2_000);     // loop_time_us (2 ms nominal)
+    write_u32_le(&mut buf,  0, seq);                      // sequence
+    write_u64_le(&mut buf,  4, uptime_us);                // timestamp_us
+    write_u32_le(&mut buf, 12, NOMINAL_LOOP_TIME_US);     // loop_time_us
     // left_speed and right_speed are 0 (stub; real impl reads motor state)
-    write_i16_le(&mut buf, 16, 0);         // left_speed
-    write_i16_le(&mut buf, 18, 0);         // right_speed
+    write_i16_le(&mut buf, 16, 0);                        // left_speed
+    write_i16_le(&mut buf, 18, 0);                        // right_speed
 
     unsafe { host_emit_odom_telemetry(buf.as_ptr(), ODOM_CDR_SIZE as i32) }
 }
