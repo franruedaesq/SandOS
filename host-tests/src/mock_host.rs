@@ -5,8 +5,9 @@
 //! that will run on the chip.
 
 use abi::{
-    status, EyeExpression, ImuReading, MovementIntent, RoutingMode, DEAD_MANS_SWITCH_MS,
-    MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent, OdometryTelemetry,
+    RoutingMode, TelemetryPacket, DEAD_MANS_SWITCH_MS, MAX_AUDIO_READ, MAX_BRIGHTNESS,
+    MAX_MOTOR_SPEED, MAX_TEXT_BYTES, TELEMETRY_TX_CAPACITY,
 };
 
 // ── Mock display ──────────────────────────────────────────────────────────────
@@ -119,6 +120,13 @@ pub struct MockHost {
     /// In Single-Board mode this Vec remains empty; in Distributed mode it
     /// accumulates every intent that would be serialised and sent over the air.
     pub distributed_intents: Vec<MovementIntent>,
+
+    // Phase 6 — Structured Telemetry
+    /// Telemetry packets emitted by the Wasm guest (via the ABI) or by Core 1.
+    ///
+    /// Acts as the mock telemetry TX queue.  Tests can inspect this to verify
+    /// that telemetry packets are correctly constructed and enqueued.
+    pub telemetry_queue: Vec<TelemetryPacket>,
 }
 
 impl Default for MockHost {
@@ -141,6 +149,7 @@ impl Default for MockHost {
             last_intent_ms: 0,
             dead_mans_active: false,
             distributed_intents: Vec::new(),
+            telemetry_queue: Vec::new(),
         }
     }
 }
@@ -295,7 +304,54 @@ impl MockHost {
 
     // ── Phase 5 — Dead-Man's Switch ───────────────────────────────────────────
 
-    /// Check whether the dead-man's switch should trip.
+    // ── Phase 6 — Structured Telemetry ───────────────────────────────────────
+
+    /// Emit a CDR-encoded [`ImuTelemetry`] packet from the Wasm sandbox.
+    ///
+    /// Mirrors `AbiHost::emit_imu_telemetry` on the firmware.  Validates the
+    /// byte length, deserializes the CDR payload, and appends the packet to
+    /// `telemetry_queue`.  Returns [`status::ERR_BOUNDS`] for bad lengths or
+    /// [`status::ERR_BUSY`] when the queue is at capacity.
+    pub fn emit_imu_telemetry(&mut self, bytes: &[u8]) -> i32 {
+        if bytes.len() != ImuTelemetry::SERIALIZED_SIZE {
+            return status::ERR_BOUNDS;
+        }
+        match ImuTelemetry::from_cdr(bytes) {
+            Some(imu) => {
+                if self.telemetry_queue.len() >= TELEMETRY_TX_CAPACITY {
+                    return status::ERR_BUSY;
+                }
+                self.telemetry_queue.push(TelemetryPacket::Imu(imu));
+                status::OK
+            }
+            None => status::ERR_BOUNDS,
+        }
+    }
+
+    /// Emit a CDR-encoded [`OdometryTelemetry`] packet from the Wasm sandbox.
+    ///
+    /// Mirrors `AbiHost::emit_odom_telemetry` on the firmware.
+    pub fn emit_odom_telemetry(&mut self, bytes: &[u8]) -> i32 {
+        if bytes.len() != OdometryTelemetry::SERIALIZED_SIZE {
+            return status::ERR_BOUNDS;
+        }
+        match OdometryTelemetry::from_cdr(bytes) {
+            Some(odom) => {
+                if self.telemetry_queue.len() >= TELEMETRY_TX_CAPACITY {
+                    return status::ERR_BUSY;
+                }
+                self.telemetry_queue.push(TelemetryPacket::Odometry(odom));
+                status::OK
+            }
+            None => status::ERR_BOUNDS,
+        }
+    }
+
+    /// Return the number of packets currently in the telemetry TX queue.
+    pub fn get_telemetry_queue_len(&self) -> i32 {
+        self.telemetry_queue.len() as i32
+    }
+
     ///
     /// Compares `current_ms` against `last_intent_ms`.  If the gap exceeds
     /// [`DEAD_MANS_SWITCH_MS`], `dead_mans_active` is set to `true` and the

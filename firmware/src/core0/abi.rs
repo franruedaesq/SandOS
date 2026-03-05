@@ -32,14 +32,23 @@
 //! ([`crate::router`]) then dispatches the intent to either Core 1's local
 //! balancing loop (Single-Board mode) or the ESP-NOW radio stack (Distributed
 //! mode) — the Wasm sandbox never knows the difference.
+//!
+//! ## Phase 6 — Structured Telemetry
+//!
+//! - [`AbiHost::emit_imu_telemetry`] — the Wasm guest passes a CDR-encoded
+//!   [`abi::ImuTelemetry`] payload; the host deserializes it and pushes it to
+//!   the telemetry TX channel for asynchronous radio broadcast.
+//! - [`AbiHost::emit_odom_telemetry`] — same for [`abi::OdometryTelemetry`].
+//! - [`AbiHost::get_telemetry_queue_len`] — returns the number of packets
+//!   currently queued in the telemetry TX channel.
 use abi::{
-    status, EyeExpression, ImuReading, MovementIntent, MAX_AUDIO_READ, MAX_BRIGHTNESS,
-    MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent, OdometryTelemetry,
+    TelemetryPacket, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
 };
 use esp_hal::gpio::Io;
 
 use crate::display::DisplayDriver;
-use crate::{message_bus, motors, sensors};
+use crate::{message_bus, motors, sensors, telemetry};
 
 // ── Host state ────────────────────────────────────────────────────────────────
 
@@ -240,5 +249,75 @@ impl AbiHost {
         } else {
             status::ERR_BUSY
         }
+    }
+
+    // ── Phase 6 — Structured Telemetry ───────────────────────────────────────
+
+    /// Emit a CDR-encoded [`ImuTelemetry`] packet from the Wasm sandbox.
+    ///
+    /// The Wasm guest writes a 36-byte CDR payload into its linear memory and
+    /// calls this function with `(ptr, len)`.  The host deserializes the
+    /// payload and pushes a [`TelemetryPacket::Imu`] to the async telemetry TX
+    /// channel.  The ESP-NOW task broadcasts it to the PC asynchronously.
+    ///
+    /// ## Return codes
+    ///
+    /// | Value                       | Meaning                              |
+    /// |-----------------------------|--------------------------------------|
+    /// | [`status::OK`]              | Packet enqueued for transmission.    |
+    /// | [`status::ERR_BOUNDS`]      | `len` ≠ [`ImuTelemetry::SERIALIZED_SIZE`]. |
+    /// | [`status::ERR_BUSY`]        | Telemetry TX queue is full.          |
+    pub fn emit_imu_telemetry(&self, bytes: &[u8]) -> i32 {
+        if bytes.len() != ImuTelemetry::SERIALIZED_SIZE {
+            return status::ERR_BOUNDS;
+        }
+        match ImuTelemetry::from_cdr(bytes) {
+            Some(imu) => {
+                if telemetry::push_telemetry(TelemetryPacket::Imu(imu)) {
+                    status::OK
+                } else {
+                    status::ERR_BUSY
+                }
+            }
+            None => status::ERR_BOUNDS,
+        }
+    }
+
+    /// Emit a CDR-encoded [`OdometryTelemetry`] packet from the Wasm sandbox.
+    ///
+    /// The Wasm guest writes a 20-byte CDR payload into its linear memory and
+    /// calls this function with `(ptr, len)`.  The host deserializes the
+    /// payload and pushes a [`TelemetryPacket::Odometry`] to the async
+    /// telemetry TX channel.
+    ///
+    /// ## Return codes
+    ///
+    /// | Value                       | Meaning                              |
+    /// |-----------------------------|--------------------------------------|
+    /// | [`status::OK`]              | Packet enqueued for transmission.    |
+    /// | [`status::ERR_BOUNDS`]      | `len` ≠ [`OdometryTelemetry::SERIALIZED_SIZE`]. |
+    /// | [`status::ERR_BUSY`]        | Telemetry TX queue is full.          |
+    pub fn emit_odom_telemetry(&self, bytes: &[u8]) -> i32 {
+        if bytes.len() != OdometryTelemetry::SERIALIZED_SIZE {
+            return status::ERR_BOUNDS;
+        }
+        match OdometryTelemetry::from_cdr(bytes) {
+            Some(odom) => {
+                if telemetry::push_telemetry(TelemetryPacket::Odometry(odom)) {
+                    status::OK
+                } else {
+                    status::ERR_BUSY
+                }
+            }
+            None => status::ERR_BOUNDS,
+        }
+    }
+
+    /// Return the number of packets currently queued in the telemetry TX channel.
+    ///
+    /// The Wasm guest can poll this value to implement flow control and avoid
+    /// flooding the radio queue.
+    pub fn get_telemetry_queue_len(&self) -> i32 {
+        telemetry::TELEMETRY_TX_CHANNEL.len() as i32
     }
 }

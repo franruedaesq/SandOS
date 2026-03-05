@@ -1,23 +1,41 @@
-//! ESP-NOW receiver task for Core 0.
+//! ESP-NOW receiver + telemetry transmitter task for Core 0.
 //!
 //! Listens for raw ESP-NOW packets from the PC, validates the SandOS
 //! magic header, and forwards well-formed commands to the Wasm engine
 //! via the shared `CMD_CHANNEL`.
-use abi::{EspNowCommand, ESPNOW_MAX_PAYLOAD};
+//!
+//! ## Phase 6 — Async Telemetry TX
+//!
+//! [`espnow_rx_task`] also drains the [`crate::telemetry::TELEMETRY_TX_CHANNEL`]
+//! opportunistically between receive polls.  Structured telemetry packets
+//! (built by Core 1) are serialised into ESP-NOW frames and broadcast to any
+//! listening PC, enabling high-frequency (100 pps) data streams without
+//! blocking Core 0's Wasm engine loop.
+use abi::{EspNowCommand, TelemetryPacket, ESPNOW_MAX_PAYLOAD};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 use esp_hal::peripherals::WIFI;
 use esp_wifi::esp_now::{EspNow, EspNowReceiver, BROADCAST_ADDRESS};
 
 use crate::core0::WasmCommand;
+use crate::telemetry;
 
 // ── Broadcast address used to announce the device ────────────────────────────
 
 /// Interval between keep-alive beacons (milliseconds).
 const BEACON_INTERVAL_MS: u64 = 1_000;
 
+/// Maximum number of queued telemetry packets to drain per loop iteration.
+///
+/// Limiting the drain count prevents the telemetry path from starving the
+/// ESP-NOW RX path.  At 100 pps and a 1 ms beacon interval, draining 8
+/// packets per iteration provides ample throughput while still servicing
+/// incoming commands promptly.
+const MAX_TELEMETRY_DRAIN_PER_ITER: usize = 8;
+
 // ── Task ──────────────────────────────────────────────────────────────────────
 
-/// Receive ESP-NOW packets, validate them, and enqueue Wasm commands.
+/// Receive ESP-NOW packets, validate them, enqueue Wasm commands, and
+/// transmit outgoing telemetry packets from the telemetry TX channel.
 ///
 /// Also periodically broadcasts a presence beacon so the PC knows the device
 /// is alive and reachable.
@@ -48,7 +66,20 @@ pub async fn espnow_rx_task(
         + embassy_time::Duration::from_millis(BEACON_INTERVAL_MS);
 
     loop {
-        // Use a timeout so we can still send beacons even when idle.
+        // ── Phase 6: drain outgoing telemetry (non-blocking) ─────────────────
+        // Flush up to MAX_TELEMETRY_DRAIN_PER_ITER pending telemetry packets
+        // before waiting for the next incoming frame.  Limiting the drain
+        // count per iteration prevents telemetry from starving the RX path.
+        for _ in 0..MAX_TELEMETRY_DRAIN_PER_ITER {
+            match telemetry::TELEMETRY_TX_CHANNEL.try_receive() {
+                Ok(packet) => {
+                    send_telemetry_packet(&mut esp_now, &packet).await;
+                }
+                Err(_) => break, // queue empty — stop draining
+            }
+        }
+
+        // ── RX: wait for incoming packet or beacon deadline ───────────────────
         match embassy_time::with_timeout(
             beacon_deadline.saturating_duration_since(embassy_time::Instant::now()),
             esp_now.receive_async(),
@@ -113,4 +144,41 @@ async fn send_beacon(esp_now: &mut EspNow<'_>) {
     // Beacon payload: magic + cmd_id=0x00 (heartbeat) + len=0
     let beacon = [EspNowCommand::MAGIC[0], EspNowCommand::MAGIC[1], 0x00, 0x00];
     esp_now.send_async(&BROADCAST_ADDRESS, &beacon).await.ok();
+}
+
+/// Serialize a [`TelemetryPacket`] into a SandOS ESP-NOW frame and broadcast it.
+///
+/// Frame layout:
+/// ```text
+/// [magic[0]] [magic[1]] [cmd_id] [payload_len] [CDR payload bytes …]
+/// ```
+/// The `cmd_id` is taken from the packet's type discriminant so the receiver
+/// can identify the packet type from the header alone.
+async fn send_telemetry_packet(esp_now: &mut EspNow<'_>, packet: &TelemetryPacket) {
+    // Allocate a frame on the stack — no heap allocation required.
+    let mut frame = [0u8; ESPNOW_MAX_PAYLOAD];
+
+    // Write SandOS header.
+    frame[0] = EspNowCommand::MAGIC[0];
+    frame[1] = EspNowCommand::MAGIC[1];
+
+    // Serialize the CDR payload starting at byte 4 (after the 4-byte header).
+    let payload_len = packet.serialize(&mut frame[4..]);
+    if payload_len == 0 {
+        return; // serialization failed (shouldn't happen)
+    }
+
+    // The cmd_id is the discriminant byte that was written as frame[4].
+    frame[2] = frame[4];
+    // payload_len in the header field = total bytes after the 4-byte header.
+    frame[3] = payload_len as u8;
+
+    // Shift the CDR payload left by 1 to remove the duplicate discriminant byte
+    // that was placed at frame[4] by serialize().  After the shift, frame[4..]
+    // contains the raw CDR bytes without the leading discriminant.
+    let body_len = payload_len - 1;
+    frame.copy_within(5..5 + body_len, 4);
+
+    let total_len = 4 + body_len;
+    esp_now.send_async(&BROADCAST_ADDRESS, &frame[..total_len]).await.ok();
 }
