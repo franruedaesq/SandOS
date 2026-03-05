@@ -17,7 +17,7 @@
 //! - bits 63–32 → `pitch_millideg` (i32 reinterpreted as u32)
 //! - bits 31–0  → `roll_millideg`  (i32 reinterpreted as u32)
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use portable_atomic::{AtomicU64, Ordering};
 
 use abi::ImuReading;
 

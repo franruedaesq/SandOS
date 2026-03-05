@@ -40,9 +40,11 @@
 extern crate alloc;
 
 use abi::{
-    validate_ptr_len, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
-    HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
-    FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS,
+    validate_ptr_len, EyeExpression, ImuReading, ImuTelemetry, OdometryTelemetry,
+    MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_EMIT_IMU_TELEMETRY, FN_EMIT_ODOM_TELEMETRY,
+    FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE, FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL,
+    FN_GET_TELEMETRY_QUEUE_LEN, FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS,
     FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT,
     INFERENCE_RESULT_SIZE, OTA_STATUS_SIZE, status,
 };
@@ -116,7 +118,9 @@ pub async fn wasm_run_task(
             //
             // Step 1: Pause — drop the current Wasm runtime state so the
             // command loop cannot dispatch any further guest calls.
-            drop(run_command);
+            // Note: run_command is a `TypedFunc` (Copy), so it is overwritten
+            // rather than explicitly dropped.  The Engine and Store own the
+            // Wasm linear memory and are dropped here to reclaim PSRAM.
             drop(store);
             drop(engine);
 
@@ -398,6 +402,65 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 }
                 let host = unsafe { &**caller.data() };
                 host.set_motor_speed(left, right)
+            },
+        )
+        .unwrap();
+
+    // ── Phase 6 — Structured Telemetry ────────────────────────────────────────
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_EMIT_IMU_TELEMETRY,
+            |mut caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(ptr as u32, len as u32, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                if len as usize != ImuTelemetry::SERIALIZED_SIZE {
+                    return status::ERR_BOUNDS;
+                }
+                let bytes = mem.data(&caller)[ptr as usize..(ptr + len) as usize].to_vec();
+                let host = unsafe { &**caller.data() };
+                host.emit_imu_telemetry(&bytes)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_EMIT_ODOM_TELEMETRY,
+            |mut caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(ptr as u32, len as u32, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                if len as usize != OdometryTelemetry::SERIALIZED_SIZE {
+                    return status::ERR_BOUNDS;
+                }
+                let bytes = mem.data(&caller)[ptr as usize..(ptr + len) as usize].to_vec();
+                let host = unsafe { &**caller.data() };
+                host.emit_odom_telemetry(&bytes)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_GET_TELEMETRY_QUEUE_LEN,
+            |caller: Caller<'_, *mut AbiHost>| -> i32 {
+                let host = unsafe { &**caller.data() };
+                host.get_telemetry_queue_len()
             },
         )
         .unwrap();

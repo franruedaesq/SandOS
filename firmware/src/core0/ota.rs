@@ -28,8 +28,41 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
-use abi::{crc32, cmd, OtaState, OTA_MAX_BINARY_SIZE};
+use abi::{crc32, cmd, OtaState, OtaStatus, OTA_MAX_BINARY_SIZE};
+
+// ── Shared OTA status (read by AbiHost, written by OtaReceiver) ───────────────
+
+/// Current OTA state discriminant (matches [`OtaState`] repr).
+pub static SHARED_OTA_STATE: AtomicU8 = AtomicU8::new(0); // OtaState::Idle
+
+/// Bytes written to the staging buffer so far.
+pub static SHARED_OTA_BYTES_RECEIVED: AtomicU32 = AtomicU32::new(0);
+
+/// Total expected binary size declared in `OTA_BEGIN`.
+pub static SHARED_OTA_TOTAL_SIZE: AtomicU32 = AtomicU32::new(0);
+
+/// Number of successful hot-swaps completed since firmware boot.
+pub static SHARED_OTA_SWAP_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Read a consistent snapshot of the current OTA status.
+///
+/// Called by [`crate::core0::abi::AbiHost::get_ota_status`] in response to a
+/// Wasm guest query.  The four fields are read from separate atomics; because
+/// they are updated atomically in sequence (not under a single lock) there is a
+/// theoretical TOCTOU window, but for observability purposes this is acceptable
+/// — the worst case is one stale field in a transitional state.
+#[inline]
+pub fn load_ota_status() -> OtaStatus {
+    OtaStatus {
+        state:          OtaState::from_u8(SHARED_OTA_STATE.load(Ordering::Acquire))
+                            .unwrap_or(OtaState::Idle),
+        bytes_received: SHARED_OTA_BYTES_RECEIVED.load(Ordering::Acquire),
+        total_size:     SHARED_OTA_TOTAL_SIZE.load(Ordering::Acquire),
+        swap_count:     SHARED_OTA_SWAP_COUNT.load(Ordering::Acquire),
+    }
+}
 
 // ── OTA state machine ─────────────────────────────────────────────────────────
 
@@ -102,11 +135,13 @@ impl OtaReceiver {
     pub fn handle_begin(&mut self, payload: &[u8]) -> bool {
         if payload.len() < 4 {
             self.state = OtaState::Failed;
+            self.sync_shared_state();
             return false;
         }
         let total = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
         if total == 0 || total as usize > OTA_MAX_BINARY_SIZE {
             self.state = OtaState::Failed;
+            self.sync_shared_state();
             return false;
         }
         // A hot-swap already in progress cannot be interrupted.
@@ -120,6 +155,7 @@ impl OtaReceiver {
         self.total_size     = total;
         self.bytes_received = 0;
         self.state          = OtaState::Receiving;
+        self.sync_shared_state();
         true
     }
 
@@ -142,10 +178,12 @@ impl OtaReceiver {
         let end    = (offset as usize).saturating_add(data.len());
         if end > self.total_size as usize {
             self.state = OtaState::Failed;
+            self.sync_shared_state();
             return false;
         }
         self.buffer[offset as usize..end].copy_from_slice(data);
         self.bytes_received += data.len() as u32;
+        SHARED_OTA_BYTES_RECEIVED.store(self.bytes_received, Ordering::Release);
         true
     }
 
@@ -161,15 +199,18 @@ impl OtaReceiver {
         }
         if payload.len() < 4 {
             self.state = OtaState::Failed;
+            self.sync_shared_state();
             return false;
         }
         let expected = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
         let actual   = crc32(&self.buffer);
         if actual != expected {
             self.state = OtaState::Failed;
+            self.sync_shared_state();
             return false;
         }
         self.state = OtaState::Ready;
+        self.sync_shared_state();
         true
     }
 
@@ -213,12 +254,14 @@ impl OtaReceiver {
             return None;
         }
         self.state = OtaState::Swapping;
+        self.sync_shared_state();
         // Drain the buffer without reallocating — zero-copy hand-off.
         let binary = core::mem::take(&mut self.buffer);
         self.swap_count     += 1;
         self.state           = OtaState::Idle;
         self.total_size      = 0;
         self.bytes_received  = 0;
+        self.sync_shared_state();
         Some(binary)
     }
 
@@ -229,6 +272,21 @@ impl OtaReceiver {
             self.total_size     = 0;
             self.bytes_received = 0;
             self.state          = OtaState::Idle;
+            self.sync_shared_state();
         }
+    }
+
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
+    /// Publish the current receiver state to the shared atomics so that
+    /// [`load_ota_status`] always reflects the latest values.
+    ///
+    /// Called at every state transition and after byte-count updates.
+    #[inline]
+    fn sync_shared_state(&self) {
+        SHARED_OTA_STATE.store(self.state as u8, Ordering::Release);
+        SHARED_OTA_BYTES_RECEIVED.store(self.bytes_received, Ordering::Release);
+        SHARED_OTA_TOTAL_SIZE.store(self.total_size, Ordering::Release);
+        SHARED_OTA_SWAP_COUNT.store(self.swap_count, Ordering::Release);
     }
 }

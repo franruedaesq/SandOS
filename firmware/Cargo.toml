@@ -11,11 +11,12 @@ license = "MIT"
 
 # This crate targets xtensa-esp32s3-none-elf.
 # Build with:  cd firmware && cargo build --release
-# (requires the ESP Rust toolchain: cargo install espup && espup install)
+# (requires the ESP Rust toolchain: espup install --toolchain-version 1.93.0.0)
+# Then: source ~/export-esp.sh && cargo +esp build --release
 
 [dependencies]
 # ── Espressif HAL & Embassy ───────────────────────────────────────────────────
-esp-hal          = { version = "0.23", features = ["esp32s3"] }
+esp-hal          = { version = "0.23", features = ["esp32s3", "octal-psram", "unstable"] }
 esp-hal-embassy  = { version = "0.6",  features = ["esp32s3"] }
 embassy-executor = { version = "0.7",  features = ["task-arena-size-65536"] }
 embassy-time     = { version = "0.4" }
@@ -39,6 +40,20 @@ embedded-graphics = { version = "0.8", default-features = false }
 mipidsi           = { version = "0.8", default-features = false }
 display-interface-spi = { version = "0.5", default-features = false }
 
+# ── 64-bit atomics on Xtensa (no hardware CAS64 on LX7) ──────────────────────
+# portable-atomic provides a software fallback for AtomicU64 using
+# a critical-section lock.  Mandatory because core::sync::atomic::AtomicU64
+# is not available on the xtensa-esp32s3-none-elf target.
+portable-atomic = { version = "1", features = ["critical-section"] }
+
+# ── Panic handler (abort-on-panic in release / halt in debug) ─────────────────
+esp-backtrace = { version = "0.15", features = [
+    "esp32s3",
+    "panic-handler",
+    "println",
+] }
+esp-println = { version = "0.13", features = ["esp32s3", "auto"] }
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 static_cell  = { version = "2",   features = ["nightly"] }
 heapless     = "0.8"
@@ -51,7 +66,10 @@ abi = { path = "../abi", default-features = false }
 esp-build = "0.2"
 
 [features]
-default = []
+default = ["esp32s3"]
+
+# Target chip selection (must match the esp-hal feature).
+esp32s3 = []
 
 # Enable defmt logging (connect a probe for output)
 defmt = [

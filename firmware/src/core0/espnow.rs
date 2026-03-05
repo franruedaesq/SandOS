@@ -26,7 +26,7 @@
 //! state machine accumulates chunked binary data into PSRAM.  On successful
 //! CRC-32 verification [`super::OTA_SWAP_SIGNAL`] is fired, which wakes the
 //! [`super::wasm_vm::wasm_run_task`] to perform the live hot-swap.
-use core::sync::atomic::{AtomicU64, Ordering};
+use portable_atomic::{AtomicU64, Ordering};
 
 use abi::{cmd, EspNowCommand, TelemetryPacket, ESPNOW_MAX_PAYLOAD, RADIO_SILENCE_THRESHOLD_MS};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};

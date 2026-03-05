@@ -12,6 +12,9 @@
 #![no_std]
 #![no_main]
 
+// Pull in the esp-backtrace panic handler and exception handler.
+use esp_backtrace as _;
+
 extern crate alloc;
 
 use core::ptr::addr_of_mut;
@@ -65,12 +68,12 @@ static CORE1_EXECUTOR: StaticCell<esp_hal_embassy::Executor> = StaticCell::new()
 /// Entry point for Core 1 (The Muscle).
 ///
 /// Runs an Embassy executor that only handles hard real-time tasks.
-/// This function never returns.
-fn core1_entry() -> ! {
+/// This function never returns — Embassy's `executor.run()` loops forever.
+fn core1_entry() {
     let executor = CORE1_EXECUTOR.init(esp_hal_embassy::Executor::new());
     executor.run(|spawner| {
         spawner.spawn(core1::realtime_task()).unwrap();
-    })
+    });
 }
 
 // ── Main (Core 0) ─────────────────────────────────────────────────────────────

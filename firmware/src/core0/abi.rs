@@ -56,7 +56,7 @@
 use abi::{
     status, EyeExpression, ImuReading, ImuTelemetry, InferenceResult, MovementIntent,
     OdometryTelemetry, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
-    MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_STATUS_SIZE,
 };
 use esp_hal::gpio::Io;
 
@@ -383,12 +383,35 @@ impl AbiHost {
             return;
         }
         let mut snapshot = router::AudioSnapshot::new();
-        for i in 0..n {
-            // Reinterpret the raw PCM byte as a signed i8 sample.
-            let sample = *self.audio_buf.get(i).unwrap_or(&0) as i8;
-            snapshot.push(sample).ok();
+        // Reinterpret each raw PCM byte as a signed i8 sample.
+        for &byte in self.audio_buf.iter().take(n) {
+            snapshot.push(byte as i8).ok();
         }
         // Non-blocking: silently discard if the queue is full.
         router::AUDIO_INFERENCE_CHANNEL.try_send(snapshot).ok();
+    }
+
+    // ── Phase 8 — OTA Hot-Swap Engine ─────────────────────────────────────────
+
+    /// Return a serialized [`abi::OtaStatus`] snapshot into `out`.
+    ///
+    /// Reads the current OTA receiver state from the shared atomics maintained
+    /// by [`crate::core0::ota`] and serializes it as four consecutive `u32`
+    /// little-endian values.  Writes exactly [`OTA_STATUS_SIZE`] bytes into
+    /// `out`.
+    ///
+    /// ## Return codes
+    ///
+    /// | Value                  | Meaning                                       |
+    /// |------------------------|-----------------------------------------------|
+    /// | [`status::OK`]         | Status written to `out`.                      |
+    /// | [`status::ERR_BOUNDS`] | `out.len()` < [`OTA_STATUS_SIZE`] (16).       |
+    pub fn get_ota_status(&self, out: &mut [u8]) -> i32 {
+        if out.len() < OTA_STATUS_SIZE as usize {
+            return status::ERR_BOUNDS;
+        }
+        let snapshot = super::ota::load_ota_status();
+        snapshot.to_bytes(out);
+        status::OK
     }
 }
