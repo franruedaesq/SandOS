@@ -18,13 +18,22 @@
 //! command packet in [`RADIO_LAST_RX_MS`].  The fallback router queries
 //! [`is_radio_link_alive`] to decide whether to activate the local
 //! inference pipeline.
+//!
+//! ## Phase 8 — OTA Receiver
+//!
+//! OTA command IDs (`OTA_BEGIN`, `OTA_CHUNK`, `OTA_FINALIZE`) are intercepted
+//! here *before* being forwarded to the Wasm command queue.  An [`OtaReceiver`]
+//! state machine accumulates chunked binary data into PSRAM.  On successful
+//! CRC-32 verification [`super::OTA_SWAP_SIGNAL`] is fired, which wakes the
+//! [`super::wasm_vm::wasm_run_task`] to perform the live hot-swap.
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use abi::{EspNowCommand, TelemetryPacket, ESPNOW_MAX_PAYLOAD, RADIO_SILENCE_THRESHOLD_MS};
+use abi::{cmd, EspNowCommand, TelemetryPacket, ESPNOW_MAX_PAYLOAD, RADIO_SILENCE_THRESHOLD_MS};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 use esp_hal::peripherals::WIFI;
 use esp_wifi::esp_now::{EspNow, EspNowReceiver, BROADCAST_ADDRESS};
 
+use crate::core0::ota::OtaReceiver;
 use crate::core0::WasmCommand;
 use crate::telemetry;
 
@@ -71,11 +80,21 @@ const MAX_TELEMETRY_DRAIN_PER_ITER: usize = 8;
 ///
 /// Also periodically broadcasts a presence beacon so the PC knows the device
 /// is alive and reachable.
+///
+/// ## Phase 8 — OTA routing
+///
+/// OTA command packets (`OTA_BEGIN`, `OTA_CHUNK`, `OTA_FINALIZE`) are handled
+/// here by the embedded [`OtaReceiver`] before any Wasm command is dispatched.
+/// When `OTA_FINALIZE` succeeds, [`super::OTA_SWAP_SIGNAL`] is signalled with
+/// the binary length so the Wasm task can initiate the hot-swap.
 #[embassy_executor::task]
 pub async fn espnow_rx_task(
     wifi: WIFI,
     sender: Sender<'static, CriticalSectionRawMutex, WasmCommand, 8>,
 ) {
+    // Phase 8: OTA receiver owns the PSRAM staging buffer for this task.
+    let mut ota = OtaReceiver::new();
+
     // Initialise the Wi-Fi radio in Station mode for ESP-NOW.
     let init = esp_wifi::initialize(
         esp_wifi::EspWifiInitFor::Wifi,
@@ -99,15 +118,12 @@ pub async fn espnow_rx_task(
 
     loop {
         // ── Phase 6: drain outgoing telemetry (non-blocking) ─────────────────
-        // Flush up to MAX_TELEMETRY_DRAIN_PER_ITER pending telemetry packets
-        // before waiting for the next incoming frame.  Limiting the drain
-        // count per iteration prevents telemetry from starving the RX path.
         for _ in 0..MAX_TELEMETRY_DRAIN_PER_ITER {
             match telemetry::TELEMETRY_TX_CHANNEL.try_receive() {
                 Ok(packet) => {
                     send_telemetry_packet(&mut esp_now, &packet).await;
                 }
-                Err(_) => break, // queue empty — stop draining
+                Err(_) => break,
             }
         }
 
@@ -119,15 +135,11 @@ pub async fn espnow_rx_task(
         .await
         {
             Ok(Ok(frame)) => {
-                // Phase 7: record the arrival time for radio-link monitoring.
                 let now_ms = embassy_time::Instant::now().as_millis();
-                handle_frame(frame.data(), &sender, now_ms);
+                handle_frame(frame.data(), &sender, &mut ota, now_ms);
             }
-            Ok(Err(_)) => {
-                // Radio error — keep running.
-            }
+            Ok(Err(_)) => {}
             Err(_timeout) => {
-                // Beacon interval elapsed.
                 send_beacon(&mut esp_now).await;
                 beacon_deadline = embassy_time::Instant::now()
                     + embassy_time::Duration::from_millis(BEACON_INTERVAL_MS);
@@ -140,11 +152,16 @@ pub async fn espnow_rx_task(
 
 /// Parse and validate a raw ESP-NOW payload, then push to the command queue.
 ///
+/// OTA commands (`OTA_BEGIN`, `OTA_CHUNK`, `OTA_FINALIZE`) are intercepted and
+/// routed to `ota` rather than the Wasm command queue.  When `OTA_FINALIZE`
+/// succeeds, [`super::OTA_SWAP_SIGNAL`] is fired to wake the Wasm task.
+///
 /// `now_ms` is the current uptime used to update [`RADIO_LAST_RX_MS`] when a
 /// valid command is received.
 fn handle_frame(
     data: &[u8],
     sender: &Sender<'static, CriticalSectionRawMutex, WasmCommand, 8>,
+    ota: &mut OtaReceiver,
     now_ms: u64,
 ) {
     // Need at least the 4-byte header.
@@ -167,14 +184,24 @@ fn handle_frame(
     }
 
     let payload_slice = &data[4..4 + payload_len];
-    let mut payload: heapless::Vec<u8, 64> = heapless::Vec::new();
-    // Truncate silently if the payload exceeds 64 bytes (shouldn't happen for
-    // well-formed Phase 1/2 commands, but protects the heapless Vec).
-    let copy_len = payload_slice.len().min(64);
-    payload.extend_from_slice(&payload_slice[..copy_len]).ok();
 
     // Phase 7: update radio-link timestamp on every valid command.
     RADIO_LAST_RX_MS.store(now_ms, Ordering::Release);
+
+    // Phase 8: intercept OTA commands before they reach the Wasm queue.
+    if ota.handle_command(cmd_id, payload_slice) {
+        // If OTA_FINALIZE succeeded, signal the Wasm task to hot-swap.
+        if cmd_id == cmd::OTA_FINALIZE {
+            if let Some(binary) = ota.ready_binary() {
+                super::OTA_SWAP_SIGNAL.signal(binary.len() as u32);
+            }
+        }
+        return; // OTA commands are not forwarded to the Wasm engine.
+    }
+
+    let mut payload: heapless::Vec<u8, 64> = heapless::Vec::new();
+    let copy_len = payload_slice.len().min(64);
+    payload.extend_from_slice(&payload_slice[..copy_len]).ok();
 
     // Best-effort enqueue — drop if queue is full (back-pressure).
     sender.try_send(WasmCommand { cmd_id, payload }).ok();
