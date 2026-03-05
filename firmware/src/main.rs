@@ -14,13 +14,12 @@
 
 extern crate alloc;
 
+use core::ptr::addr_of_mut;
+
 use embassy_executor::Spawner;
 use esp_hal::{
-    clock::ClockControl,
     cpu_control::{CpuControl, Stack},
     gpio::Io,
-    peripherals::Peripherals,
-    prelude::*,
     timer::timg::TimerGroup,
 };
 use static_cell::StaticCell;
@@ -37,9 +36,9 @@ mod telemetry;
 mod ulp;
 
 // ── Global heap allocator (PSRAM region for the Wasm engine) ─────────────────
-
-#[global_allocator]
-static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
+//
+// esp-alloc 0.6 declares the #[global_allocator] internally; we just need to
+// add memory regions to it via the psram_allocator! macro at runtime.
 
 /// Initialise the heap allocator in external PSRAM.
 ///
@@ -50,8 +49,8 @@ static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
 ///
 /// The `psram_allocator!` macro locates the PSRAM region at the address
 /// provided by `esp_hal::psram` and registers it with the allocator.
-fn init_heap() {
-    esp_alloc::psram_allocator!(esp_hal::psram::psram(), esp_hal::psram);
+fn init_heap(psram: esp_hal::peripherals::PSRAM) {
+    esp_alloc::psram_allocator!(psram, esp_hal::psram);
 }
 
 // ── Core 1 stack ──────────────────────────────────────────────────────────────
@@ -79,31 +78,30 @@ fn core1_entry() -> ! {
 /// Embassy entry point — runs on **Core 0**.
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
-    // 1. Allocate heap on PSRAM before any `alloc` call.
-    init_heap();
+    // 1. Initialise the HAL and obtain peripherals.
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
-    let peripherals = Peripherals::take();
-    let system = peripherals.SYSTEM.split();
-    let clocks = ClockControl::max(system.clock_control).freeze();
+    // 2. Allocate heap on PSRAM before any `alloc` call.
+    init_heap(peripherals.PSRAM);
 
-    // 2. Initialise Embassy's time driver.
-    let timg0 = TimerGroup::new(peripherals.TIMG0, &clocks);
-    esp_hal_embassy::init(&clocks, timg0.timer0);
+    // 3. Initialise Embassy's time driver.
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    esp_hal_embassy::init(timg0.timer0);
 
-    // 3. Set up GPIO.
-    let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
+    // 4. Set up GPIO.
+    let io = Io::new(peripherals.IO_MUX);
 
-    // 4. Start Core 1 (The Muscle) before doing anything else on Core 0.
+    // 5. Start Core 1 (The Muscle) before doing anything else on Core 0.
     //    This guarantees the real-time loop is live before the Wasm VM starts.
     let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
     let _core1_guard = cpu_control
-        .start_app_core(unsafe { &mut APP_CORE_STACK }, core1_entry)
+        .start_app_core(unsafe { &mut *addr_of_mut!(APP_CORE_STACK) }, core1_entry)
         .unwrap();
 
-    // 5. Upload the ULP paramedic program and start it.
+    // 6. Upload the ULP paramedic program and start it.
     ulp::start(peripherals.LPWR);
 
-    // 6. Core 0 starts its own tasks (Wasm VM + ESP-NOW).
+    // 7. Core 0 starts its own tasks (Wasm VM + ESP-NOW).
     spawner
         .spawn(core0::brain_task(spawner, peripherals.WIFI, io))
         .unwrap();
