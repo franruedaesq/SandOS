@@ -96,15 +96,13 @@ pub async fn espnow_rx_task(
     let mut ota = OtaReceiver::new();
 
     // Initialise the Wi-Fi radio in Station mode for ESP-NOW.
-    let init = esp_wifi::initialize(
-        esp_wifi::EspWifiInitFor::Wifi,
+    let init = esp_wifi::init(
         esp_hal::timer::systimer::SystemTimer::new(unsafe {
             esp_hal::peripherals::SYSTIMER::steal()
         })
         .alarm0,
         esp_hal::rng::Rng::new(unsafe { esp_hal::peripherals::RNG::steal() }),
         unsafe { esp_hal::peripherals::RADIO_CLK::steal() },
-        &esp_hal::clock::Clocks::get(),
     )
     .unwrap();
 
@@ -134,11 +132,10 @@ pub async fn espnow_rx_task(
         )
         .await
         {
-            Ok(Ok(frame)) => {
+            Ok(frame) => {
                 let now_ms = embassy_time::Instant::now().as_millis();
                 handle_frame(frame.data(), &sender, &mut ota, now_ms);
             }
-            Ok(Err(_)) => {}
             Err(_timeout) => {
                 send_beacon(&mut esp_now).await;
                 beacon_deadline = embassy_time::Instant::now()

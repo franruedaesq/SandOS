@@ -15,22 +15,21 @@ license = "MIT"
 
 [dependencies]
 # ── Espressif HAL & Embassy ───────────────────────────────────────────────────
-esp-hal          = { version = "0.22", features = ["esp32s3"] }
-esp-hal-embassy  = { version = "0.5",  features = ["esp32s3"] }
+esp-hal          = { version = "0.23", features = ["esp32s3"] }
+esp-hal-embassy  = { version = "0.6",  features = ["esp32s3"] }
 embassy-executor = { version = "0.7",  features = ["task-arena-size-65536"] }
 embassy-time     = { version = "0.4" }
 embassy-sync     = { version = "0.6" }
 
 # ── ESP-NOW wireless ─────────────────────────────────────────────────────────
-esp-wifi = { version = "0.10", features = [
+esp-wifi = { version = "0.12", features = [
     "esp32s3",
     "wifi",
     "esp-now",
-    "async",
 ] }
 
 # ── Heap allocator (for Wasm engine on PSRAM) ─────────────────────────────────
-esp-alloc   = "0.4"
+esp-alloc   = "0.6"
 
 # ── WebAssembly interpreter ────────────────────────────────────────────────────
 wasmi = { version = "0.31", default-features = false }
