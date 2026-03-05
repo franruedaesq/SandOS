@@ -110,7 +110,24 @@ extern "C" {
     fn host_get_telemetry_queue_len() -> i32;
 }
 
-// ── Command IDs ───────────────────────────────────────────────────────────────
+// ── ABI Imports (Phase 7 — Local AI Subsystem) ────────────────────────────────
+
+extern "C" {
+    /// Query the Host OS for the latest local neural-network prediction.
+    ///
+    /// Writes three `i32` little-endian values into the 12-byte buffer at
+    /// `out_ptr`:
+    ///
+    /// | Offset  | Field              | Meaning                              |
+    /// |---------|--------------------|--------------------------------------|
+    /// | `[0..4]`  | `active`         | 1 when inference is running, 0 if not|
+    /// | `[4..8]`  | `top_class`      | Index of the highest-confidence class|
+    /// | `[8..12]` | `confidence_pct` | Confidence percentage (0 – 100)      |
+    ///
+    /// Returns `ABI_OK` (0) on success or `ERR_BOUNDS` (5) if `out_ptr` would
+    /// access memory outside the Wasm linear memory sandbox.
+    fn host_get_local_inference(out_ptr: *mut u8) -> i32;
+}
 
 /// Well-known command IDs matching [`abi::cmd`].
 mod cmd {
@@ -122,6 +139,8 @@ mod cmd {
     pub const EMERGENCY_STOP:     u8 = 0x21;
     pub const EMIT_IMU_TELEMETRY: u8 = 0x30;
     pub const EMIT_ODOM_TELEMETRY: u8 = 0x31;
+    /// Query the local inference engine (Phase 7).
+    pub const QUERY_LOCAL_INFERENCE: u8 = 0x40;
 }
 
 // ── Eye expression discriminants (must match [`abi::EyeExpression`]) ──────────
@@ -184,6 +203,7 @@ pub extern "C" fn run_command(cmd_id: i32) -> i32 {
         cmd::EMERGENCY_STOP      => emergency_stop_handler(),
         cmd::EMIT_IMU_TELEMETRY  => emit_imu_telemetry_handler(),
         cmd::EMIT_ODOM_TELEMETRY => emit_odom_telemetry_handler(),
+        cmd::QUERY_LOCAL_INFERENCE => query_local_inference_handler(),
         _                        => 1, // Unknown command
     }
 }
@@ -374,6 +394,54 @@ pub extern "C" fn emit_odom_telemetry_handler() -> i32 {
     write_i16_le(&mut buf, 18, 0);                        // right_speed
 
     unsafe { host_emit_odom_telemetry(buf.as_ptr(), ODOM_CDR_SIZE as i32) }
+}
+
+// ── Phase 7 handler ───────────────────────────────────────────────────────────
+
+/// Serialized size of `InferenceResult` in bytes (3 × i32 LE).
+const INFERENCE_RESULT_SIZE: usize = 12;
+
+/// Phase 7: Query the local inference engine and log the predicted class.
+///
+/// Reads the current [`InferenceResult`] from the Host OS into a 12-byte
+/// buffer in Wasm linear memory.  If the inference engine is active (i.e. the
+/// radio link is currently silent and the fallback pipeline is running) the
+/// guest can use the predicted class to drive autonomous behaviour — for
+/// example, mapping audio keywords to motor commands.
+///
+/// Returns `ABI_OK` (0) on success or the status code returned by
+/// `host_get_local_inference`.
+#[no_mangle]
+pub extern "C" fn query_local_inference_handler() -> i32 {
+    let mut buf = [0u8; INFERENCE_RESULT_SIZE];
+    let status = unsafe { host_get_local_inference(buf.as_mut_ptr()) };
+    if status != 0 {
+        return status;
+    }
+
+    // Parse the three i32 LE fields.
+    let active         = i32::from_le_bytes([buf[0],  buf[1],  buf[2],  buf[3]]);
+    let top_class      = i32::from_le_bytes([buf[4],  buf[5],  buf[6],  buf[7]]);
+    let confidence     = i32::from_le_bytes([buf[8],  buf[9],  buf[10], buf[11]]);
+
+    // If the inference is active and confidence is sufficient, drive the motors
+    // autonomously.  This is the fallback behaviour when the radio link is
+    // lost: the robot acts on its own sensor predictions rather than remote
+    // commands.
+    if active != 0 && confidence >= 60 {
+        // Map class index to a symmetric motor command.
+        // class 0 = stop, class 1 = forward, class 2 = left, class 3 = right, …
+        let (left, right): (i32, i32) = match top_class {
+            1 => (100, 100),   // forward
+            2 => (-100, 100),  // turn left
+            3 => (100, -100),  // turn right
+            4 => (-100, -100), // reverse
+            _ => (0, 0),       // stop / unknown
+        };
+        unsafe { host_set_motor_speed(left, right) };
+    }
+
+    0 // ABI_OK
 }
 
 // ── panic handler (required for no_std) ──────────────────────────────────────

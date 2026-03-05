@@ -28,6 +28,7 @@ use static_cell::StaticCell;
 mod core0;
 mod core1;
 mod display;
+mod inference;
 mod message_bus;
 mod motors;
 mod router;

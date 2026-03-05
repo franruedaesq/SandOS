@@ -18,11 +18,48 @@
 //! * The Wasm application crashes or hangs.
 //! * The ESP-NOW link from the Brain to the Worker is lost (Distributed mode).
 //! * The robot's balancing loop loses its reference input.
+//!
+//! ## Phase 7 — Fallback Inference Pipeline
+//!
+//! When the dead-man's switch fires *and* the radio link has been silent for
+//! longer than [`RADIO_SILENCE_THRESHOLD_MS`], the Router activates the local
+//! inference fallback:
+//!
+//! 1. It reads the current audio ring-buffer snapshot from the shared
+//!    [`AUDIO_INFERENCE_BUF`] channel (populated by [`AbiHost`] whenever audio
+//!    capture is active).
+//! 2. It passes the samples to the [`TinyMlEngine`] for a local inference pass.
+//! 3. The result is stored in [`inference::INFERENCE_RESULT`] so the Wasm
+//!    guest can query it via `host_get_local_inference()`.
 
 use abi::{RoutingMode, DEAD_MANS_SWITCH_MS};
 use embassy_time::Duration;
 
-use crate::{message_bus, motors};
+use crate::{inference, message_bus, motors};
+use crate::core0::espnow;
+
+// ── Inference audio snapshot channel ─────────────────────────────────────────
+
+/// Maximum number of audio snapshot buffers queued for fallback inference.
+const AUDIO_INFERENCE_QUEUE_DEPTH: usize = 2;
+
+/// A fixed-size audio snapshot passed from the audio pipeline to the Router
+/// for fallback inference.
+///
+/// Holds up to [`abi::INFERENCE_TENSOR_SIZE`] signed 8-bit samples that
+/// represent one window of I2S microphone data.
+pub type AudioSnapshot = heapless::Vec<i8, { abi::INFERENCE_TENSOR_SIZE }>;
+
+/// Shared channel: audio pipeline → Router (for fallback inference).
+///
+/// [`AbiHost`] pushes a snapshot here when audio is active and the link is
+/// silent.  The Router drains it during each dead-man's-switch timeout to
+/// trigger a local inference pass.
+pub static AUDIO_INFERENCE_CHANNEL: embassy_sync::channel::Channel<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    AudioSnapshot,
+    AUDIO_INFERENCE_QUEUE_DEPTH,
+> = embassy_sync::channel::Channel::new();
 
 // ── Router Task ───────────────────────────────────────────────────────────────
 
@@ -37,6 +74,14 @@ use crate::{message_bus, motors};
 /// new [`abi::MovementIntent`].  On timeout, motor outputs are zeroed so the
 /// robot halts safely.  As soon as a fresh intent arrives the outputs are
 /// restored — no operator intervention required.
+///
+/// ## Phase 7 — Fallback
+///
+/// When the timeout fires and the radio link is also detected as silent
+/// (no valid packet within [`abi::RADIO_SILENCE_THRESHOLD_MS`] ms), the
+/// Router additionally drains any pending audio snapshot from
+/// [`AUDIO_INFERENCE_CHANNEL`] and runs the [`inference::ENGINE`] on it,
+/// storing the result in [`inference::INFERENCE_RESULT`].
 #[embassy_executor::task]
 pub async fn router_task() {
     loop {
@@ -54,6 +99,13 @@ pub async fn router_task() {
                 // Dead-Man's Switch: no intent for >50 ms.
                 // Zero all motor outputs to halt the robot safely.
                 motors::store_motor_command(0, 0);
+
+                // Phase 7: if the radio link is also silent, activate the
+                // local inference pipeline with any pending audio snapshot.
+                let now_ms = embassy_time::Instant::now().as_millis();
+                if !espnow::is_radio_link_alive(now_ms) {
+                    run_fallback_inference();
+                }
             }
         }
     }
@@ -92,5 +144,21 @@ fn route_intent(intent: abi::MovementIntent) {
             // and the motors on this board are left untouched (they are
             // driven by the remote Worker).
         }
+    }
+}
+
+// ── Fallback inference ────────────────────────────────────────────────────────
+
+/// Drain the audio snapshot channel and run a local inference pass.
+///
+/// Called by the Router whenever the dead-man's switch fires *and* the radio
+/// link is confirmed silent.  If no snapshot is available (the audio pipeline
+/// has not produced data yet) the function returns immediately without
+/// modifying [`inference::INFERENCE_RESULT`].
+fn run_fallback_inference() {
+    // Drain up to one snapshot per Router tick to keep latency bounded.
+    if let Ok(snapshot) = AUDIO_INFERENCE_CHANNEL.try_receive() {
+        let result = inference::ENGINE.run(&snapshot);
+        inference::store_inference_result(result);
     }
 }

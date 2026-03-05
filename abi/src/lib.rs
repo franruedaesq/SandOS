@@ -62,6 +62,9 @@ pub const FN_EMIT_IMU_TELEMETRY:      &str = "host_emit_imu_telemetry";
 pub const FN_EMIT_ODOM_TELEMETRY:     &str = "host_emit_odom_telemetry";
 pub const FN_GET_TELEMETRY_QUEUE_LEN: &str = "host_get_telemetry_queue_len";
 
+// Phase 7 — Local AI Subsystem
+pub const FN_GET_LOCAL_INFERENCE: &str = "host_get_local_inference";
+
 // ── Phase 5 — Message Bus Constants ──────────────────────────────────────────
 
 /// Dead-man's switch timeout in milliseconds.
@@ -178,6 +181,8 @@ pub mod cmd {
     pub const EMIT_IMU_TELEMETRY:  u8 = 0x30;
     /// Emit a structured Odometry telemetry packet (Phase 6).
     pub const EMIT_ODOM_TELEMETRY: u8 = 0x31;
+    /// Query the local inference engine (Phase 7).
+    pub const QUERY_LOCAL_INFERENCE: u8 = 0x40;
 }
 
 // ── IMU Sensor Data ───────────────────────────────────────────────────────────
@@ -639,6 +644,105 @@ pub const TELEMETRY_TX_CAPACITY: usize = 32;
 /// packet every 10 ms = 100 packets/second — matching the design target.
 pub const TELEMETRY_DECIMATION: u64 = 5;
 
+// ── Phase 7 — Local AI Subsystem ─────────────────────────────────────────────
+
+/// Number of milliseconds of radio silence before the fallback inference
+/// pipeline is activated automatically.
+///
+/// Three times the beacon interval (3 × 1 000 ms) ensures we don't trigger
+/// the fallback on a momentary radio glitch while still reacting within a
+/// few seconds of a genuine link loss.
+pub const RADIO_SILENCE_THRESHOLD_MS: u64 = 3_000;
+
+/// Maximum number of audio samples passed to the inference engine in one
+/// call from the fallback router.
+///
+/// At a typical I2S sample rate of 16 000 Hz this corresponds to 64 ms of
+/// audio — enough context for simple keyword-detection models while keeping
+/// stack pressure low on the embedded target.
+pub const INFERENCE_TENSOR_SIZE: usize = 1024;
+
+/// Serialized byte size of an [`InferenceResult`] written into Wasm memory
+/// by [`FN_GET_LOCAL_INFERENCE`].
+///
+/// Layout: `[active (i32 LE)][top_class (i32 LE)][confidence_pct (i32 LE)]`
+pub const INFERENCE_RESULT_SIZE: u32 = 12; // 3 × i32
+
+/// The result of a single local neural-network inference pass.
+///
+/// Produced by the embedded [`TinyMlEngine`] (wrapping ESP-NN / TFLite Micro)
+/// and exposed to the Wasm guest via [`FN_GET_LOCAL_INFERENCE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InferenceResult {
+    /// `true` when the inference engine is running and the result is fresh.
+    ///
+    /// `false` while the radio link is alive (normal operating mode) or when
+    /// the audio pipeline has not yet produced enough samples.
+    pub active: bool,
+
+    /// Zero-based index of the highest-confidence output class.
+    ///
+    /// The interpretation is model-dependent (e.g. 0 = silence, 1 = keyword).
+    pub top_class: u8,
+
+    /// Confidence of the top prediction, expressed as a percentage (0 – 100).
+    pub confidence_pct: u8,
+}
+
+impl InferenceResult {
+    /// Serialize the result to three consecutive `i32` little-endian values.
+    ///
+    /// Layout written into `buf`:
+    /// - `[0..4]`  `active`          (0 or 1, i32 LE)
+    /// - `[4..8]`  `top_class`       (i32 LE)
+    /// - `[8..12]` `confidence_pct`  (i32 LE)
+    ///
+    /// Returns the number of bytes written, or `0` if `buf` is too small.
+    pub fn to_bytes(&self, buf: &mut [u8]) -> usize {
+        if buf.len() < INFERENCE_RESULT_SIZE as usize {
+            return 0;
+        }
+        let active: i32 = if self.active { 1 } else { 0 };
+        buf[0..4].copy_from_slice(&active.to_le_bytes());
+        buf[4..8].copy_from_slice(&(self.top_class as i32).to_le_bytes());
+        buf[8..12].copy_from_slice(&(self.confidence_pct as i32).to_le_bytes());
+        INFERENCE_RESULT_SIZE as usize
+    }
+
+    /// Deserialize an [`InferenceResult`] from a byte slice written by
+    /// [`InferenceResult::to_bytes`].
+    ///
+    /// Returns `None` if `buf` is shorter than [`INFERENCE_RESULT_SIZE`].
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < INFERENCE_RESULT_SIZE as usize {
+            return None;
+        }
+        let active = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) != 0;
+        let top_class = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as u8;
+        let confidence_pct = i32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]) as u8;
+        Some(Self { active, top_class, confidence_pct })
+    }
+
+    /// Pack the result into a single `u32` for lock-free atomic storage.
+    ///
+    /// Layout: `[active (bit 31)][top_class (bits 15–8)][confidence_pct (bits 7–0)]`
+    #[inline]
+    pub fn pack(self) -> u32 {
+        let active_bit: u32 = if self.active { 1 << 31 } else { 0 };
+        active_bit | ((self.top_class as u32) << 8) | (self.confidence_pct as u32)
+    }
+
+    /// Unpack a value previously packed with [`InferenceResult::pack`].
+    #[inline]
+    pub fn unpack(raw: u32) -> Self {
+        Self {
+            active:         (raw >> 31) != 0,
+            top_class:      ((raw >> 8) & 0xFF) as u8,
+            confidence_pct: (raw & 0xFF) as u8,
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -997,5 +1101,80 @@ mod tests {
         // At 500 Hz with decimation 5: 500 / 5 = 100 pps.
         let pps = 500u64 / TELEMETRY_DECIMATION;
         assert_eq!(pps, 100);
+    }
+
+    // ── Phase 7 tests — InferenceResult ──────────────────────────────────────
+
+    #[test]
+    fn inference_result_default_is_inactive() {
+        let r = InferenceResult::default();
+        assert!(!r.active);
+        assert_eq!(r.top_class, 0);
+        assert_eq!(r.confidence_pct, 0);
+    }
+
+    #[test]
+    fn inference_result_pack_unpack_roundtrip() {
+        let original = InferenceResult { active: true, top_class: 3, confidence_pct: 87 };
+        let decoded = InferenceResult::unpack(original.pack());
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn inference_result_inactive_pack_unpack_roundtrip() {
+        let original = InferenceResult { active: false, top_class: 0, confidence_pct: 0 };
+        let decoded = InferenceResult::unpack(original.pack());
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn inference_result_to_bytes_from_bytes_roundtrip() {
+        let original = InferenceResult { active: true, top_class: 2, confidence_pct: 75 };
+        let mut buf = [0u8; INFERENCE_RESULT_SIZE as usize];
+        let written = original.to_bytes(&mut buf);
+        assert_eq!(written, INFERENCE_RESULT_SIZE as usize);
+        let decoded = InferenceResult::from_bytes(&buf).expect("must decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn inference_result_to_bytes_short_buffer_returns_zero() {
+        let r = InferenceResult { active: true, top_class: 1, confidence_pct: 50 };
+        let mut buf = [0u8; 4]; // too short — needs 12 bytes
+        assert_eq!(r.to_bytes(&mut buf), 0);
+    }
+
+    #[test]
+    fn inference_result_from_bytes_short_buffer_returns_none() {
+        let buf = [0u8; 8]; // too short — needs 12 bytes
+        assert!(InferenceResult::from_bytes(&buf).is_none());
+    }
+
+    #[test]
+    fn inference_result_active_flag_in_bytes_is_correct() {
+        let active_result = InferenceResult { active: true, top_class: 0, confidence_pct: 0 };
+        let mut buf = [0u8; INFERENCE_RESULT_SIZE as usize];
+        active_result.to_bytes(&mut buf);
+        // active field is the first i32 LE — must be 1
+        assert_eq!(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), 1);
+
+        let inactive_result = InferenceResult { active: false, top_class: 0, confidence_pct: 0 };
+        inactive_result.to_bytes(&mut buf);
+        assert_eq!(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), 0);
+    }
+
+    #[test]
+    fn inference_result_size_is_12_bytes() {
+        assert_eq!(INFERENCE_RESULT_SIZE, 12);
+    }
+
+    #[test]
+    fn radio_silence_threshold_is_3000ms() {
+        assert_eq!(RADIO_SILENCE_THRESHOLD_MS, 3_000);
+    }
+
+    #[test]
+    fn inference_tensor_size_is_1024() {
+        assert_eq!(INFERENCE_TENSOR_SIZE, 1024);
     }
 }
