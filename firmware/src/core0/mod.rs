@@ -7,11 +7,13 @@
 //! ```text
 //! brain_task
 //!   ├─ espnow_rx_task  (receives commands from PC)
-//!   └─ wasm_run_task   (runs the Wasm app; calls ABI on behalf of guest)
+//!   ├─ wasm_run_task   (runs the Wasm app; calls ABI on behalf of guest)
+//!   └─ router_task     (reads MovementIntents from the OS Message Bus;
+//!                        routes to Core 1 or ESP-NOW based on RoutingMode)
 //! ```
 //!
-//! The two tasks communicate through a lock-free Embassy channel so the
-//! radio loop never blocks the Wasm engine.
+//! The Wasm VM and the Router communicate through a lock-free Embassy channel
+//! (the OS Message Bus) so the real-time routing loop never blocks the engine.
 pub mod abi;
 pub mod espnow;
 pub mod wasm_vm;
@@ -22,6 +24,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channe
 use esp_hal::{gpio::Io, peripherals::WIFI};
 
 use crate::display::DisplayDriver;
+use crate::router;
 
 // ── Inter-task channel ────────────────────────────────────────────────────────
 
@@ -45,8 +48,8 @@ static CMD_CHANNEL: Channel<CriticalSectionRawMutex, WasmCommand, CMD_QUEUE_DEPT
 
 /// Core 0 top-level task.
 ///
-/// Spawns the ESP-NOW receiver and the Wasm engine tasks, then returns
-/// (the spawned tasks keep Core 0 occupied).
+/// Spawns the ESP-NOW receiver, the Wasm engine, and the OS Router tasks,
+/// then returns (the spawned tasks keep Core 0 occupied).
 #[embassy_executor::task]
 pub async fn brain_task(spawner: Spawner, wifi: WIFI, io: Io) {
     // Initialise the display (Phase 2).
@@ -63,5 +66,12 @@ pub async fn brain_task(spawner: Spawner, wifi: WIFI, io: Io) {
     // Start the Wasm engine task.
     spawner
         .spawn(wasm_vm::wasm_run_task(CMD_CHANNEL.receiver(), abi_host))
+        .unwrap();
+
+    // Start the OS Router task (Phase 5).
+    // The Router drains MovementIntents from the OS Message Bus and
+    // dispatches them to Core 1 (Single-Board) or ESP-NOW (Distributed).
+    spawner
+        .spawn(router::router_task())
         .unwrap();
 }

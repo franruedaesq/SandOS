@@ -28,7 +28,9 @@ use static_cell::StaticCell;
 mod core0;
 mod core1;
 mod display;
+mod message_bus;
 mod motors;
+mod router;
 mod sensors;
 mod ulp;
 

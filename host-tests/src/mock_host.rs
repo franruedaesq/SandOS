@@ -5,8 +5,8 @@
 //! that will run on the chip.
 
 use abi::{
-    status, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED,
-    MAX_TEXT_BYTES,
+    status, EyeExpression, ImuReading, MovementIntent, RoutingMode, DEAD_MANS_SWITCH_MS,
+    MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
 };
 
 // ── Mock display ──────────────────────────────────────────────────────────────
@@ -90,6 +90,35 @@ pub struct MockHost {
     /// Number of times the watchdog has been fed (incremented per ABI call
     /// in the harness to simulate the firmware's post-command WDT feed).
     pub watchdog_feed_count: u32,
+
+    // Phase 5 — Message Bus & Routing
+    /// Current routing mode for the OS Message Bus.
+    pub routing_mode: RoutingMode,
+
+    /// Log of every [`MovementIntent`] published to the OS Message Bus.
+    ///
+    /// Tests can inspect this to verify that the ABI publishes an intent
+    /// before routing it, regardless of the current `routing_mode`.
+    pub intent_log: Vec<MovementIntent>,
+
+    /// Millisecond timestamp of the most recent successfully published intent.
+    ///
+    /// Updated by [`MockHost::set_motor_speed`] from `simulated_uptime_ms`.
+    /// Used by [`MockHost::check_dead_mans_switch`] to detect staleness.
+    pub last_intent_ms: u64,
+
+    /// Whether the dead-man's switch is currently active.
+    ///
+    /// Set to `true` by [`MockHost::check_dead_mans_switch`] when the gap
+    /// since the last intent exceeds [`DEAD_MANS_SWITCH_MS`], and reset to
+    /// `false` when a fresh intent arrives.
+    pub dead_mans_active: bool,
+
+    /// Intents that were routed via ESP-NOW (Distributed mode only).
+    ///
+    /// In Single-Board mode this Vec remains empty; in Distributed mode it
+    /// accumulates every intent that would be serialised and sent over the air.
+    pub distributed_intents: Vec<MovementIntent>,
 }
 
 impl Default for MockHost {
@@ -107,6 +136,11 @@ impl Default for MockHost {
             motor_right_speed: 0,
             motors_enabled: true,
             watchdog_feed_count: 0,
+            routing_mode: RoutingMode::SingleBoard,
+            intent_log: Vec::new(),
+            last_intent_ms: 0,
+            dead_mans_active: false,
+            distributed_intents: Vec::new(),
         }
     }
 }
@@ -215,8 +249,19 @@ impl MockHost {
     /// Validates the range `[-MAX_MOTOR_SPEED, MAX_MOTOR_SPEED]` and the
     /// `motors_enabled` flag, mirroring the firmware's `AbiHost::set_motor_speed`.
     ///
-    /// Increments `watchdog_feed_count` to simulate the post-command WDT feed
-    /// that the firmware performs in `wasm_run_task`.
+    /// ### Phase 5 behaviour
+    ///
+    /// On success the method creates a [`MovementIntent`] and appends it to
+    /// `intent_log` (always), then routes it:
+    ///
+    /// * **Single-Board** — updates `motor_left_speed` / `motor_right_speed`
+    ///   directly, mirroring the Core 1 bridge.
+    /// * **Distributed** — appends the intent to `distributed_intents` and
+    ///   leaves the local motor speeds unchanged (they would be set by the
+    ///   remote Worker board).
+    ///
+    /// Also updates `last_intent_ms` from `simulated_uptime_ms` and resets
+    /// `dead_mans_active`, then increments `watchdog_feed_count`.
     pub fn set_motor_speed(&mut self, left: i32, right: i32) -> i32 {
         if left.abs() > MAX_MOTOR_SPEED || right.abs() > MAX_MOTOR_SPEED {
             return status::ERR_INVALID_ARG;
@@ -224,9 +269,44 @@ impl MockHost {
         if !self.motors_enabled {
             return status::ERR_BUSY;
         }
-        self.motor_left_speed = left;
-        self.motor_right_speed = right;
+
+        // Phase 5: publish a MovementIntent to the OS Message Bus.
+        let intent = MovementIntent::new(left as i16, right as i16);
+        self.intent_log.push(intent);
+        self.last_intent_ms = self.simulated_uptime_ms;
+        self.dead_mans_active = false;
+
+        // Route based on the current mode.
+        match self.routing_mode {
+            RoutingMode::SingleBoard => {
+                // Forward directly to Core 1's motor bridge.
+                self.motor_left_speed = left;
+                self.motor_right_speed = right;
+            }
+            RoutingMode::Distributed => {
+                // Serialise and transmit over ESP-NOW (recorded for test assertions).
+                self.distributed_intents.push(intent);
+            }
+        }
+
         self.watchdog_feed_count += 1;
         status::OK
+    }
+
+    // ── Phase 5 — Dead-Man's Switch ───────────────────────────────────────────
+
+    /// Check whether the dead-man's switch should trip.
+    ///
+    /// Compares `current_ms` against `last_intent_ms`.  If the gap exceeds
+    /// [`DEAD_MANS_SWITCH_MS`], `dead_mans_active` is set to `true` and the
+    /// motor speeds are zeroed (the control loop is shut down safely).
+    ///
+    /// Call this from test code to simulate the Router's timeout logic.
+    pub fn check_dead_mans_switch(&mut self, current_ms: u64) {
+        if current_ms.saturating_sub(self.last_intent_ms) > DEAD_MANS_SWITCH_MS {
+            self.dead_mans_active = true;
+            self.motor_left_speed = 0;
+            self.motor_right_speed = 0;
+        }
     }
 }

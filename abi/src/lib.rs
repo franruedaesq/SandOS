@@ -54,6 +54,17 @@ pub const FN_GET_PITCH_ROLL:     &str = "host_get_pitch_roll";
 // Phase 4 — Motor functions
 pub const FN_SET_MOTOR_SPEED:    &str = "host_set_motor_speed";
 
+// Phase 5 — Routing control
+pub const FN_GET_ROUTING_MODE:   &str = "host_get_routing_mode";
+
+// ── Phase 5 — Message Bus Constants ──────────────────────────────────────────
+
+/// Dead-man's switch timeout in milliseconds.
+///
+/// If the OS Message Bus Router receives no valid [`MovementIntent`] within
+/// this window, it zeroes all motor control loops to prevent a runaway robot.
+pub const DEAD_MANS_SWITCH_MS: u64 = 50;
+
 // ── Status Codes ──────────────────────────────────────────────────────────────
 
 /// ABI status codes returned from every host function as `i32`.
@@ -242,6 +253,53 @@ pub mod ulp_mem {
     pub const LAST_VOLTAGE_MV: usize = 12;
 }
 
+// ── Phase 5 — Movement Intent & Routing ──────────────────────────────────────
+
+/// A movement intent published by the Wasm ABI to the OS Message Bus.
+///
+/// The Wasm guest calls `host_set_motor_speed()` which creates a
+/// `MovementIntent` and posts it to the internal bus.  The Routing Engine
+/// then decides whether to forward the intent to Core 1's local balancing
+/// loop (Single-Board mode) or to serialise it for ESP-NOW transmission
+/// (Distributed mode).  The Wasm sandbox never knows the difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MovementIntent {
+    /// Target speed for the left drive motor (−255 … +255).
+    pub left_speed: i16,
+    /// Target speed for the right drive motor (−255 … +255).
+    pub right_speed: i16,
+}
+
+impl MovementIntent {
+    /// Create a new `MovementIntent` from validated speed values.
+    #[inline]
+    pub fn new(left: i16, right: i16) -> Self {
+        Self { left_speed: left, right_speed: right }
+    }
+
+    /// Create a zero-speed (full stop) intent.
+    #[inline]
+    pub fn zero() -> Self {
+        Self { left_speed: 0, right_speed: 0 }
+    }
+}
+
+/// Routing mode for the OS Message Bus.
+///
+/// Configured at OS boot time (or toggled at runtime) to switch between
+/// single-chip and distributed operation without the Wasm sandbox knowing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum RoutingMode {
+    /// The Router forwards movement intents directly to Core 1's local
+    /// balancing loop via the shared motor-command bridge.
+    #[default]
+    SingleBoard = 0,
+    /// The Router intercepts intents, serialises them, and transmits them
+    /// over the ESP-NOW radio stack to a remote Worker board.
+    Distributed = 1,
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -347,5 +405,44 @@ mod tests {
         for id in ids {
             assert!(seen.insert(id), "duplicate command ID: 0x{:02X}", id);
         }
+    }
+
+    // ── Phase 5 tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn movement_intent_new() {
+        let intent = MovementIntent::new(100, -50);
+        assert_eq!(intent.left_speed, 100);
+        assert_eq!(intent.right_speed, -50);
+    }
+
+    #[test]
+    fn movement_intent_zero() {
+        let intent = MovementIntent::zero();
+        assert_eq!(intent.left_speed, 0);
+        assert_eq!(intent.right_speed, 0);
+    }
+
+    #[test]
+    fn movement_intent_default_is_zero() {
+        let intent = MovementIntent::default();
+        assert_eq!(intent.left_speed, 0);
+        assert_eq!(intent.right_speed, 0);
+    }
+
+    #[test]
+    fn routing_mode_default_is_single_board() {
+        assert_eq!(RoutingMode::default(), RoutingMode::SingleBoard);
+    }
+
+    #[test]
+    fn routing_mode_discriminants_are_stable() {
+        assert_eq!(RoutingMode::SingleBoard as u8, 0);
+        assert_eq!(RoutingMode::Distributed  as u8, 1);
+    }
+
+    #[test]
+    fn dead_mans_switch_timeout_is_50ms() {
+        assert_eq!(DEAD_MANS_SWITCH_MS, 50);
     }
 }
