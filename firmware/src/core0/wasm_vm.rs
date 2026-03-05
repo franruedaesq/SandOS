@@ -40,11 +40,13 @@
 extern crate alloc;
 
 use abi::{
-    validate_ptr_len, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
-    HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
-    FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS,
-    FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT,
-    INFERENCE_RESULT_SIZE, OTA_STATUS_SIZE, status,
+    validate_ptr_len, ImuReading, MAX_AUDIO_READ, MAX_CMD_PAYLOAD, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_EMIT_IMU_TELEMETRY, FN_EMIT_ODOM_TELEMETRY,
+    FN_GET_AUDIO_AVAIL, FN_GET_CMD_PAYLOAD, FN_GET_LOCAL_INFERENCE,
+    FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL, FN_GET_ROUTING_MODE, FN_GET_TELEMETRY_QUEUE_LEN,
+    FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_SET_MOTOR_SPEED, FN_SET_ROUTING_MODE,
+    FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT,
+    INFERENCE_RESULT_SIZE, ImuTelemetry, OdometryTelemetry, OTA_STATUS_SIZE, status,
 };
 use alloc::vec;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Receiver};
@@ -108,10 +110,10 @@ pub async fn wasm_run_task(
 
     // ── Command loop ──────────────────────────────────────────────────────────
     loop {
-        // Phase 8: poll the OTA signal *before* blocking on the next command.
-        // `try_take` is non-blocking — it returns `Some(binary_len)` only when
-        // the ESP-NOW OTA handler has signalled a verified binary is ready.
-        if let Some(_binary_len) = super::OTA_SWAP_SIGNAL.try_take() {
+        // Phase 8: poll the OTA binary channel *before* blocking on the next
+        // command.  `try_receive` is non-blocking — it returns `Ok(binary)` only
+        // when the ESP-NOW OTA handler has deposited a CRC-verified binary.
+        if let Ok(new_binary) = super::OTA_BINARY_CHANNEL.try_receive() {
             // ── Hot-swap routine ──────────────────────────────────────────────
             //
             // Step 1: Pause — drop the current Wasm runtime state so the
@@ -123,19 +125,15 @@ pub async fn wasm_run_task(
             // Step 2: Flush — the old Wasm linear memory sandbox has been
             // released by the drops above; the PSRAM heap reclaims the pages.
 
-            // Step 3: Instantiate — obtain the verified binary from the OTA
-            // receiver and build a fresh wasmi engine from it.
-            //
-            // In production this reads from the PSRAM staging sector managed
-            // by `OtaReceiver`.  Here we fall back to the static binary so
-            // the firmware remains operational if the receiver has already
-            // consumed the buffer.
-            let binary: &[u8] = GUEST_WASM; // placeholder: real impl reads from OtaReceiver
-            match build_vm(binary, &mut host) {
+            // Step 3: Instantiate — build a fresh wasmi engine from the
+            // verified binary received over the air.
+            match build_vm(&new_binary, &mut host) {
                 Some((e, s, f)) => {
                     engine      = e;
                     store       = s;
                     run_command = f;
+                    // Increment the hot-swap counter in AbiHost.
+                    host.hot_swap_count = host.hot_swap_count.wrapping_add(1);
                     // Step 4: Resume — fall through to the next loop iteration.
                 }
                 None => {
@@ -153,6 +151,16 @@ pub async fn wasm_run_task(
         }
 
         let cmd = receiver.receive().await;
+
+        // Make the raw ESP-NOW payload available to the Wasm guest so it can
+        // read command-specific parameters (e.g. motor speeds, text content)
+        // via `host_get_cmd_payload()`.
+        {
+            let host = unsafe { &mut **store.data_mut() };
+            let n = cmd.payload.len().min(MAX_CMD_PAYLOAD);
+            host.pending_cmd_payload[..n].copy_from_slice(&cmd.payload[..n]);
+            host.pending_cmd_payload_len = n;
+        }
 
         // Invoke the guest.  A Wasm trap (unreachable, OOB memory access, etc.)
         // returns Err here — the sandbox stays alive and handles the next command.
@@ -228,7 +236,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
         .func_wrap(
             HOST_MODULE,
             FN_DEBUG_LOG,
-            |mut caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+            |caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
                 let mem = match get_memory(&caller) {
                     Some(m) => m,
                     None => return status::ERR_BOUNDS,
@@ -261,7 +269,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
         .func_wrap(
             HOST_MODULE,
             FN_WRITE_TEXT,
-            |mut caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+            |caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
                 let mem = match get_memory(&caller) {
                     Some(m) => m,
                     None => return status::ERR_BOUNDS,
@@ -454,6 +462,118 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                         .copy_from_slice(&tmp);
                 }
                 result
+            },
+        )
+        .unwrap();
+
+    // ── Command Payload Access ────────────────────────────────────────────────
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_GET_CMD_PAYLOAD,
+            |mut caller: Caller<'_, *mut AbiHost>, out_ptr: i32, max_len: i32| -> i32 {
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(out_ptr as u32, max_len as u32, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                let host = unsafe { &**caller.data() };
+                let n = host.pending_cmd_payload_len.min(max_len as usize);
+                if n == 0 {
+                    return 0;
+                }
+                let mut tmp = [0u8; MAX_CMD_PAYLOAD];
+                let copied = host.get_cmd_payload(&mut tmp[..n]) as usize;
+                mem.data_mut(&mut caller)[out_ptr as usize..out_ptr as usize + copied]
+                    .copy_from_slice(&tmp[..copied]);
+                copied as i32
+            },
+        )
+        .unwrap();
+
+    // ── Phase 5 — Routing Mode ────────────────────────────────────────────────
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_GET_ROUTING_MODE,
+            |caller: Caller<'_, *mut AbiHost>| -> i32 {
+                let host = unsafe { &**caller.data() };
+                host.get_routing_mode()
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_SET_ROUTING_MODE,
+            |caller: Caller<'_, *mut AbiHost>, mode: i32| -> i32 {
+                let host = unsafe { &**caller.data() };
+                host.set_routing_mode(mode)
+            },
+        )
+        .unwrap();
+
+    // ── Phase 6 — Structured Telemetry ───────────────────────────────────────
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_EMIT_IMU_TELEMETRY,
+            |caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+                if len as usize != ImuTelemetry::SERIALIZED_SIZE {
+                    return status::ERR_BOUNDS;
+                }
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(ptr as u32, len as u32, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                let bytes = mem.data(&caller)[ptr as usize..(ptr + len) as usize].to_vec();
+                let host = unsafe { &**caller.data() };
+                host.emit_imu_telemetry(&bytes)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_EMIT_ODOM_TELEMETRY,
+            |caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+                if len as usize != OdometryTelemetry::SERIALIZED_SIZE {
+                    return status::ERR_BOUNDS;
+                }
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(ptr as u32, len as u32, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                let bytes = mem.data(&caller)[ptr as usize..(ptr + len) as usize].to_vec();
+                let host = unsafe { &**caller.data() };
+                host.emit_odom_telemetry(&bytes)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_GET_TELEMETRY_QUEUE_LEN,
+            |caller: Caller<'_, *mut AbiHost>| -> i32 {
+                let host = unsafe { &**caller.data() };
+                host.get_telemetry_queue_len()
             },
         )
         .unwrap();

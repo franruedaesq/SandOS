@@ -56,6 +56,7 @@ pub const FN_SET_MOTOR_SPEED:    &str = "host_set_motor_speed";
 
 // Phase 5 — Routing control
 pub const FN_GET_ROUTING_MODE:        &str = "host_get_routing_mode";
+pub const FN_SET_ROUTING_MODE:        &str = "host_set_routing_mode";
 
 // Phase 6 — Structured telemetry
 pub const FN_EMIT_IMU_TELEMETRY:      &str = "host_emit_imu_telemetry";
@@ -67,6 +68,10 @@ pub const FN_GET_LOCAL_INFERENCE: &str = "host_get_local_inference";
 
 // Phase 8 — OTA Hot-Swap Engine
 pub const FN_GET_OTA_STATUS: &str = "host_get_ota_status";
+
+// Command payload access — lets the Wasm guest read the raw payload of the
+// current incoming ESP-NOW command (e.g. motor-speed bytes, text data, etc.).
+pub const FN_GET_CMD_PAYLOAD: &str = "host_get_cmd_payload";
 
 // ── Phase 5 — Message Bus Constants ──────────────────────────────────────────
 
@@ -132,6 +137,10 @@ impl EyeExpression {
 }
 
 // ── ESP-NOW Packet ────────────────────────────────────────────────────────────
+
+/// Maximum number of payload bytes that can be attached to a single Wasm
+/// command (mirrors the `heapless::Vec<u8, 64>` in `WasmCommand`).
+pub const MAX_CMD_PAYLOAD: usize = 64;
 
 /// Maximum payload size for an ESP-NOW packet (ESP32-S3 hardware limit).
 pub const ESPNOW_MAX_PAYLOAD: usize = 250;

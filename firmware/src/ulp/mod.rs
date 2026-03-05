@@ -30,9 +30,11 @@
 use esp_hal::peripherals::LPWR;
 
 /// Temperature threshold (in tenths of °C) at which the ULP sets its flag.
+#[allow(dead_code)]
 pub const TEMP_THRESHOLD_TENTHS: u32 = 850; // 85.0 °C
 
 /// Minimum safe supply voltage in millivolts.
+#[allow(dead_code)]
 pub const VOLTAGE_MIN_MV: u32 = 3_000; // 3.0 V
 
 /// ULP binary (assembled separately; placeholder until the real binary is
@@ -68,6 +70,7 @@ pub fn start(_lpwr: LPWR) {
 /// Read the temperature-over-threshold flag from RTC Slow Memory.
 ///
 /// Returns `true` if the ULP has flagged an over-temperature condition.
+#[allow(dead_code)]
 pub fn is_temp_critical() -> bool {
     // SAFETY: RTC Slow Memory is always mapped at this address on ESP32-S3.
     // The ULP writes atomically to 32-bit aligned words.
@@ -76,6 +79,7 @@ pub fn is_temp_critical() -> bool {
 }
 
 /// Read the last temperature measured by the ULP (tenths of °C).
+#[allow(dead_code)]
 pub fn last_temp_tenths() -> u32 {
     let ptr = (0x5000_0000 + abi::ulp_mem::LAST_TEMP_TENTHS) as *const u32;
     unsafe { ptr.read_volatile() }

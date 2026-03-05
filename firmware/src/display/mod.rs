@@ -33,27 +33,26 @@
 //! All coordinates are validated against these dimensions before rendering.
 
 use abi::{status, EyeExpression};
-use embedded_graphics::{
-    mono_font::{ascii::FONT_9X18_BOLD, MonoTextStyle},
-    pixelcolor::Rgb565,
-    prelude::*,
-    primitives::{Circle, PrimitiveStyleBuilder, Rectangle, Triangle},
-    text::{Alignment, Text},
-};
+use embedded_graphics::{pixelcolor::Rgb565, prelude::RgbColor};
 use esp_hal::gpio::Io;
 
 // ── Display constants ─────────────────────────────────────────────────────────
 
 /// Display width in pixels.
+#[allow(dead_code)]
 pub const DISPLAY_WIDTH: u32 = 240;
 /// Display height in pixels.
+#[allow(dead_code)]
 pub const DISPLAY_HEIGHT: u32 = 240;
 
 /// Background colour (black).
+#[allow(dead_code)]
 const BG_COLOR: Rgb565 = Rgb565::BLACK;
 /// Eye colour (white).
+#[allow(dead_code)]
 const EYE_COLOR: Rgb565 = Rgb565::WHITE;
 /// Text colour (green — classic robot terminal).
+#[allow(dead_code)]
 const TEXT_COLOR: Rgb565 = Rgb565::GREEN;
 
 // ── Display driver ────────────────────────────────────────────────────────────

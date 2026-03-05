@@ -32,7 +32,7 @@ use portable_atomic::AtomicU64;
 use abi::{cmd, EspNowCommand, TelemetryPacket, ESPNOW_MAX_PAYLOAD, RADIO_SILENCE_THRESHOLD_MS};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 use esp_hal::peripherals::WIFI;
-use esp_wifi::esp_now::{EspNow, EspNowReceiver, BROADCAST_ADDRESS};
+use esp_wifi::esp_now::{EspNow, BROADCAST_ADDRESS};
 
 use crate::core0::ota::OtaReceiver;
 use crate::core0::WasmCommand;
@@ -188,10 +188,14 @@ fn handle_frame(
 
     // Phase 8: intercept OTA commands before they reach the Wasm queue.
     if ota.handle_command(cmd_id, payload_slice) {
-        // If OTA_FINALIZE succeeded, signal the Wasm task to hot-swap.
+        // If OTA_FINALIZE succeeded and the binary is ready, hand it off to
+        // the Wasm engine task via OTA_BINARY_CHANNEL for live hot-swap.
         if cmd_id == cmd::OTA_FINALIZE {
-            if let Some(binary) = ota.ready_binary() {
-                super::OTA_SWAP_SIGNAL.signal(binary.len() as u32);
+            if let Some(binary) = ota.take_verified_binary() {
+                // Best-effort: if a previous binary is still in the channel
+                // (the Wasm task hasn't consumed it yet), drop the new one.
+                // The sender will retry with a fresh OTA session.
+                super::OTA_BINARY_CHANNEL.try_send(binary).ok();
             }
         }
         return; // OTA commands are not forwarded to the Wasm engine.
