@@ -35,6 +35,19 @@ mod sensors;
 mod telemetry;
 mod ulp;
 
+// ── Panic handler ─────────────────────────────────────────────────────────────
+
+use core::panic::PanicInfo;
+
+/// Panic handler for no_std environment.
+///
+/// In a real deployment you might want to log to flash or transmit via ESP-NOW,
+/// but for now we just loop infinitely.
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {}
+}
+
 // ── Global heap allocator (PSRAM region for the Wasm engine) ─────────────────
 //
 // esp-alloc 0.6 declares the #[global_allocator] internally; we just need to
@@ -65,12 +78,12 @@ static CORE1_EXECUTOR: StaticCell<esp_hal_embassy::Executor> = StaticCell::new()
 /// Entry point for Core 1 (The Muscle).
 ///
 /// Runs an Embassy executor that only handles hard real-time tasks.
-/// This function never returns.
-fn core1_entry() -> ! {
+/// This function never returns in practice.
+fn core1_entry() {
     let executor = CORE1_EXECUTOR.init(esp_hal_embassy::Executor::new());
     executor.run(|spawner| {
         spawner.spawn(core1::realtime_task()).unwrap();
-    })
+    });
 }
 
 // ── Main (Core 0) ─────────────────────────────────────────────────────────────

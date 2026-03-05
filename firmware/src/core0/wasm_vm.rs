@@ -116,7 +116,7 @@ pub async fn wasm_run_task(
             //
             // Step 1: Pause — drop the current Wasm runtime state so the
             // command loop cannot dispatch any further guest calls.
-            drop(run_command);
+            let _ = run_command;
             drop(store);
             drop(engine);
 

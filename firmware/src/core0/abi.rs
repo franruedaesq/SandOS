@@ -55,8 +55,8 @@
 //!   link is detected as silent.
 use abi::{
     status, EyeExpression, ImuReading, ImuTelemetry, InferenceResult, MovementIntent,
-    OdometryTelemetry, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
-    MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    OdometryTelemetry, OtaState, OtaStatus, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
+    MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_STATUS_SIZE,
 };
 use esp_hal::gpio::Io;
 
@@ -86,6 +86,19 @@ pub struct AbiHost {
     /// Simple ring buffer for incoming I2S audio data (8 KiB).
     pub audio_buf: heapless::Deque<u8, 8192>,
 
+    // Phase 8 — OTA Hot-Swap Engine
+    /// Current state of the OTA state machine.
+    pub ota_state: OtaState,
+
+    /// Total expected binary size declared in OTA_BEGIN.
+    pub ota_expected_size: u32,
+
+    /// Running count of payload bytes received.
+    pub ota_bytes_received: u32,
+
+    /// Number of successful hot-swaps completed.
+    pub hot_swap_count: u32,
+
     /// GPIO IO handle (kept alive for LED control).
     _io: Io,
 }
@@ -99,6 +112,10 @@ impl AbiHost {
             display,
             audio_active: false,
             audio_buf: heapless::Deque::new(),
+            ota_state: OtaState::Idle,
+            ota_expected_size: 0,
+            ota_bytes_received: 0,
+            hot_swap_count: 0,
             _io: io,
         }
     }
@@ -383,12 +400,38 @@ impl AbiHost {
             return;
         }
         let mut snapshot = router::AudioSnapshot::new();
-        for i in 0..n {
+        for &byte in self.audio_buf.iter().take(n) {
             // Reinterpret the raw PCM byte as a signed i8 sample.
-            let sample = *self.audio_buf.get(i).unwrap_or(&0) as i8;
+            let sample = byte as i8;
             snapshot.push(sample).ok();
         }
         // Non-blocking: silently discard if the queue is full.
         router::AUDIO_INFERENCE_CHANNEL.try_send(snapshot).ok();
+    }
+
+    // ── Phase 8 ──────────────────────────────────────────────────────────────
+
+    /// Return a serialized [`OtaStatus`] snapshot into `out`.
+    ///
+    /// Writes [`OTA_STATUS_SIZE`] bytes (16 bytes: 4 × u32) into `out` and
+    /// returns [`status::OK`], or [`status::ERR_BOUNDS`] if `out` is too small.
+    ///
+    /// The status includes:
+    /// - Current OTA state (Idle, Receiving, or Ready)
+    /// - Bytes received so far
+    /// - Total expected size
+    /// - Number of hot-swaps completed
+    pub fn get_ota_status(&self, out: &mut [u8]) -> i32 {
+        if out.len() < OTA_STATUS_SIZE as usize {
+            return status::ERR_BOUNDS;
+        }
+        let snapshot = OtaStatus {
+            state:          self.ota_state,
+            bytes_received: self.ota_bytes_received,
+            total_size:     self.ota_expected_size,
+            swap_count:     self.hot_swap_count,
+        };
+        snapshot.to_bytes(out);
+        status::OK
     }
 }

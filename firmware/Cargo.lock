@@ -890,6 +890,7 @@ dependencies = [
  "heapless",
  "mipidsi",
  "nb 1.1.0",
+ "portable-atomic",
  "static_cell",
  "wasmi",
 ]
