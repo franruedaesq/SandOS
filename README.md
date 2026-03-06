@@ -78,6 +78,57 @@ cargo build --release
 espflash flash --monitor target/xtensa-esp32s3-none-elf/release/firmware
 ```
 
+### Emulation — `cargo run` (no hardware required)
+
+`cargo run` automatically builds the firmware, converts the ELF to a
+flashable `.bin` image, and boots it in Espressif's QEMU fork — all
+from the CLI, with no physical device needed.
+
+**1. Install the ESP Rust toolchain** (same as above):
+
+```bash
+cargo install espup
+espup install
+. $HOME/export-esp.sh
+```
+
+**2. Install `espflash` ≥ 3.0** (ELF → flash-image conversion):
+
+```bash
+cargo install espflash
+```
+
+**3. Install Espressif's QEMU fork** (`qemu-system-xtensa` with ESP32-S3
+support). Pre-built binaries are available at:
+<https://github.com/espressif/qemu/releases>
+
+After downloading, add the binary to your `PATH`:
+
+```bash
+# Example (Linux/macOS — adjust path as needed):
+export PATH="$HOME/.local/bin/qemu-esp/bin:$PATH"
+```
+
+**4. Run the emulation pipeline:**
+
+```bash
+cd firmware
+cargo run --release        # debug build: cargo run
+```
+
+The runner script (`firmware/run.sh`) will:
+1. Verify that `espflash` and `qemu-system-xtensa` are installed.
+2. Convert the compiled ELF to a 16 MB flash image (bootloader +
+   partition table + application) via `espflash save-image`.
+3. Boot the image in QEMU (`-machine esp32s3`).
+
+Press **Ctrl+A** then **X** to quit QEMU.
+
+> **To flash real hardware** instead of emulating, run:
+> ```bash
+> espflash flash --monitor target/xtensa-esp32s3-none-elf/release/firmware
+> ```
+
 ### Guest Wasm Apps
 
 ```bash
