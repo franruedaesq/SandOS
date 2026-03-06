@@ -5,7 +5,23 @@
 target = "xtensa-esp32s3-none-elf"
 
 [target.xtensa-esp32s3-none-elf]
-runner    = "espflash flash --monitor"
+# Local emulation pipeline (default):
+#   ELF → espflash save-image → qemu-system-xtensa
+# Running `cargo run` (or `cargo run --release`) will:
+#   1. Build the firmware ELF.
+#   2. Convert it to a valid flash image via `espflash save-image`.
+#   3. Boot the image in Espressif's QEMU fork (qemu-system-xtensa).
+#
+# Required tools:
+#   cargo install espflash          # ≥ 3.0
+#   # qemu-system-xtensa: https://github.com/espressif/qemu/releases
+#
+# To flash real hardware instead, run:
+#   espflash flash --monitor target/xtensa-esp32s3-none-elf/release/firmware
+#
+# NOTE: `cargo run` must be invoked from the `firmware/` directory so that
+# the relative path `./run.sh` resolves correctly.
+runner    = "./run.sh"
 rustflags = [
     "-C", "link-arg=-nostartfiles",
 ]
