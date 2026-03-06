@@ -74,8 +74,70 @@ espup install
 cd firmware
 cargo build --release
 
-# Flash to ESP32-S3
+# Flash to real hardware
 espflash flash --monitor target/xtensa-esp32s3-none-elf/release/firmware
+```
+
+### Emulation — `cargo run` (no hardware required)
+
+`cargo run` automatically chains three steps:
+
+1. **Build** — compiles the firmware for `xtensa-esp32s3-none-elf`.
+2. **Validate** — converts the ELF to a flashable `.bin` via `espflash save-image`
+   (proves the bootloader + partition table structure is correct).
+3. **Boot** — starts the image in Espressif's `qemu-system-xtensa` fork.
+
+#### Prerequisites
+
+| Tool | Minimum version | How to install |
+|------|----------------|----------------|
+| [espflash](https://github.com/esp-rs/espflash) | 3.0 | `cargo install espflash` |
+| [Espressif QEMU](https://github.com/espressif/qemu) | any recent | See below |
+
+**Installing Espressif QEMU**
+
+> The upstream QEMU project does not support ESP32-S3.  You need Espressif's
+> own fork.
+
+Option A — Pre-built release (recommended):
+```bash
+# Visit https://github.com/espressif/qemu/releases and download the
+# 'xtensa' archive for your OS, e.g.:
+#   qemu-esp-develop-9.2.2+esp-20250228-x86_64-linux-gnu.tar.xz  (Linux x86-64)
+#   qemu-esp-develop-9.2.2+esp-20250228-aarch64-apple-darwin.tar.xz (macOS M-series)
+tar -xf <downloaded-archive>.tar.xz
+cd qemu-esp-develop-*
+export PATH="$PWD/bin:$PATH"   # add to ~/.bashrc / ~/.zshrc permanently
+qemu-system-xtensa --version   # verify
+```
+
+Option B — Build from source:
+```bash
+git clone --depth 1 https://github.com/espressif/qemu
+cd qemu
+./configure --target-list=xtensa-softmmu \
+            --enable-gcrypt \
+            --disable-werror
+make -j$(nproc)
+sudo make install
+```
+
+#### Running
+
+```bash
+cd firmware
+cargo run --release
+# Press Ctrl-A then X to exit QEMU.
+```
+
+#### CI / validate-only mode
+
+Set `SANDOS_VALIDATE_ONLY=1` to skip QEMU and only verify that the ELF
+converts to a valid flash image (useful in headless CI pipelines):
+
+```bash
+cd firmware
+SANDOS_VALIDATE_ONLY=1 cargo run --release
 ```
 
 ### Guest Wasm Apps

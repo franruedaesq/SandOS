@@ -5,7 +5,17 @@
 target = "xtensa-esp32s3-none-elf"
 
 [target.xtensa-esp32s3-none-elf]
-runner    = "espflash flash --monitor"
+# `cargo run` invokes run-qemu.sh, which:
+#   1. Validates that espflash (>= 3.0) and qemu-system-xtensa are installed.
+#   2. Converts the ELF to a flashable .bin via `espflash save-image`.
+#   3. Boots the image in Espressif's QEMU fork (qemu-system-xtensa).
+#
+# To flash to real hardware instead:
+#   espflash flash --monitor target/xtensa-esp32s3-none-elf/release/firmware
+#
+# To validate the flash image without starting QEMU (useful in CI):
+#   SANDOS_VALIDATE_ONLY=1 cargo run --release
+runner    = "./scripts/run-qemu.sh"
 rustflags = [
     "-C", "link-arg=-nostartfiles",
 ]
