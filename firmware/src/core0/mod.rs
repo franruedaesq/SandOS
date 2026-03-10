@@ -20,6 +20,7 @@ pub mod espnow;
 pub mod ota;
 pub mod wasm_vm;
 
+#[allow(dead_code)]
 use abi::AbiHost;
 use embassy_executor::Spawner;
 use embassy_sync::{
@@ -27,10 +28,27 @@ use embassy_sync::{
     channel::Channel,
     signal::Signal,
 };
-use esp_hal::{gpio::Io, peripherals::WIFI};
+use esp_hal::gpio::Io;
+use esp_wifi::esp_now::EspNowWithWifiCreateToken;
+use portable_atomic::AtomicU32;
+use core::sync::atomic::Ordering;
 
 use crate::display::DisplayDriver;
 use crate::router;
+
+// ── Hot-swap counter (read by the web server for the dashboard) ───────────────
+
+/// Total number of successful Wasm hot-swaps completed since boot.
+///
+/// The Wasm VM task increments this after every successful OTA hot-swap.
+/// The web server task reads it to populate the `/api/stats` JSON.
+pub static HOT_SWAP_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Increment the hot-swap counter (called from `wasm_vm` after each swap).
+#[inline]
+pub fn increment_hot_swap_count() {
+    HOT_SWAP_COUNT.fetch_add(1, Ordering::Relaxed);
+}
 
 // ── Inter-task channel ────────────────────────────────────────────────────────
 
@@ -40,6 +58,7 @@ pub struct WasmCommand {
     /// The raw command ID received in the ESP-NOW packet.
     pub cmd_id: u8,
     /// Up to 64 bytes of inline payload.
+    #[allow(dead_code)]
     pub payload: heapless::Vec<u8, 64>,
 }
 
@@ -67,7 +86,12 @@ pub static OTA_SWAP_SIGNAL: Signal<CriticalSectionRawMutex, u32> = Signal::new()
 /// Spawns the ESP-NOW receiver, the Wasm engine, and the OS Router tasks,
 /// then returns (the spawned tasks keep Core 0 occupied).
 #[embassy_executor::task]
-pub async fn brain_task(spawner: Spawner, wifi: WIFI, io: Io) {
+pub async fn brain_task(
+    spawner: Spawner,
+    io: Io,
+    wifi_init: &'static esp_wifi::EspWifiController<'static>,
+    espnow_token: EspNowWithWifiCreateToken,
+) {
     // Initialise the display (Phase 2).
     let display = DisplayDriver::new(&io);
 
@@ -76,7 +100,7 @@ pub async fn brain_task(spawner: Spawner, wifi: WIFI, io: Io) {
 
     // Start the ESP-NOW receiver task (also owns the OTA receiver).
     spawner
-        .spawn(espnow::espnow_rx_task(wifi, CMD_CHANNEL.sender()))
+        .spawn(espnow::espnow_rx_task(wifi_init, espnow_token, CMD_CHANNEL.sender()))
         .unwrap();
 
     // Start the Wasm engine task (also handles OTA hot-swap signals).

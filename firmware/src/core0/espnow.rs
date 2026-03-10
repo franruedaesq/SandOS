@@ -31,8 +31,10 @@ use portable_atomic::AtomicU64;
 
 use abi::{cmd, EspNowCommand, TelemetryPacket, ESPNOW_MAX_PAYLOAD, RADIO_SILENCE_THRESHOLD_MS};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
-use esp_hal::peripherals::WIFI;
-use esp_wifi::esp_now::{EspNow, EspNowReceiver, BROADCAST_ADDRESS};
+use esp_wifi::{
+    esp_now::{EspNow, EspNowWithWifiCreateToken, BROADCAST_ADDRESS},
+    EspWifiController,
+};
 
 use crate::core0::ota::OtaReceiver;
 use crate::core0::WasmCommand;
@@ -90,24 +92,17 @@ const MAX_TELEMETRY_DRAIN_PER_ITER: usize = 8;
 /// the binary length so the Wasm task can initiate the hot-swap.
 #[embassy_executor::task]
 pub async fn espnow_rx_task(
-    wifi: WIFI,
+    init: &'static EspWifiController<'static>,
+    token: EspNowWithWifiCreateToken,
     sender: Sender<'static, CriticalSectionRawMutex, WasmCommand, 8>,
 ) {
     // Phase 8: OTA receiver owns the PSRAM staging buffer for this task.
     let mut ota = OtaReceiver::new();
 
-    // Initialise the Wi-Fi radio in Station mode for ESP-NOW.
-    let init = esp_wifi::init(
-        esp_hal::timer::systimer::SystemTimer::new(unsafe {
-            esp_hal::peripherals::SYSTIMER::steal()
-        })
-        .alarm0,
-        esp_hal::rng::Rng::new(unsafe { esp_hal::peripherals::RNG::steal() }),
-        unsafe { esp_hal::peripherals::RADIO_CLK::steal() },
-    )
-    .unwrap();
-
-    let mut esp_now = EspNow::new(&init, wifi).unwrap();
+    // Create ESP-NOW in coexistence mode (WiFi STA already running).
+    // new_with_wifi does NOT need the WIFI peripheral — it uses the already-
+    // initialized radio started by `new_with_mode` in main().
+    let mut esp_now = EspNow::new_with_wifi(init, token).unwrap();
 
     // Send an initial beacon so the PC sees us immediately.
     send_beacon(&mut esp_now).await;

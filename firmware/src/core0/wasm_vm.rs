@@ -40,7 +40,7 @@
 extern crate alloc;
 
 use abi::{
-    validate_ptr_len, EyeExpression, ImuReading, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    validate_ptr_len, ImuReading, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
     HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
     FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS,
     FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT,
@@ -136,6 +136,7 @@ pub async fn wasm_run_task(
                     engine      = e;
                     store       = s;
                     run_command = f;
+                    super::increment_hot_swap_count();
                     // Step 4: Resume — fall through to the next loop iteration.
                 }
                 None => {
@@ -228,7 +229,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
         .func_wrap(
             HOST_MODULE,
             FN_DEBUG_LOG,
-            |mut caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+            |caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
                 let mem = match get_memory(&caller) {
                     Some(m) => m,
                     None => return status::ERR_BOUNDS,
@@ -261,7 +262,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
         .func_wrap(
             HOST_MODULE,
             FN_WRITE_TEXT,
-            |mut caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+            |caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
                 let mem = match get_memory(&caller) {
                     Some(m) => m,
                     None => return status::ERR_BOUNDS,

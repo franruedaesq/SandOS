@@ -51,6 +51,7 @@ pub struct OtaReceiver {
     swap_count: u32,
 }
 
+#[allow(dead_code)]
 impl OtaReceiver {
     /// Create a new, idle OTA receiver.
     pub const fn new() -> Self {

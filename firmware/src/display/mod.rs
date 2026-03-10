@@ -34,11 +34,8 @@
 
 use abi::{status, EyeExpression};
 use embedded_graphics::{
-    mono_font::{ascii::FONT_9X18_BOLD, MonoTextStyle},
     pixelcolor::Rgb565,
-    prelude::*,
-    primitives::{Circle, PrimitiveStyleBuilder, Rectangle, Triangle},
-    text::{Alignment, Text},
+    prelude::RgbColor,
 };
 use esp_hal::gpio::Io;
 

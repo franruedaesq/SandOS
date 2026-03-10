@@ -54,7 +54,7 @@
 //!   push audio snapshots into the fallback inference channel when the radio
 //!   link is detected as silent.
 use abi::{
-    status, EyeExpression, ImuReading, ImuTelemetry, InferenceResult, MovementIntent,
+    status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent,
     OdometryTelemetry, OtaState, OtaStatus, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
     MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_STATUS_SIZE,
 };
@@ -103,6 +103,7 @@ pub struct AbiHost {
     _io: Io,
 }
 
+#[allow(dead_code)]
 impl AbiHost {
     /// Construct a new [`AbiHost`] with all peripherals in their reset state.
     pub fn new(io: Io, display: DisplayDriver) -> Self {
