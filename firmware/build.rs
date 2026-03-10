@@ -8,4 +8,7 @@ fn main() {
 
     // esp-build embeds the correct linker arguments for the target chip.
     esp_build::assert_unique_used_features!("esp32s3");
+    
+    // Required to prevent the linker from stripping out the entire binary
+    println!("cargo:rustc-link-arg=-Tlinkall.x");
 }
