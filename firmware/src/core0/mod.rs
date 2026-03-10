@@ -33,6 +33,8 @@ use esp_wifi::esp_now::EspNowWithWifiCreateToken;
 use portable_atomic::AtomicU32;
 use core::sync::atomic::Ordering;
 
+use crate::rgb_led::RgbLedDriver;
+
 use crate::display::DisplayDriver;
 use crate::router;
 
@@ -95,8 +97,11 @@ pub async fn brain_task(
     // Initialise the display (Phase 2).
     let display = DisplayDriver::new(&io);
 
-    // Build the ABI host context (LED pin, display handle, …).
-    let abi_host = AbiHost::new(io, display);
+    // Initialise the RGB LED (Phase 9).
+    let rgb_led = RgbLedDriver::new();
+
+    // Build the ABI host context (LED pin, display handle, RGB LED, …).
+    let abi_host = AbiHost::new(io, display, rgb_led);
 
     // Start the ESP-NOW receiver task (also owns the OTA receiver).
     spawner

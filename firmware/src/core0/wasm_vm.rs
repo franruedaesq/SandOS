@@ -459,6 +459,53 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
         )
         .unwrap();
 
+    // ── Phase 9 — RGB LED Control ─────────────────────────────────────────────
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            abi::FN_SET_RGB_LED,
+            |caller: Caller<'_, *mut AbiHost>, red: i32, green: i32, blue: i32| -> i32 {
+                let host = unsafe { &mut **caller.data() };
+                host.set_rgb_led(red, green, blue)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            abi::FN_GET_RGB_LED,
+            |mut caller: Caller<'_, *mut AbiHost>, red_ptr: i32, green_ptr: i32, blue_ptr: i32| -> i32 {
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                // Validate all three 4-byte write slots.
+                if validate_ptr_len(red_ptr as u32, 4, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                if validate_ptr_len(green_ptr as u32, 4, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                if validate_ptr_len(blue_ptr as u32, 4, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+
+                let host = unsafe { &mut **caller.data() };
+                // Get the current RGB values; we need temporary mutable i32 pointers
+                // into the Wasm memory to pass to the host function.
+                let data = mem.data_mut(&mut caller);
+                let red_ptr_obj = &mut data[red_ptr as usize] as *mut u8 as *mut i32;
+                let green_ptr_obj = &mut data[green_ptr as usize] as *mut u8 as *mut i32;
+                let blue_ptr_obj = &mut data[blue_ptr as usize] as *mut u8 as *mut i32;
+
+                host.get_rgb_led(red_ptr_obj, green_ptr_obj, blue_ptr_obj)
+            },
+        )
+        .unwrap();
+
     linker
 }
 

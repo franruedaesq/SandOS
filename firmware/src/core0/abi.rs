@@ -61,6 +61,7 @@ use abi::{
 use esp_hal::gpio::Io;
 
 use crate::display::DisplayDriver;
+use crate::rgb_led::RgbLedDriver;
 use crate::{inference, message_bus, motors, router, sensors, telemetry};
 
 // ── Host state ────────────────────────────────────────────────────────────────
@@ -99,6 +100,9 @@ pub struct AbiHost {
     /// Number of successful hot-swaps completed.
     pub hot_swap_count: u32,
 
+    /// RGB LED driver for controlling the WS2812 LED.
+    pub rgb_led: RgbLedDriver,
+
     /// GPIO IO handle (kept alive for LED control).
     _io: Io,
 }
@@ -106,7 +110,7 @@ pub struct AbiHost {
 #[allow(dead_code)]
 impl AbiHost {
     /// Construct a new [`AbiHost`] with all peripherals in their reset state.
-    pub fn new(io: Io, display: DisplayDriver) -> Self {
+    pub fn new(io: Io, display: DisplayDriver, rgb_led: RgbLedDriver) -> Self {
         Self {
             led_on: false,
             boot_time_ms: 0,
@@ -117,6 +121,7 @@ impl AbiHost {
             ota_expected_size: 0,
             ota_bytes_received: 0,
             hot_swap_count: 0,
+            rgb_led,
             _io: io,
         }
     }
@@ -433,6 +438,40 @@ impl AbiHost {
             swap_count:     self.hot_swap_count,
         };
         snapshot.to_bytes(out);
+        status::OK
+    }
+
+    // ── Phase 9 — RGB LED Control ────────────────────────────────────────────
+
+    /// Set the RGB LED to the specified color.
+    ///
+    /// Each component (red, green, blue) must be in the range 0-255.
+    /// Returns [`status::ERR_INVALID_ARG`] for out-of-range values.
+    pub fn set_rgb_led(&mut self, red: i32, green: i32, blue: i32) -> i32 {
+        // Validate color components are within 0-255 range
+        if red < 0 || red > 255 || green < 0 || green > 255 || blue < 0 || blue > 255 {
+            return status::ERR_INVALID_ARG;
+        }
+
+        self.rgb_led.set_color(red as u8, green as u8, blue as u8);
+        status::OK
+    }
+
+    /// Get the current RGB LED color.
+    ///
+    /// Writes the current red, green, and blue values to the provided pointers.
+    /// Each pointer must point to a valid i32 memory location.
+    /// Returns [`status::OK`] on success.
+    pub fn get_rgb_led(&self, red_ptr: *mut i32, green_ptr: *mut i32, blue_ptr: *mut i32) -> i32 {
+        let (r, g, b) = self.rgb_led.get_color();
+
+        // SAFETY: The Wasm VM ensures these pointers are valid within Wasm memory.
+        unsafe {
+            *red_ptr = r as i32;
+            *green_ptr = g as i32;
+            *blue_ptr = b as i32;
+        }
+
         status::OK
     }
 }

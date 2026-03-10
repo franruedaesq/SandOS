@@ -68,6 +68,10 @@ pub const FN_GET_LOCAL_INFERENCE: &str = "host_get_local_inference";
 // Phase 8 — OTA Hot-Swap Engine
 pub const FN_GET_OTA_STATUS: &str = "host_get_ota_status";
 
+// Phase 9 — RGB LED Control
+pub const FN_SET_RGB_LED: &str = "host_set_rgb_led";
+pub const FN_GET_RGB_LED: &str = "host_get_rgb_led";
+
 // ── Phase 5 — Message Bus Constants ──────────────────────────────────────────
 
 /// Dead-man's switch timeout in milliseconds.

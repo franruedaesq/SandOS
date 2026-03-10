@@ -61,6 +61,9 @@ embedded-graphics = { version = "0.8", default-features = false }
 mipidsi = { version = "0.8", default-features = false }
 display-interface-spi = { version = "0.5", default-features = false }
 
+# ── RGB LED (WS2812 NeoPixel) ─────────────────────────────────────────────────
+smart-leds = "0.3"
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 static_cell = { version = "2", features = ["nightly"] }
 heapless = "0.8"

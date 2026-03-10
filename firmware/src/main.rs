@@ -26,6 +26,8 @@ use embassy_executor::Spawner;
 use esp_hal::{
     cpu_control::{CpuControl, Stack},
     gpio::Io,
+    rmt::{TxChannelConfig, TxChannelCreator},
+    time::RateExtU32,
     timer::timg::TimerGroup,
 };
 use static_cell::StaticCell;
@@ -34,8 +36,10 @@ mod core0;
 mod core1;
 mod display;
 mod inference;
+mod led_state;
 mod message_bus;
 mod motors;
+mod rgb_led;
 mod router;
 mod sensors;
 mod telemetry;
@@ -106,6 +110,32 @@ async fn main(spawner: Spawner) {
 
     // ── 5. GPIO ──────────────────────────────────────────────────────────────
     let io = Io::new(peripherals.IO_MUX);
+
+    // ── RGB LED init (GPIO 48 via RMT) ────────────────────────────────────────
+    let rmt = esp_hal::rmt::Rmt::new(peripherals.RMT, 80_u32.MHz())
+        .expect("Failed to initialize RMT");
+
+    let tx_channel_48 = rmt
+        .channel1
+        .configure(
+            peripherals.GPIO48,
+            TxChannelConfig {
+                clk_divider: 4,
+                idle_output_level: false,
+                idle_output: true,
+                ..Default::default()
+            },
+        )
+        .expect("Failed to configure RMT TX channel 1 (GPIO48)");
+
+    unsafe {
+        rgb_led::RGB_LED = Some(rgb_led::RgbLedDriver::new());
+        if let Some(led) = &mut rgb_led::RGB_LED {
+            led.attach_tx_channel_gpio48(tx_channel_48);
+            led.off();
+        }
+    }
+    log::info!("RGB LED initialized on GPIO48 with RMT");
 
     // ── 6. Core 1 — start before Wasm VM ────────────────────────────────────
     let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);

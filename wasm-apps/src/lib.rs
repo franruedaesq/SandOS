@@ -31,6 +31,16 @@ extern "C" {
 
     /// Write a UTF-8 debug string to the Host log.
     fn host_debug_log(ptr: *const u8, len: i32) -> i32;
+
+    /// Set the RGB LED color (each component 0-255).
+    /// Parameters: red, green, blue.
+    /// Returns `ABI_OK` (0) on success.
+    fn host_set_rgb_led(red: i32, green: i32, blue: i32) -> i32;
+
+    /// Get the current RGB LED color.
+    /// Parameters: pointers to i32 slots for red, green, blue values.
+    /// Returns `ABI_OK` (0) on success.
+    fn host_get_rgb_led(red_ptr: *mut i32, green_ptr: *mut i32, blue_ptr: *mut i32) -> i32;
 }
 
 // ── ABI Imports (Phase 2 — Display) ──────────────────────────────────────────
