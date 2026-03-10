@@ -29,6 +29,7 @@ robotics built on the ESP32-S3 with the Embassy async framework.
 ```
 
 ### Host-Guest ABI (Zero Trust)
+
 The Wasm Sandbox is blind to the hardware. Every hardware interaction goes
 through a validated ABI call:
 
@@ -45,12 +46,18 @@ Wasm guest calls host_toggle_led()
 
 ## Workspace Crates
 
-| Crate | Target | Purpose |
-|-------|--------|---------|
-| `abi` | `no_std` + `std` | Shared Host-Guest ABI types |
-| `firmware` | `xtensa-esp32s3-none-elf` | ESP32-S3 OS firmware |
-| `wasm-apps` | `wasm32-unknown-unknown` | Guest Wasm applications |
-| `host-tests` | x86_64 (std) | TDD host-side test suite |
+| Crate        | Target                    | Purpose                     |
+| ------------ | ------------------------- | --------------------------- |
+| `abi`        | `no_std` + `std`          | Shared Host-Guest ABI types |
+| `firmware`   | `xtensa-esp32s3-none-elf` | ESP32-S3 OS firmware        |
+| `wasm-apps`  | `wasm32-unknown-unknown`  | Guest Wasm applications     |
+| `host-tests` | x86_64 (std)              | TDD host-side test suite    |
+
+## Documentation
+
+- [OS Architecture](docs/os-architecture.md)
+- [Incremental Component Flow](docs/component-incremental-flow.md)
+- [Remote Control Integrations](docs/remote-control-integrations.md)
 
 ---
 
@@ -89,17 +96,18 @@ espflash flash --monitor target/xtensa-esp32s3-none-elf/release/firmware
 
 #### Prerequisites
 
-| Tool | Minimum version | How to install |
-|------|----------------|----------------|
-| [espflash](https://github.com/esp-rs/espflash) | 3.0 | `cargo install espflash` |
-| [Espressif QEMU](https://github.com/espressif/qemu) | any recent | See below |
+| Tool                                                | Minimum version | How to install           |
+| --------------------------------------------------- | --------------- | ------------------------ |
+| [espflash](https://github.com/esp-rs/espflash)      | 3.0             | `cargo install espflash` |
+| [Espressif QEMU](https://github.com/espressif/qemu) | any recent      | See below                |
 
 **Installing Espressif QEMU**
 
-> The upstream QEMU project does not support ESP32-S3.  You need Espressif's
+> The upstream QEMU project does not support ESP32-S3. You need Espressif's
 > own fork.
 
 Option A — Pre-built release (recommended):
+
 ```bash
 # Visit https://github.com/espressif/qemu/releases and download the
 # 'xtensa' archive for your OS, e.g.:
@@ -112,6 +120,7 @@ qemu-system-xtensa --version   # verify
 ```
 
 Option B — Build from source:
+
 ```bash
 git clone --depth 1 https://github.com/espressif/qemu
 cd qemu

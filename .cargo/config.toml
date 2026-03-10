@@ -2,7 +2,9 @@
 # The firmware crate has its own .cargo/config.toml that sets the Xtensa target.
 
 [target.xtensa-esp32s3-none-elf]
-runner    = "espflash flash --monitor"
-rustflags = [
-    "-C", "link-arg=-nostartfiles",
-]
+runner = "espflash flash --monitor"
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[env]
+WIFI_SSID = "WLAN14192654"
+WIFI_PASSWORD = "xssaMcTc5kjf"
