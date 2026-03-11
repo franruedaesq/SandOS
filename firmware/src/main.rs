@@ -31,6 +31,7 @@ use esp_hal::{
     time::RateExtU32,
     timer::timg::TimerGroup,
 };
+use esp_wifi::EspWifiController;
 use static_cell::StaticCell;
 
 mod core0;
@@ -75,11 +76,8 @@ fn core1_entry() {
     });
 }
 
-// ── Shared WiFi radio init (disabled — display-only mode) ─────────────────────
-//
-// TODO: re-enable when WiFi/ESP-NOW are needed.
-// use esp_wifi::{esp_now::EspNowWithWifiCreateToken, EspWifiController};
-// static WIFI_INIT: StaticCell<EspWifiController<'static>> = StaticCell::new();
+// ── Shared WiFi radio init ────────────────────────────────────────────────────
+static WIFI_INIT: StaticCell<EspWifiController<'static>> = StaticCell::new();
 
 // ── Main (Core 0) ─────────────────────────────────────────────────────────────
 
@@ -111,7 +109,7 @@ async fn main(spawner: Spawner) {
     // from peripherals before Io::new() consumes IO_MUX.
     let boot_btn = esp_hal::gpio::Input::new(peripherals.GPIO0, esp_hal::gpio::Pull::Up);
 
-    let _io = Io::new(peripherals.IO_MUX);
+    let io = Io::new(peripherals.IO_MUX);
 
     // ── RGB LED init (GPIO 48 via RMT) ────────────────────────────────────────
     let rmt = esp_hal::rmt::Rmt::new(peripherals.RMT, 80_u32.MHz())
@@ -166,13 +164,59 @@ async fn main(spawner: Spawner) {
     );
     log::info!("Display + button tasks spawned");
 
-    // ── Display-only mode ───────────────────────────────────────────────────
+    // ── 9. WiFi radio init ───────────────────────────────────────────────────
     //
-    // All WiFi, ESP-NOW, web-server, and brain tasks are disabled so the
-    // display + BOOT button can run without any starvation.
-    // TODO: re-enable radio tasks once display resilience is confirmed.
+    // TIMG1 is used for the esp-wifi timer so it does not conflict with the
+    // Embassy time driver on TIMG0.  RNG and RADIO_CLK are consumed here and
+    // must not be used elsewhere.
+    let timg1 = TimerGroup::new(peripherals.TIMG1);
+    let wifi_controller_init = esp_wifi::init(
+        timg1.timer0,
+        esp_hal::rng::Rng::new(peripherals.RNG),
+        peripherals.RADIO_CLK,
+    )
+    .expect("Failed to initialize esp-wifi");
+    let wifi_init: &'static EspWifiController<'static> = WIFI_INIT.init(wifi_controller_init);
+    log::info!("esp-wifi initialized");
 
-    log::info!("Display-only mode — all network tasks disabled");
+    // ── 10. WiFi STA interface + ESP-NOW coexistence token ───────────────────
+    //
+    // `new_with_mode` splits the radio into:
+    //   • wifi_interface — passed to embassy-net (DHCP stack)
+    //   • wifi_controller — managed by wifi_task (assoc/reconnect)
+    //   • espnow_token   — passed to brain_task → espnow_rx_task
+    let (wifi_interface, wifi_controller, espnow_token) = esp_wifi::wifi::new_with_mode(
+        wifi_init,
+        peripherals.WIFI,
+        esp_wifi::wifi::WifiStaDevice,
+    )
+    .expect("Failed to create WiFi STA interface");
+
+    // ── 11. Embassy-net stack ────────────────────────────────────────────────
+    let (stack, runner) = wifi::make_stack(wifi_interface);
+
+    // ── 12. Network tasks ────────────────────────────────────────────────────
+    //
+    // net_task: drives the embassy-net packet processor (must run alongside wifi_task).
+    // wifi_task: manages WiFi association, DHCP, and reconnect.
+    spawner.spawn(wifi::net_task(runner)).unwrap();
+    spawner.spawn(wifi::wifi_task(wifi_controller, stack)).unwrap();
+    log::info!("WiFi tasks spawned");
+
+    // ── 13. Web server task (starts disabled) ────────────────────────────────
+    //
+    // Sleeps until the user enables it via the display menu.  Once enabled it
+    // waits for a DHCP lease and then serves the dashboard on port 80.
+    spawner.spawn(web_server::web_server_task(stack)).unwrap();
+    log::info!("Web server task spawned (disabled by default)");
+
+    // ── 14. Core 0 brain task ────────────────────────────────────────────────
+    //
+    // Spawns the ESP-NOW receiver, the Wasm engine, and the OS router tasks.
+    spawner
+        .spawn(core0::brain_task(spawner, io, wifi_init, espnow_token))
+        .unwrap();
+    log::info!("Brain task spawned");
 
     // Keep main alive forever so _core1_guard and other locals are not dropped.
     loop {
