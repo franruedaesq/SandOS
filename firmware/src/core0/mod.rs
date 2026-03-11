@@ -28,7 +28,10 @@ use embassy_sync::{
     channel::Channel,
     signal::Signal,
 };
-use esp_hal::gpio::Io;
+use esp_hal::{
+    gpio::{GpioPin, Io},
+    peripherals::I2C0,
+};
 use esp_wifi::esp_now::EspNowWithWifiCreateToken;
 use portable_atomic::AtomicU32;
 use core::sync::atomic::Ordering;
@@ -93,9 +96,13 @@ pub async fn brain_task(
     io: Io,
     wifi_init: &'static esp_wifi::EspWifiController<'static>,
     espnow_token: EspNowWithWifiCreateToken,
+    i2c0: I2C0,
+    gpio8: GpioPin<8>,
+    gpio9: GpioPin<9>,
 ) {
-    // Initialise the display (Phase 2).
-    let display = DisplayDriver::new(&io);
+    // Initialise the display task + ABI display handle (Phase 2).
+    crate::display::spawn_display_task(spawner, i2c0, gpio8, gpio9);
+    let display = DisplayDriver::new();
 
     // Initialise the RGB LED (Phase 9).
     let rgb_led = RgbLedDriver::new();

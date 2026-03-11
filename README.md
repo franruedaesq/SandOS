@@ -176,7 +176,16 @@ its real-time loop uninterrupted throughout.
 
 ## Phase 2 — The Face & Voice
 
-**Hardware:** ESP32-S3 + SPI/I2C screen + I2S microphone
+**Hardware:** ESP32-S3 + 0.96" I2C OLED + I2S microphone
+
+### OLED wiring used in this project
+
+| OLED Pin | ESP32-S3 Pin | Suggested wire color |
+| -------- | ------------ | -------------------- |
+| VCC      | 3V3          | Red                  |
+| GND      | GND          | Black                |
+| SCL      | GPIO 9       | Yellow               |
+| SDA      | GPIO 8       | Green                |
 
 - [x] DMA display driver (SPI2 with DMA, no CPU blocking)
 - [x] `embedded-graphics` drawing canvas

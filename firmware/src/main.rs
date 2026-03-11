@@ -184,7 +184,15 @@ async fn main(spawner: Spawner) {
     // already initialised — which it is (new_with_mode ran above).
     let espnow_token: EspNowWithWifiCreateToken = unsafe { core::mem::transmute(()) };
     spawner
-        .spawn(core0::brain_task(spawner, io, wifi_init, espnow_token))
+        .spawn(core0::brain_task(
+            spawner,
+            io,
+            wifi_init,
+            espnow_token,
+            peripherals.I2C0,
+            peripherals.GPIO8,
+            peripherals.GPIO9,
+        ))
         .unwrap();
 
     log::info!("All tasks spawned — entering executor");
