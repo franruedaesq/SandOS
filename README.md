@@ -197,10 +197,41 @@ its real-time loop uninterrupted throughout.
 Wasm calls `host_draw_eye()` + `host_write_text()` → 60 FPS robot face on
 screen. Core 1 never halted.
 
-. $HOME/export-esp.sh
-cargo install espup
-espup install
+## WiFi & Web Dashboard
 
-espflash erase-flash -p /dev/cu.usbmodem5B5F1229581
-cargo run --release
-espflash monitor
+WiFi runs alongside ESP-NOW using `esp-wifi` coexistence mode.  Once
+connected the device serves an HTTP dashboard on port **80**.
+
+### How it works
+
+| Component | Description |
+| --------- | ----------- |
+| `wifi.rs` | Manages WiFi STA association and DHCP reconnect loop |
+| `web_server.rs` | Lightweight HTTP/1.0 server; starts **disabled** by default |
+| `display/mod.rs` | BOOT button → Menu → "Web" item toggles the server on/off |
+
+The web server is **disabled at boot** to avoid DHCP delays starving the
+display task.  Enable it from the BOOT-button menu (item 3 — "Web") and
+the IP address is printed to the serial console.
+
+### Starvation prevention
+
+- The display driver uses **async I2C** — the CPU yields during each frame
+  flush, giving the WiFi stack and web server regular executor time.
+- The BOOT-button task uses hardware **edge interrupts** (no polling).
+- The web server rate-limits requests with a 20 ms yield between connections.
+- The web server sleeps while disabled, imposing zero overhead.
+
+### WiFi credentials
+
+Set at compile time via environment variables (defaults to Wokwi built-in AP):
+
+```bash
+WIFI_SSID="MyNetwork" WIFI_PASSWORD="secret" cargo run --release
+```
+
+### Erasing flash before first use (real hardware)
+
+```bash
+espflash erase-flash -p /dev/ttyUSB0   # adjust port as needed
+```

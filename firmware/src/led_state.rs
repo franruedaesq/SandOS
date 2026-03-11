@@ -23,7 +23,7 @@ pub fn set_led_color(r: u8, g: u8, b: u8) {
     LED_B.store(b, Ordering::Relaxed);
 
     // Control the actual hardware
-    if let Some(led) = unsafe { &mut rgb_led::RGB_LED } {
+    if let Some(led) = unsafe { (*core::ptr::addr_of_mut!(rgb_led::RGB_LED)).as_mut() } {
         led.set_color(r, g, b);
     } else {
         log::warn!("[led_state] RGB_LED controller not initialized");

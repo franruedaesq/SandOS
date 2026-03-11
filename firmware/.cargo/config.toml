@@ -5,15 +5,23 @@
 target = "xtensa-esp32s3-none-elf"
 
 [target.xtensa-esp32s3-none-elf]
-# `cargo run` flashes the firmware to a connected ESP32-S3 and opens the
-# serial monitor.  Make sure the board is plugged in via USB before running.
+# `cargo run --release` chains three steps automatically:
+#   1. Build  — compiles for xtensa-esp32s3-none-elf
+#   2. Validate — converts the ELF to a flashable .bin via `espflash save-image`
+#                 (verifies the bootloader + partition table structure is correct)
+#   3. Boot   — starts the image in Espressif's qemu-system-xtensa fork
 #
-# Install espflash if you haven't already:
-#   cargo install espflash
+# Prerequisites:
+#   cargo install espflash          (for image conversion)
+#   See README §Emulation for QEMU installation instructions.
 #
-# To emulate in QEMU instead (requires Espressif QEMU fork):
-#   SANDOS_VALIDATE_ONLY=0 ./scripts/run-qemu.sh <path-to-elf>
-runner = "espflash flash --monitor --partition-table partitions.csv"
+# Flash to real hardware instead:
+#   espflash flash --monitor --partition-table partitions.csv \
+#       target/xtensa-esp32s3-none-elf/release/firmware
+#
+# CI / validate-only (no QEMU needed):
+#   SANDOS_VALIDATE_ONLY=1 cargo run --release
+runner = "./scripts/run-qemu.sh"
 rustflags = ["-C", "link-arg=-nostartfiles"]
 
 [unstable]

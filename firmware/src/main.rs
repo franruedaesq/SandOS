@@ -130,7 +130,7 @@ async fn main(spawner: Spawner) {
 
     unsafe {
         rgb_led::RGB_LED = Some(rgb_led::RgbLedDriver::new());
-        if let Some(led) = &mut rgb_led::RGB_LED {
+        if let Some(led) = (*core::ptr::addr_of_mut!(rgb_led::RGB_LED)).as_mut() {
             led.attach_tx_channel_gpio48(tx_channel_48);
             led.off();
         }
@@ -181,13 +181,17 @@ async fn main(spawner: Spawner) {
 
     // ── 10. WiFi STA interface + ESP-NOW coexistence token ───────────────────
     //
-    // `new_with_mode` splits the radio into:
-    //   • wifi_interface — passed to embassy-net (DHCP stack)
-    //   • wifi_controller — managed by wifi_task (assoc/reconnect)
-    //   • espnow_token   — passed to brain_task → espnow_rx_task
-    let (wifi_interface, wifi_controller, espnow_token) = esp_wifi::wifi::new_with_mode(
+    // In esp-wifi 0.12 the API is split into two calls:
+    //   1. `enable_esp_now_with_wifi` — consumes and returns the WIFI peripheral
+    //      plus an `EspNowWithWifiCreateToken` that authorises EspNow to coexist
+    //      with an active WiFi STA connection.
+    //   2. `new_with_mode` — consumes the WIFI peripheral (returned above) and
+    //      creates the `WifiDevice` (embassy-net) + `WifiController` (assoc/DHCP).
+    let (wifi_peri, espnow_token) =
+        esp_wifi::esp_now::enable_esp_now_with_wifi(peripherals.WIFI);
+    let (wifi_interface, wifi_controller) = esp_wifi::wifi::new_with_mode(
         wifi_init,
-        peripherals.WIFI,
+        wifi_peri,
         esp_wifi::wifi::WifiStaDevice,
     )
     .expect("Failed to create WiFi STA interface");
