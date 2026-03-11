@@ -10,7 +10,7 @@
 
 use embassy_executor::task;
 use embassy_net::{tcp::TcpSocket, Stack};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_io_async::Write;
 
 use portable_atomic::AtomicBool;
@@ -304,7 +304,48 @@ pub async fn web_server_task(stack: &'static Stack<'static>) {
         if !was_enabled {
             if stack.config_v4().is_none() {
                 log::info!("[web_server] waiting for network…");
-                stack.wait_config_up().await;
+                let wait_started = Instant::now();
+                let mut last_wait_log = wait_started;
+
+                while stack.config_v4().is_none() {
+                    if !is_web_server_enabled() {
+                        log::info!("[web_server] waiting cancelled (server disabled)");
+                        break;
+                    }
+
+                    let now = Instant::now();
+                    if now - last_wait_log >= Duration::from_secs(3) {
+                        let elapsed = (now - wait_started).as_secs();
+                        let wifi_status = crate::wifi::wifi_status();
+                        if let Some(ip) = crate::wifi::wifi_ipv4() {
+                            log::info!(
+                                "[web_server] waiting {}s (wifi_status={}, ip={}.{}.{}.{})",
+                                elapsed,
+                                wifi_status,
+                                ip[0], ip[1], ip[2], ip[3]
+                            );
+                        } else {
+                            log::info!(
+                                "[web_server] waiting {}s (wifi_status={}, ip=none)",
+                                elapsed,
+                                wifi_status
+                            );
+                        }
+                        if elapsed >= 30 {
+                            log::warn!(
+                                "[web_server] network still unavailable after {}s",
+                                elapsed
+                            );
+                        }
+                        last_wait_log = now;
+                    }
+
+                    Timer::after(Duration::from_millis(250)).await;
+                }
+            }
+
+            if !is_web_server_enabled() {
+                continue;
             }
             log::info!("[web_server] listening on port 80");
             // Record the tick when the server first becomes active (write-once).

@@ -72,10 +72,10 @@ pub const DISPLAY_HEIGHT: u32 = 64;
 const DISPLAY_BUF_SIZE: usize = (DISPLAY_WIDTH as usize) * (DISPLAY_HEIGHT as usize / 8);
 const DISPLAY_QUEUE_DEPTH: usize = 8;
 const EXPRESSION_OVERRIDE_TIMEOUT: Duration = Duration::from_secs(8);
-// 100 ms (10 fps) — async I2C yields the CPU during each flush so other
-// tasks (WiFi, web server) continue to run.  The frame budget is generous
-// enough to keep animations smooth at this rate.
-const FRAME_PERIOD: Duration = Duration::from_millis(100);
+// OLED stability baseline (validated on device): do not change casually.
+const FRAME_PERIOD: Duration = Duration::from_millis(150);
+const FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
+const OLED_PAGE_WRITE_CHUNK_SIZE: usize = 32;
 const DIAG_SKIP_FLUSH: bool = false;
 
 // ── Tiny xorshift32 PRNG (no-std, no-alloc) ──────────────────────────────────
@@ -210,12 +210,10 @@ pub fn spawn_display_task(
 /// forwarded to the display render loop via `BUTTON_EVENT_CHANNEL`.
 #[embassy_executor::task]
 async fn button_task(mut boot_btn: Input<'static>) {
-    log::info!("[button] task starting — async edge interrupts on GPIO0");
     loop {
         // Wait for the active-LOW BOOT button to be pressed (falling edge).
         boot_btn.wait_for_falling_edge().await;
         let press_start = Instant::now();
-        log::info!("[button] pressed");
 
         // Wait for release (rising edge) within 2 s.
         // If the timeout fires first it is a long press.
@@ -261,14 +259,10 @@ async fn display_task(
     sda: GpioPin<8>,
     scl: GpioPin<9>,
 ) {
-    log::info!("[display] task starting (I2C0 SDA=GPIO8 SCL=GPIO9 BOOT=GPIO0)");
-
-    // 400 kHz async I2C.  WiFi interrupt jitter is no longer a concern
-    // because the CPU yields during transfers; BusCycles(800) at 400 kHz
-    // ≈ 2 ms still catches genuine bus errors quickly.
+    // OLED stability baseline (validated on device): do not change casually.
     let mut cfg = I2cConfig::default();
-    cfg.frequency = 400.kHz();
-    cfg.timeout = BusTimeout::BusCycles(800);
+    cfg.frequency = 200.kHz();
+    cfg.timeout = BusTimeout::BusCycles(4000);
 
     let i2c = match I2c::new(i2c0, cfg) {
         Ok(bus) => bus.with_sda(sda).with_scl(scl).into_async(),
@@ -277,11 +271,8 @@ async fn display_task(
             return;
         }
     };
-    log::info!("[display] I2C init OK");
-
     let mut oled = OledDisplay::new(i2c);
     oled.init().await;
-    log::info!("[display] OLED init sequence sent");
 
     let mut state = FaceState::default();
 
@@ -289,9 +280,8 @@ async fn display_task(
     let title_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let _ = Text::new("SandOS", Point::new(34, 20), title_style).draw(&mut oled);
     let _ = Text::new("OLED OK", Point::new(34, 36), title_style).draw(&mut oled);
-    log::info!("[display] splash drawn, flushing…");
     match oled.flush().await {
-        Ok(()) => log::info!("[display] splash flush OK"),
+        Ok(()) => {}
         Err(()) => log::error!("[display] splash flush FAILED (continuing)"),
     }
     Timer::after(Duration::from_millis(900)).await;
@@ -304,41 +294,17 @@ async fn display_task(
     state.next_blink_ms = seed_ms + state.rng.range(1500, 3500) as u64;
     state.next_expression_ms = seed_ms + state.rng.range(3000, 5000) as u64;
     state.next_look_ms = seed_ms + state.rng.range(800, 2000) as u64;
-    log::info!("[display] entering render loop");
-    let mut loop_frames: u16 = 0;
-    let mut last_loop_log = Instant::now();
     let mut had_flush_error = false;
-    let mut last_flush_us: u64 = 0;
-    let mut last_page_errors: u8 = 0;
     let mut flush_fail_since: Option<Instant> = None;
-    let mut max_frame_us: u64 = 0;
-    let mut min_frame_us: u64 = u64::MAX;
-    let mut sum_render_us: u64 = 0;
-    let mut sum_flush_us: u64 = 0;
-    let mut sum_frame_us: u64 = 0;
-    let mut last_expr_name: &str = "Neutral";
 
     let receiver = DISPLAY_CHANNEL.receiver();
     let btn_receiver = BUTTON_EVENT_CHANNEL.receiver();
 
-    // Frame counter that never resets (unlike loop_frames which resets every second).
-    let mut total_frames: u32 = 0;
-    // Trace the first N frames step-by-step to diagnose stalls.
-    const TRACE_FRAMES: u32 = 10;
     // Starvation state: true while the animation is known to be frozen.
     let mut starved = false;
-    // Heartbeat: log every 5s so we know the task is alive even without
-    // expression changes or starvation transitions.
-    let mut last_heartbeat = Instant::now();
 
     loop {
         let frame_start = Instant::now();
-        let tracing = total_frames < TRACE_FRAMES;
-
-        if tracing {
-            log::info!("[display] ── frame {} START (t={}ms) ──",
-                total_frames, frame_start.as_millis());
-        }
 
         // 1. Drain the DisplayCommand queue from the Wasm ABI.
         while let Ok(cmd) = receiver.try_receive() {
@@ -356,18 +322,17 @@ async fn display_task(
             }
         }
 
-        // 1b. First-iteration heartbeat (proves the loop body executes).
-        if loop_frames == 0 && state.frame == 0 {
-            log::info!("[display] render loop alive — first frame");
-        }
-
         // 2. Drain button events sent by the async button_task.
         while let Ok(btn_event) = btn_receiver.try_receive() {
             handle_button_event(btn_event, &mut state);
         }
 
         // 3. Auto-return to face mode after 10 s of inactivity in menu/action.
-        if !matches!(state.ui_mode, UiMode::Face) {
+        // In WebMenu, pause this timeout while WiFi is actively connecting.
+        let pause_idle_timeout = matches!(state.ui_mode, UiMode::WebMenu)
+            && crate::web_server::is_web_server_enabled()
+            && crate::wifi::wifi_status() == crate::wifi::WIFI_STATUS_CONNECTING;
+        if !matches!(state.ui_mode, UiMode::Face) && !pause_idle_timeout {
             let idle = Instant::now() - state.last_button_time;
             if idle >= Duration::from_secs(10) {
                 state.ui_mode = UiMode::Face;
@@ -379,39 +344,28 @@ async fn display_task(
         }
 
         // 4. Render and push the frame.
-        if tracing { log::info!("[display] frame {} step=render", total_frames); }
-        let render_start = Instant::now();
         render_frame(&mut oled, &mut state);
-        let render_us = (Instant::now() - render_start).as_micros();
-        if tracing { log::info!("[display] frame {} render={}us", total_frames, render_us); }
 
         // 4b. Flush framebuffer to SSD1306 via async I2C.
         //     The CPU yields to other tasks during each I2C transfer, so
         //     Wi-Fi, the web server and the button task all continue to run.
-        if DIAG_SKIP_FLUSH {
-            if loop_frames == 0 {
-                log::warn!("[display] DIAG_SKIP_FLUSH enabled: OLED transfer disabled");
-            }
-        } else {
-            if tracing { log::info!("[display] frame {} step=flush", total_frames); }
+        if !DIAG_SKIP_FLUSH {
             let flush_start = Instant::now();
-            let mut flush_ok = oled.flush().await.is_ok();
+            let mut flush_ok = matches!(
+                with_timeout(FLUSH_TIMEOUT, oled.flush()).await,
+                Ok(Ok(()))
+            );
             // Immediate retry on transient bus error.
             if !flush_ok {
-                flush_ok = oled.flush().await.is_ok();
+                flush_ok = matches!(
+                    with_timeout(FLUSH_TIMEOUT, oled.flush()).await,
+                    Ok(Ok(()))
+                );
             }
-            last_flush_us = (Instant::now() - flush_start).as_micros() as u64;
-            if tracing {
-                log::info!("[display] frame {} flush={}us ok={}",
-                    total_frames, last_flush_us, flush_ok);
-            }
-            last_page_errors = if flush_ok { 0 } else { 1 };
+            let last_flush_us = (Instant::now() - flush_start).as_micros() as u64;
             if flush_ok {
                 flush_fail_since = None;
-                if had_flush_error {
-                    log::info!("[display] flush recovered ({}us)", last_flush_us);
-                    had_flush_error = false;
-                }
+                had_flush_error = false;
             } else {
                 if !had_flush_error {
                     log::error!("[display] flush failed ({}us)", last_flush_us);
@@ -436,85 +390,6 @@ async fn display_task(
             }
         }
 
-        // ── Per-frame timing stats ──
-        let frame_us = (Instant::now() - frame_start).as_micros() as u64;
-        sum_render_us += render_us as u64;
-        sum_flush_us += last_flush_us;
-        sum_frame_us += frame_us;
-        if frame_us > max_frame_us { max_frame_us = frame_us; }
-        if frame_us < min_frame_us { min_frame_us = frame_us; }
-
-        loop_frames = loop_frames.wrapping_add(1);
-        let now = Instant::now();
-
-        // ── Log expression transitions in real-time ──
-        let expr_name = match state.expression {
-            EyeExpression::Neutral => "Neutral",
-            EyeExpression::Happy => "Happy",
-            EyeExpression::Sad => "Sad",
-            EyeExpression::Angry => "Angry",
-            EyeExpression::Surprised => "Surprised",
-            EyeExpression::Thinking => "Thinking",
-            EyeExpression::Blink => "Blink",
-        };
-        if expr_name != last_expr_name {
-            let src = if state.expression_override { "abi" } else { "idle" };
-            log::info!(
-                "[display] expression {} -> {} (src={} idx={})",
-                last_expr_name, expr_name, src, state.idle_expr_idx,
-            );
-            last_expr_name = expr_name;
-        }
-
-        if now - last_loop_log >= Duration::from_secs(1) {
-            let mode_name = match state.ui_mode {
-                UiMode::Face => "face",
-                UiMode::Menu => "menu",
-                UiMode::MenuAction(_) => "action",
-            };
-            let now_ms = now.as_millis() as u64;
-            let blink_remaining = if state.blink_end_ms > now_ms { state.blink_end_ms - now_ms } else { 0 };
-            let next_expr_in = if state.next_expression_ms > now_ms { state.next_expression_ms - now_ms } else { 0 };
-            let avg_frame = if loop_frames > 0 { sum_frame_us / loop_frames as u64 } else { 0 };
-            let avg_render = if loop_frames > 0 { sum_render_us / loop_frames as u64 } else { 0 };
-            let avg_flush = if loop_frames > 0 { sum_flush_us / loop_frames as u64 } else { 0 };
-            let is_blinking = now_ms < state.blink_end_ms;
-            let in_transition = now_ms < state.transition_end_ms;
-            log::info!(
-                "[display] fps={} expr={} mode={} override={} blinking={} transition={}",
-                loop_frames,
-                expr_name,
-                mode_name,
-                state.expression_override,
-                is_blinking,
-                in_transition,
-            );
-            log::info!(
-                "[display] timing: avg_frame={}us avg_render={}us avg_flush={}us min_frame={}us max_frame={}us",
-                avg_frame,
-                avg_render,
-                avg_flush,
-                min_frame_us,
-                max_frame_us,
-            );
-            log::info!(
-                "[display] anim: look_x={} blink_in={}ms next_expr_in={}ms frame={} pgErr={}",
-                state.eye_look_x,
-                blink_remaining,
-                next_expr_in,
-                state.frame,
-                last_page_errors,
-            );
-            // Reset per-second accumulators.
-            loop_frames = 0;
-            last_loop_log = now;
-            max_frame_us = 0;
-            min_frame_us = u64::MAX;
-            sum_render_us = 0;
-            sum_flush_us = 0;
-            sum_frame_us = 0;
-        }
-
         // 6. Sleep the remainder of the frame period.
         //    Yield at least once per frame so the executor can run other tasks
         //    (Wi-Fi, web server, button task).
@@ -523,24 +398,11 @@ async fn display_task(
         {
             const POLL_INTERVAL: Duration = Duration::from_millis(10);
             let frame_deadline = frame_start + FRAME_PERIOD;
-            if tracing {
-                let remaining = if Instant::now() < frame_deadline {
-                    (frame_deadline - Instant::now()).as_micros() as i64
-                } else {
-                    -((Instant::now() - frame_deadline).as_micros() as i64)
-                };
-                log::info!("[display] frame {} step=sleep remaining={}us",
-                    total_frames, remaining);
-            }
             if Instant::now() >= frame_deadline {
                 // Already over budget — yield once briefly, then continue.
                 let yield_start = Instant::now();
                 Timer::after(Duration::from_micros(100)).await;
                 let yield_us = (Instant::now() - yield_start).as_micros();
-                if tracing {
-                    log::info!("[display] frame {} yield_overbudget={}us",
-                        total_frames, yield_us);
-                }
                 if yield_us > 200_000 {
                     if !starved {
                         starved = true;
@@ -552,15 +414,10 @@ async fn display_task(
                     log::info!("[display] RESUMED — animation running normally");
                 }
             } else {
-                let mut sleep_count: u8 = 0;
                 loop {
                     let yield_start = Instant::now();
                     Timer::after(POLL_INTERVAL).await;
                     let yield_us = (Instant::now() - yield_start).as_micros();
-                    if tracing && sleep_count == 0 {
-                        log::info!("[display] frame {} first_yield={}us (asked 10000us)",
-                            total_frames, yield_us);
-                    }
                     // Starvation watchdog: if a 10ms sleep takes >200ms,
                     // another task is hogging the executor.
                     if yield_us > 200_000 {
@@ -573,20 +430,11 @@ async fn display_task(
                         starved = false;
                         log::info!("[display] RESUMED — animation running normally");
                     }
-                    sleep_count = sleep_count.saturating_add(1);
                     if Instant::now() >= frame_deadline {
                         break;
                     }
                 }
             }
-        }
-
-        total_frames += 1;
-
-        // Heartbeat: prove the task is alive even without visible changes.
-        if (Instant::now() - last_heartbeat) >= Duration::from_secs(5) {
-            log::info!("[display] heartbeat frame={} starved={}", total_frames, starved);
-            last_heartbeat = Instant::now();
         }
     }
 }
@@ -599,6 +447,8 @@ enum UiMode {
     Face,
     /// Split: 4-item menu on left 64 px, mini-face on right 64 px.
     Menu,
+    /// Web control submenu (ON/OFF selector + status line).
+    WebMenu,
     /// Action result displayed on left panel after a long-press selection.
     MenuAction(u8),
 }
@@ -608,6 +458,7 @@ enum UiMode {
 // ── UI state machine ──────────────────────────────────────────────────────────
 
 const MENU_ITEMS: [&str; 4] = ["Talk", "Clock", "Web", "Help"];
+const WEB_MENU_ITEMS: [&str; 2] = ["ON", "OFF"];
 
 fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
     match ev {
@@ -627,6 +478,13 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                         MENU_ITEMS[state.menu_selected as usize]
                     );
                 }
+                UiMode::WebMenu => {
+                    state.web_menu_selected = (state.web_menu_selected + 1) % 2;
+                    log::info!(
+                        "[display] web menu next -> {}",
+                        WEB_MENU_ITEMS[state.web_menu_selected as usize]
+                    );
+                }
                 UiMode::MenuAction(_) => {
                     state.ui_mode = UiMode::Menu;
                     state.text.clear();
@@ -644,11 +502,36 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                     log::info!("[display] mode -> Menu (selected: {})", MENU_ITEMS[0]);
                 }
                 UiMode::Menu => {
-                    apply_menu_action(state.menu_selected, state);
-                    state.ui_mode = UiMode::MenuAction(state.menu_selected);
+                    if state.menu_selected == 2 {
+                        // Enter Web ON/OFF submenu.
+                        state.ui_mode = UiMode::WebMenu;
+                        state.web_menu_selected = if crate::web_server::is_web_server_enabled() {
+                            1
+                        } else {
+                            0
+                        };
+                        log::info!("[display] selected -> Web submenu");
+                    } else {
+                        apply_menu_action(state.menu_selected, state);
+                        state.ui_mode = UiMode::MenuAction(state.menu_selected);
+                        log::info!(
+                            "[display] selected -> {}",
+                            MENU_ITEMS[state.menu_selected as usize]
+                        );
+                    }
+                }
+                UiMode::WebMenu => {
+                    if state.web_menu_selected == 0 {
+                        crate::web_server::enable_web_server();
+                        crate::wifi::mark_connecting();
+                        state.expression = EyeExpression::Happy;
+                    } else {
+                        crate::web_server::disable_web_server();
+                        state.expression = EyeExpression::Neutral;
+                    }
                     log::info!(
-                        "[display] selected -> {}",
-                        MENU_ITEMS[state.menu_selected as usize]
+                        "[display] web set -> {}",
+                        WEB_MENU_ITEMS[state.web_menu_selected as usize]
                     );
                 }
                 UiMode::MenuAction(_) => {
@@ -676,16 +559,9 @@ fn apply_menu_action(item: u8, state: &mut FaceState) {
             format_uptime(secs, &mut state.text);
         }
         2 => {
-            // Web server toggle
-            if crate::web_server::is_web_server_enabled() {
-                crate::web_server::disable_web_server();
-                state.expression = EyeExpression::Neutral;
-                let _ = state.text.push_str("Web: OFF");
-            } else {
-                crate::web_server::enable_web_server();
-                state.expression = EyeExpression::Happy;
-                let _ = state.text.push_str("Web: ON");
-            }
+            // Web handled by UiMode::WebMenu.
+            state.expression = EyeExpression::Neutral;
+            let _ = state.text.push_str("Web menu");
         }
         3 => {
             // Help
@@ -732,6 +608,7 @@ struct FaceState {
     expression_override_since: Option<Instant>,
     ui_mode: UiMode,
     menu_selected: u8,
+    web_menu_selected: u8,
     /// Updated on every button event; used for the 10-second inactivity timeout.
     last_button_time: Instant,
     // ── Rich animation state ──
@@ -763,6 +640,7 @@ impl Default for FaceState {
             expression_override_since: None,
             ui_mode: UiMode::Face,
             menu_selected: 0,
+            web_menu_selected: 0,
             last_button_time: Instant::from_ticks(0),
             rng: Rng(0xDEAD_BEEF),
             next_blink_ms: 2500,
@@ -809,31 +687,21 @@ fn tick_animation(state: &mut FaceState, now_ms: u64) {
         state.blink_end_ms = now_ms + 300;
         let next_gap = state.rng.range(2000, 5000) as u64;
         state.next_blink_ms = now_ms + next_gap;
-        log::info!("[display] blink START (300ms, next in {}ms)", next_gap);
     }
 
     // --- Idle expression cycling (random 3–6 s, brief transition) ---
     if !state.expression_override && now_ms >= state.next_expression_ms {
         state.transition_end_ms = now_ms + 120; // eyes close 120 ms
-        let prev_idx = state.idle_expr_idx;
         state.idle_expr_idx = (state.idle_expr_idx + 1) % IDLE_EXPRESSIONS.len() as u8;
         state.expression = IDLE_EXPRESSIONS[state.idle_expr_idx as usize];
         let next_gap = state.rng.range(3000, 6500) as u64;
         state.next_expression_ms = now_ms + next_gap;
-        log::info!(
-            "[display] idle cycle idx {} -> {} (next in {}ms)",
-            prev_idx, state.idle_expr_idx, next_gap,
-        );
     }
 
     // --- Eye drift (gentle horizontal pupil shift every 1–3 s) ---
     if now_ms >= state.next_look_ms {
-        let prev_x = state.eye_look_x;
         state.eye_look_x = (state.rng.next() % 5) as i32 - 2; // -2..+2
         state.next_look_ms = now_ms + state.rng.range(1000, 3000) as u64;
-        if prev_x != state.eye_look_x {
-            log::info!("[display] eye drift {} -> {}", prev_x, state.eye_look_x);
-        }
     }
 }
 
@@ -1108,6 +976,11 @@ fn render_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
     let normal_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let inverted_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
 
+    if let UiMode::WebMenu = state.ui_mode {
+        render_web_menu_panel(oled, state);
+        return;
+    }
+
     if let UiMode::MenuAction(_) = state.ui_mode {
         // Show the action result text and a dismiss hint.
         render_action_text(oled, &state.text);
@@ -1126,6 +999,58 @@ fn render_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
             let _ = Text::new(label, Point::new(4, y_top + 12), normal_style).draw(oled);
         }
     }
+}
+
+fn render_web_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
+    let normal_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let inverted_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+
+    let _ = Text::new("Web", Point::new(2, 10), normal_style).draw(oled);
+
+    for (i, &label) in WEB_MENU_ITEMS.iter().enumerate() {
+        let y_top = 14 + (i as i32) * 16;
+        if i == state.web_menu_selected as usize {
+            let _ = Rectangle::new(Point::new(0, y_top), Size::new(63, 14))
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(oled);
+            let _ = Text::new(label, Point::new(4, y_top + 11), inverted_style).draw(oled);
+        } else {
+            let _ = Text::new(label, Point::new(4, y_top + 11), normal_style).draw(oled);
+        }
+    }
+
+    let mut status = heapless::String::<64>::new();
+    let web_enabled = crate::web_server::is_web_server_enabled();
+    if !web_enabled {
+        let _ = status.push_str("disconnected");
+    } else {
+        match crate::wifi::wifi_status() {
+            crate::wifi::WIFI_STATUS_CONNECTING => {
+                let _ = status.push_str("connecting");
+            }
+            crate::wifi::WIFI_STATUS_CONNECTED => {
+                if let Some(ip) = crate::wifi::wifi_ipv4() {
+                    let _ = core::fmt::write(
+                        &mut status,
+                        format_args!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]),
+                    );
+                } else {
+                    let _ = status.push_str("connected");
+                }
+            }
+            crate::wifi::WIFI_STATUS_ERROR => {
+                let _ = status.push_str("error");
+            }
+            _ => {
+                let _ = status.push_str("disconnected");
+            }
+        }
+    }
+
+    let _ = Rectangle::new(Point::new(0, 52), Size::new(63, 12))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        .draw(oled);
+    let _ = Text::new(&status, Point::new(2, 62), normal_style).draw(oled);
 }
 
 /// Render action result text in the left panel; chunk into 10-char lines.
@@ -1279,7 +1204,7 @@ impl OledDisplay {
             0xA6, // Normal display (not inverted)
         ];
         match self.i2c.write(SSD1306_ADDR, &init_cmds).await {
-            Ok(()) => log::info!("[display] SSD1306 init cmds OK"),
+            Ok(()) => {}
             Err(e) => log::error!("[display] SSD1306 init cmds FAILED: {:?}", e),
         }
 
@@ -1290,13 +1215,13 @@ impl OledDisplay {
         // just reset above so the pointer starts at page 0, column 0.
         self.buffer.fill(0x00);
         match self.flush().await {
-            Ok(()) => log::info!("[display] GDDRAM clear OK"),
+            Ok(()) => {}
             Err(()) => log::error!("[display] GDDRAM clear FAILED"),
         }
 
         // Display ON.
         match self.i2c.write(SSD1306_ADDR, &[0x00, 0xAF]).await {
-            Ok(()) => log::info!("[display] display ON cmd OK"),
+            Ok(()) => {}
             Err(e) => log::error!("[display] display ON cmd FAILED: {:?}", e),
         }
     }
@@ -1354,17 +1279,26 @@ impl OledDisplay {
             return false;
         }
 
-        // Write 128 data bytes for this page.
-        let mut packet = [0u8; 129]; // 1 control byte + 128 data bytes
-        packet[0] = 0x40;
+        // Write 128 data bytes for this page in small chunks.
         let start = page * 128;
         let end = (start + 128).min(self.buffer.len());
         let chunk = &self.buffer[start..end];
-        packet[1..1 + chunk.len()].copy_from_slice(chunk);
-        self.i2c
-            .write(SSD1306_ADDR, &packet[..1 + chunk.len()])
-            .await
-            .is_ok()
+        let mut packet = [0u8; 1 + OLED_PAGE_WRITE_CHUNK_SIZE];
+        packet[0] = 0x40;
+
+        for data_chunk in chunk.chunks(OLED_PAGE_WRITE_CHUNK_SIZE) {
+            packet[1..1 + data_chunk.len()].copy_from_slice(data_chunk);
+            if self
+                .i2c
+                .write(SSD1306_ADDR, &packet[..1 + data_chunk.len()])
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+
+        true
     }
 }
 

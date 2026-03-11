@@ -199,19 +199,19 @@ screen. Core 1 never halted.
 
 ## WiFi & Web Dashboard
 
-WiFi runs alongside ESP-NOW using `esp-wifi` coexistence mode.  Once
+WiFi runs alongside ESP-NOW using `esp-wifi` coexistence mode. Once
 connected the device serves an HTTP dashboard on port **80**.
 
 ### How it works
 
-| Component | Description |
-| --------- | ----------- |
-| `wifi.rs` | Manages WiFi STA association and DHCP reconnect loop |
-| `web_server.rs` | Lightweight HTTP/1.0 server; starts **disabled** by default |
-| `display/mod.rs` | BOOT button → Menu → "Web" item toggles the server on/off |
+| Component        | Description                                                 |
+| ---------------- | ----------------------------------------------------------- |
+| `wifi.rs`        | Manages WiFi STA association and DHCP reconnect loop        |
+| `web_server.rs`  | Lightweight HTTP/1.0 server; starts **disabled** by default |
+| `display/mod.rs` | BOOT button → Menu → "Web" item toggles the server on/off   |
 
 The web server is **disabled at boot** to avoid DHCP delays starving the
-display task.  Enable it from the BOOT-button menu (item 3 — "Web") and
+display task. Enable it from the BOOT-button menu (item 3 — "Web") and
 the IP address is printed to the serial console.
 
 ### Starvation prevention
@@ -235,3 +235,7 @@ WIFI_SSID="MyNetwork" WIFI_PASSWORD="secret" cargo run --release
 ```bash
 espflash erase-flash -p /dev/ttyUSB0   # adjust port as needed
 ```
+
+espflash erase-flash -p /dev/cu.usbmodem5B5F1229581
+. $HOME/export-esp.sh
+cargo run --release
