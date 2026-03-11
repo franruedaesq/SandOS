@@ -149,12 +149,14 @@ async fn main(spawner: Spawner) {
     // ── 7. ULP paramedic ─────────────────────────────────────────────────────
     ulp::start(peripherals.LPWR);
 
-    // ── 8. Display — spawn FIRST, before WiFi ───────────────────────────────
+    // ── 8. Display + button tasks ────────────────────────────────────────────
     //
-    // The display task runs on Core 0 and is starved by net_task during heavy
-    // WiFi traffic (DHCP can hold the executor for 30–50 s).  By spawning the
-    // display before any network task exists, it gets exclusive CPU time for
-    // its I2C init, splash screen (900 ms) and the first few render frames.
+    // spawn_display_task spawns two Embassy tasks:
+    //   • display_task  — renders frames via async I2C (CPU yields during flush)
+    //   • button_task   — monitors GPIO0 with hardware edge interrupts
+    //
+    // With async I2C the display no longer blocks Core 0, so it is safe to
+    // run the Wi-Fi stack and web server alongside the display.
     display::spawn_display_task(
         spawner,
         peripherals.I2C0,
@@ -162,7 +164,7 @@ async fn main(spawner: Spawner) {
         peripherals.GPIO9,
         boot_btn,
     );
-    log::info!("Display task spawned — waiting for splash…");
+    log::info!("Display + button tasks spawned");
 
     // ── Display-only mode ───────────────────────────────────────────────────
     //

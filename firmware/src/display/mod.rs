@@ -19,7 +19,8 @@
 //! DisplayDriver::draw_eye()  ← embedded-graphics renders to framebuffer
 //!      │
 //!      ▼
-//! I2C transfer               ← frame is pushed to the OLED controller
+//! Async I2C transfer         ← DMA/interrupt-driven; CPU yields while
+//!                               the frame is pushed to the OLED controller
 //! ```
 //!
 //! ## UI Modes
@@ -32,7 +33,8 @@
 //!
 //! ## BOOT button
 //!
-//! GPIO 0 is polled every 40 ms (the render interval):
+//! GPIO 0 is monitored by a dedicated async Embassy task using hardware
+//! edge interrupts — no polling required:
 //! - Short press (< 2 s): face → menu, or navigate to next menu item.
 //! - Long press (≥ 2 s): face → menu, or select the highlighted item.
 //! - 10 s of inactivity in menu/action mode → auto-return to face mode.
@@ -43,7 +45,7 @@ use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::Channel,
 };
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Size},
@@ -61,7 +63,7 @@ use esp_hal::{
     i2c::master::{BusTimeout, Config as I2cConfig, I2c},
     peripherals::I2C0,
     time::RateExtU32,
-    Blocking,
+    Async,
 };
 
 const SSD1306_ADDR: u8 = 0x3C;
@@ -70,10 +72,9 @@ pub const DISPLAY_HEIGHT: u32 = 64;
 const DISPLAY_BUF_SIZE: usize = (DISPLAY_WIDTH as usize) * (DISPLAY_HEIGHT as usize / 8);
 const DISPLAY_QUEUE_DEPTH: usize = 8;
 const EXPRESSION_OVERRIDE_TIMEOUT: Duration = Duration::from_secs(8);
-// 100 ms (10 fps) — the blocking I2C flush takes ~25-40 ms at 400 kHz,
-// so a 33 ms budget is always exceeded.  With 100 ms the normal sleep
-// loop (10 ms polls) runs after each flush, keeping button polling and
-// other executor tasks alive instead of starving them.
+// 100 ms (10 fps) — async I2C yields the CPU during each flush so other
+// tasks (WiFi, web server) continue to run.  The frame budget is generous
+// enough to keep animations smooth at this rate.
 const FRAME_PERIOD: Duration = Duration::from_millis(100);
 const DIAG_SKIP_FLUSH: bool = false;
 
@@ -114,6 +115,17 @@ const IDLE_EXPRESSIONS: [EyeExpression; 7] = [
 
 static DISPLAY_CHANNEL: Channel<CriticalSectionRawMutex, DisplayCommand, DISPLAY_QUEUE_DEPTH> =
     Channel::new();
+
+/// Channel through which the async `button_task` sends press events to the
+/// display render loop.  Capacity 4 is more than enough for any realistic
+/// button mashing rate.
+static BUTTON_EVENT_CHANNEL: Channel<CriticalSectionRawMutex, ButtonEvent, 4> = Channel::new();
+
+#[derive(Clone, Copy)]
+enum ButtonEvent {
+    ShortPress,
+    LongPress,
+}
 
 #[derive(Clone)]
 enum DisplayCommand {
@@ -184,7 +196,63 @@ pub fn spawn_display_task(
     scl: GpioPin<9>,
     boot_btn: Input<'static>,
 ) {
-    spawner.spawn(display_task(i2c0, sda, scl, boot_btn)).unwrap();
+    // Spawn the dedicated button interrupt task first so it can catch presses
+    // that occur during the display splash screen.
+    spawner.spawn(button_task(boot_btn)).unwrap();
+    spawner.spawn(display_task(i2c0, sda, scl)).unwrap();
+}
+
+/// Dedicated Embassy task for the BOOT button (GPIO 0).
+///
+/// Uses hardware edge interrupts (`wait_for_falling_edge`) instead of
+/// polling so the CPU is never spinning for button state.  Press
+/// classification (short vs. long) is handled here and the result is
+/// forwarded to the display render loop via `BUTTON_EVENT_CHANNEL`.
+#[embassy_executor::task]
+async fn button_task(mut boot_btn: Input<'static>) {
+    log::info!("[button] task starting — async edge interrupts on GPIO0");
+    loop {
+        // Wait for the active-LOW BOOT button to be pressed (falling edge).
+        boot_btn.wait_for_falling_edge().await;
+        let press_start = Instant::now();
+        log::info!("[button] pressed");
+
+        // Wait for release (rising edge) within 2 s.
+        // If the timeout fires first it is a long press.
+        match with_timeout(
+            Duration::from_millis(2000),
+            boot_btn.wait_for_rising_edge(),
+        )
+        .await
+        {
+            Ok(_) => {
+                let held_ms = (Instant::now() - press_start).as_millis();
+                log::info!("[button] short press (held {}ms)", held_ms);
+                if BUTTON_EVENT_CHANNEL
+                    .sender()
+                    .try_send(ButtonEvent::ShortPress)
+                    .is_err()
+                {
+                    log::warn!("[button] channel full — short press dropped");
+                }
+            }
+            Err(_timeout) => {
+                log::info!("[button] long press");
+                if BUTTON_EVENT_CHANNEL
+                    .sender()
+                    .try_send(ButtonEvent::LongPress)
+                    .is_err()
+                {
+                    log::warn!("[button] channel full — long press dropped");
+                }
+                // Wait for the physical release before we can detect the next press.
+                boot_btn.wait_for_rising_edge().await;
+            }
+        }
+
+        // Brief debounce delay before arming the next edge detection.
+        Timer::after(Duration::from_millis(50)).await;
+    }
 }
 
 #[embassy_executor::task]
@@ -192,20 +260,18 @@ async fn display_task(
     i2c0: I2C0,
     sda: GpioPin<8>,
     scl: GpioPin<9>,
-    mut boot_btn: Input<'static>,
 ) {
     log::info!("[display] task starting (I2C0 SDA=GPIO8 SCL=GPIO9 BOOT=GPIO0)");
 
-    // 400 kHz I2C with a generous-enough timeout to survive WiFi interrupt
-    // jitter.  WiFi IRQ handlers on Core 0 can stall the I2C peripheral for
-    // 1–2 ms; BusCycles(800) at 400 kHz ≈ 2 ms — tolerates that jitter while
-    // still failing fast on real bus errors (vs BusTimeout::Maximum ≈ 10 s).
+    // 400 kHz async I2C.  WiFi interrupt jitter is no longer a concern
+    // because the CPU yields during transfers; BusCycles(800) at 400 kHz
+    // ≈ 2 ms still catches genuine bus errors quickly.
     let mut cfg = I2cConfig::default();
     cfg.frequency = 400.kHz();
     cfg.timeout = BusTimeout::BusCycles(800);
 
     let i2c = match I2c::new(i2c0, cfg) {
-        Ok(bus) => bus.with_sda(sda).with_scl(scl),
+        Ok(bus) => bus.with_sda(sda).with_scl(scl).into_async(),
         Err(err) => {
             log::error!("[display] I2C init failed: {:?}", err);
             return;
@@ -214,7 +280,7 @@ async fn display_task(
     log::info!("[display] I2C init OK");
 
     let mut oled = OledDisplay::new(i2c);
-    oled.init();
+    oled.init().await;
     log::info!("[display] OLED init sequence sent");
 
     let mut state = FaceState::default();
@@ -224,7 +290,7 @@ async fn display_task(
     let _ = Text::new("SandOS", Point::new(34, 20), title_style).draw(&mut oled);
     let _ = Text::new("OLED OK", Point::new(34, 36), title_style).draw(&mut oled);
     log::info!("[display] splash drawn, flushing…");
-    match oled.flush() {
+    match oled.flush().await {
         Ok(()) => log::info!("[display] splash flush OK"),
         Err(()) => log::error!("[display] splash flush FAILED (continuing)"),
     }
@@ -253,15 +319,7 @@ async fn display_task(
     let mut last_expr_name: &str = "Neutral";
 
     let receiver = DISPLAY_CHANNEL.receiver();
-    let initial_raw_low = boot_btn.is_low();
-    let mut btn_state = ButtonState {
-        pressed_since: None,
-        was_pressed: false,
-        idle_low: initial_raw_low,
-        last_raw_low: initial_raw_low,
-        press_latch: false,
-    };
-    log::info!("[display] BOOT baseline raw_low={}", initial_raw_low);
+    let btn_receiver = BUTTON_EVENT_CHANNEL.receiver();
 
     // Frame counter that never resets (unlike loop_frames which resets every second).
     let mut total_frames: u32 = 0;
@@ -293,7 +351,7 @@ async fn display_task(
                 DisplayCommand::SetText(text) => state.text = text,
                 DisplayCommand::SetBrightness(value) => {
                     state.brightness = value;
-                    oled.set_contrast(value);
+                    oled.set_contrast(value).await;
                 }
             }
         }
@@ -303,15 +361,9 @@ async fn display_task(
             log::info!("[display] render loop alive — first frame");
         }
 
-        // 2. Poll the BOOT button and update the UI state machine.
-        let btn_event = poll_button(&mut boot_btn, &mut btn_state);
-        handle_button_event(btn_event, &mut state);
-        // Log every button reading for the first 5 seconds to debug.
-        if Instant::now().as_millis() < 10_000 {
-            let raw = boot_btn.is_low();
-            if raw != btn_state.idle_low {
-                log::info!("[display] BOOT pin active! raw_low={}", raw);
-            }
+        // 2. Drain button events sent by the async button_task.
+        while let Ok(btn_event) = btn_receiver.try_receive() {
+            handle_button_event(btn_event, &mut state);
         }
 
         // 3. Auto-return to face mode after 10 s of inactivity in menu/action.
@@ -333,16 +385,9 @@ async fn display_task(
         let render_us = (Instant::now() - render_start).as_micros();
         if tracing { log::info!("[display] frame {} render={}us", total_frames, render_us); }
 
-        // 4b. Sample button right before the blocking flush.
-        if boot_btn.is_low() != btn_state.idle_low {
-            btn_state.press_latch = true;
-        }
-
-        // 4c. Flush framebuffer to SSD1306 — all 8 pages in one tight
-        //      loop.  Splitting pages with async yields caused the executor
-        //      to hand tens of seconds to WiFi/web tasks between pages,
-        //      AND the inter-page gaps triggered I2C errors.  Instead we
-        //      flush monolithically (~10 ms at 100 kHz) and yield AFTER.
+        // 4b. Flush framebuffer to SSD1306 via async I2C.
+        //     The CPU yields to other tasks during each I2C transfer, so
+        //     Wi-Fi, the web server and the button task all continue to run.
         if DIAG_SKIP_FLUSH {
             if loop_frames == 0 {
                 log::warn!("[display] DIAG_SKIP_FLUSH enabled: OLED transfer disabled");
@@ -350,11 +395,10 @@ async fn display_task(
         } else {
             if tracing { log::info!("[display] frame {} step=flush", total_frames); }
             let flush_start = Instant::now();
-            let mut flush_ok = oled.flush().is_ok();
-            // Immediate retry: WiFi interrupt jitter can cause a one-off
-            // failure; retrying right away usually succeeds.
+            let mut flush_ok = oled.flush().await.is_ok();
+            // Immediate retry on transient bus error.
             if !flush_ok {
-                flush_ok = oled.flush().is_ok();
+                flush_ok = oled.flush().await.is_ok();
             }
             last_flush_us = (Instant::now() - flush_start).as_micros() as u64;
             if tracing {
@@ -377,7 +421,7 @@ async fn display_task(
                 let fail_start = *flush_fail_since.get_or_insert(Instant::now());
                 if Instant::now() - fail_start >= Duration::from_millis(500) {
                     log::warn!("[display] flush failing >500ms — re-initialising OLED");
-                    oled.init();
+                    oled.init().await;
                     // Reset animation timers so the face restarts cleanly.
                     let now_ms = Instant::now().as_millis() as u64;
                     state.next_blink_ms = now_ms + state.rng.range(1500, 3500) as u64;
@@ -391,16 +435,6 @@ async fn display_task(
                 }
             }
         }
-
-        // 4d. Sample button right after flush.
-        if boot_btn.is_low() != btn_state.idle_low {
-            btn_state.press_latch = true;
-        }
-
-        // 5. Poll button after flush to catch releases that occurred
-        //    during the blocking I2C transfer.
-        let btn_event = poll_button(&mut boot_btn, &mut btn_state);
-        handle_button_event(btn_event, &mut state);
 
         // ── Per-frame timing stats ──
         let frame_us = (Instant::now() - frame_start).as_micros() as u64;
@@ -471,13 +505,6 @@ async fn display_task(
                 state.frame,
                 last_page_errors,
             );
-            log::info!(
-                "[display] btn: raw_low={} idle_low={} was_pressed={} latch={}",
-                boot_btn.is_low(),
-                btn_state.idle_low,
-                btn_state.was_pressed,
-                btn_state.press_latch,
-            );
             // Reset per-second accumulators.
             loop_frames = 0;
             last_loop_log = now;
@@ -488,11 +515,11 @@ async fn display_task(
             sum_frame_us = 0;
         }
 
-        // 6. Sleep the remainder of the frame period, polling the button
-        //    every 10 ms so short clicks are never missed.
-        //    Yield at least once per frame so the executor can run other tasks.
+        // 6. Sleep the remainder of the frame period.
+        //    Yield at least once per frame so the executor can run other tasks
+        //    (Wi-Fi, web server, button task).
         //    If we're already past the deadline (flush took too long), yield
-        //    only 100µs to avoid handing control to network tasks for seconds.
+        //    only 100µs so we don't hand off for seconds.
         {
             const POLL_INTERVAL: Duration = Duration::from_millis(10);
             let frame_deadline = frame_start + FRAME_PERIOD;
@@ -524,8 +551,6 @@ async fn display_task(
                     starved = false;
                     log::info!("[display] RESUMED — animation running normally");
                 }
-                let btn_event = poll_button(&mut boot_btn, &mut btn_state);
-                handle_button_event(btn_event, &mut state);
             } else {
                 let mut sleep_count: u8 = 0;
                 loop {
@@ -549,8 +574,6 @@ async fn display_task(
                         log::info!("[display] RESUMED — animation running normally");
                     }
                     sleep_count = sleep_count.saturating_add(1);
-                    let btn_event = poll_button(&mut boot_btn, &mut btn_state);
-                    handle_button_event(btn_event, &mut state);
                     if Instant::now() >= frame_deadline {
                         break;
                     }
@@ -582,88 +605,12 @@ enum UiMode {
 
 // ── Button helpers ────────────────────────────────────────────────────────────
 
-struct ButtonState {
-    pressed_since: Option<Instant>,
-    was_pressed: bool,
-    idle_low: bool,
-    last_raw_low: bool,
-    /// Latch: set to `true` if the pin is ever sampled as pressed between
-    /// regular poll_button calls (e.g. during the I2C flush).  The next
-    /// poll_button call will treat it as a press edge.
-    press_latch: bool,
-}
-
-enum ButtonEvent {
-    None,
-    ShortPress,
-    LongPress,
-}
-
-/// Poll BOOT and classify press type.
-/// Long-press fires exactly once at the 2-second threshold without waiting for
-/// release; short-press fires on release if the long-press threshold was never
-/// crossed. The pressed polarity is inferred from the idle level sampled at
-/// startup, so both active-LOW and active-HIGH board wiring work.
-fn poll_button(btn: &mut Input<'static>, s: &mut ButtonState) -> ButtonEvent {
-    let now = Instant::now();
-    let raw_low = btn.is_low();
-    if raw_low != s.last_raw_low {
-        log::info!("[display] BOOT raw edge: low={}", raw_low);
-        s.last_raw_low = raw_low;
-    }
-    // Combine the live reading with the latch (set if button was seen pressed
-    // during the I2C flush window).
-    let is_pressed = (raw_low != s.idle_low) || s.press_latch;
-    // Clear the latch once consumed.
-    if s.press_latch && !(raw_low != s.idle_low) {
-        // Latch was set but pin is now released — treat as a released press.
-        s.press_latch = false;
-    } else if raw_low != s.idle_low {
-        // Still physically pressed — keep latch high until release.
-        s.press_latch = false;
-    }
-
-    match (s.was_pressed, is_pressed) {
-        // Rising edge: button just pressed.
-        (false, true) => {
-            s.pressed_since = Some(now);
-            s.was_pressed = true;
-            log::info!("[display] BOOT edge: pressed (raw_low={})", raw_low);
-            ButtonEvent::None
-        }
-        // Held: check long-press threshold.
-        (true, true) => {
-            if let Some(since) = s.pressed_since {
-                if now - since >= Duration::from_millis(2000) {
-                    s.pressed_since = None; // clear so we don't fire again on same hold
-                    return ButtonEvent::LongPress;
-                }
-            }
-            ButtonEvent::None
-        }
-        // Falling edge: button released.
-        (true, false) => {
-            s.was_pressed = false;
-            let long_already_fired = s.pressed_since.is_none();
-            s.pressed_since = None;
-            log::info!("[display] BOOT edge: released (raw_low={})", raw_low);
-            if long_already_fired {
-                ButtonEvent::None
-            } else {
-                ButtonEvent::ShortPress
-            }
-        }
-        (false, false) => ButtonEvent::None,
-    }
-}
-
 // ── UI state machine ──────────────────────────────────────────────────────────
 
 const MENU_ITEMS: [&str; 4] = ["Talk", "Clock", "Web", "Help"];
 
 fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
     match ev {
-        ButtonEvent::None => return,
         ButtonEvent::ShortPress => {
             log::info!("[display] BOOT short press");
             state.last_button_time = Instant::now();
@@ -1291,12 +1238,12 @@ fn render_mini_face(oled: &mut OledDisplay, state: &FaceState) {
 // ── SSD1306 low-level driver ──────────────────────────────────────────────────
 
 struct OledDisplay {
-    i2c: I2c<'static, Blocking>,
+    i2c: I2c<'static, Async>,
     buffer: [u8; DISPLAY_BUF_SIZE],
 }
 
 impl OledDisplay {
-    fn new(i2c: I2c<'static, Blocking>) -> Self {
+    fn new(i2c: I2c<'static, Async>) -> Self {
         Self {
             i2c,
             buffer: [0; DISPLAY_BUF_SIZE],
@@ -1307,7 +1254,7 @@ impl OledDisplay {
     ///
     /// Works correctly even after a soft-reset (Ctrl+R) where the SSD1306
     /// retains stale GDDRAM content and an unpredictable internal pointer.
-    fn init(&mut self) {
+    async fn init(&mut self) {
         // Single transaction: display-off, full config, address window reset.
         // The SSD1306 processes chained commands via control byte 0x00.
         // Uses page addressing mode (the default) which works on both
@@ -1331,44 +1278,46 @@ impl OledDisplay {
             0xA4, // Resume from RAM content
             0xA6, // Normal display (not inverted)
         ];
-        match self.i2c.write(SSD1306_ADDR, &init_cmds) {
+        match self.i2c.write(SSD1306_ADDR, &init_cmds).await {
             Ok(()) => log::info!("[display] SSD1306 init cmds OK"),
             Err(e) => log::error!("[display] SSD1306 init cmds FAILED: {:?}", e),
         }
 
-        // Brief busy-wait (~1 ms) for the SSD1306 to process the init batch.
-        for _ in 0..40_000u32 {
-            core::hint::spin_loop();
-        }
+        // Brief async delay (~1 ms) for the SSD1306 to process the init batch.
+        Timer::after(Duration::from_millis(1)).await;
 
         // Clear GDDRAM (writes 1024 zero bytes).  The address window was
         // just reset above so the pointer starts at page 0, column 0.
         self.buffer.fill(0x00);
-        match self.flush() {
+        match self.flush().await {
             Ok(()) => log::info!("[display] GDDRAM clear OK"),
             Err(()) => log::error!("[display] GDDRAM clear FAILED"),
         }
 
         // Display ON.
-        match self.i2c.write(SSD1306_ADDR, &[0x00, 0xAF]) {
+        match self.i2c.write(SSD1306_ADDR, &[0x00, 0xAF]).await {
             Ok(()) => log::info!("[display] display ON cmd OK"),
             Err(e) => log::error!("[display] display ON cmd FAILED: {:?}", e),
         }
     }
 
-    fn set_contrast(&mut self, value: u8) {
-        let _ = self.i2c.write(SSD1306_ADDR, &[0x00, 0x81, value]);
+    async fn set_contrast(&mut self, value: u8) {
+        let _ = self.i2c.write(SSD1306_ADDR, &[0x00, 0x81, value]).await;
     }
 
-    fn cmd(&mut self, cmd: u8) {
-        let _ = self.i2c.write(SSD1306_ADDR, &[0x00, cmd]);
+    #[allow(dead_code)]
+    async fn cmd(&mut self, cmd: u8) {
+        let _ = self.i2c.write(SSD1306_ADDR, &[0x00, cmd]).await;
     }
 
     /// Push the entire 1024-byte framebuffer to the display.
-    fn flush(&mut self) -> Result<(), ()> {
+    ///
+    /// The CPU yields to other Embassy tasks during each I2C transfer so
+    /// Wi-Fi, the web server and the button task all continue to run.
+    async fn flush(&mut self) -> Result<(), ()> {
         let mut all_ok = true;
         for page in 0..8 {
-            if !self.flush_page(page) {
+            if !self.flush_page(page).await {
                 all_ok = false;
             }
         }
@@ -1382,16 +1331,16 @@ impl OledDisplay {
     /// Retries once on failure to handle transient bus glitches.
     ///
     /// `page` must be in `0..8`.  Returns `true` on success.
-    fn flush_page(&mut self, page: usize) -> bool {
+    async fn flush_page(&mut self, page: usize) -> bool {
         for _attempt in 0..2 {
-            if self.flush_page_inner(page) {
+            if self.flush_page_inner(page).await {
                 return true;
             }
         }
         false
     }
 
-    fn flush_page_inner(&mut self, page: usize) -> bool {
+    async fn flush_page_inner(&mut self, page: usize) -> bool {
         // Set page address + column 0.
         // 0xB0|page = page address; 0x00 = lower column nibble;
         // 0x10 = upper column nibble → column 0.
@@ -1399,6 +1348,7 @@ impl OledDisplay {
         if self
             .i2c
             .write(SSD1306_ADDR, &[0x00, page_cmd, 0x00, 0x10])
+            .await
             .is_err()
         {
             return false;
@@ -1413,6 +1363,7 @@ impl OledDisplay {
         packet[1..1 + chunk.len()].copy_from_slice(chunk);
         self.i2c
             .write(SSD1306_ADDR, &packet[..1 + chunk.len()])
+            .await
             .is_ok()
     }
 }
