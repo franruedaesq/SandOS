@@ -228,15 +228,23 @@ async fn button_task(mut boot_btn: Input<'static>) {
             Ok(_) => {
                 let held_ms = (Instant::now() - press_start).as_millis();
                 log::info!("[button] short press (held {}ms)", held_ms);
-                let _ = BUTTON_EVENT_CHANNEL
+                if BUTTON_EVENT_CHANNEL
                     .sender()
-                    .try_send(ButtonEvent::ShortPress);
+                    .try_send(ButtonEvent::ShortPress)
+                    .is_err()
+                {
+                    log::warn!("[button] channel full — short press dropped");
+                }
             }
             Err(_timeout) => {
                 log::info!("[button] long press");
-                let _ = BUTTON_EVENT_CHANNEL
+                if BUTTON_EVENT_CHANNEL
                     .sender()
-                    .try_send(ButtonEvent::LongPress);
+                    .try_send(ButtonEvent::LongPress)
+                    .is_err()
+                {
+                    log::warn!("[button] channel full — long press dropped");
+                }
                 // Wait for the physical release before we can detect the next press.
                 boot_btn.wait_for_rising_edge().await;
             }
