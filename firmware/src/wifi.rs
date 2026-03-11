@@ -48,6 +48,10 @@ static STACK_RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
 // ---------------------------------------------------------------------------
 
 /// Drive the `embassy-net` stack forward (must be co-spawned with `wifi_task`).
+///
+/// Runs immediately — the WiFi driver needs the packet processor active to
+/// avoid internal buffer overflows and crashes.  Display starvation during
+/// DHCP (~30-50 s) is mitigated by keeping the web server disabled at boot.
 #[task]
 pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) {
     runner.run().await

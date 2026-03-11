@@ -68,7 +68,7 @@ smart-leds = "0.3"
 static_cell = { version = "2", features = ["nightly"] }
 heapless = "0.8"
 nb = "1"
-portable-atomic = { version = "1", features = ["unsafe-assume-single-core"] }
+portable-atomic = { version = "1" }
 
 # Shared ABI definitions
 abi = { path = "../abi", default-features = false }

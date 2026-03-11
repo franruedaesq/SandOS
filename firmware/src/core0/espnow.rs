@@ -96,16 +96,23 @@ pub async fn espnow_rx_task(
     token: EspNowWithWifiCreateToken,
     sender: Sender<'static, CriticalSectionRawMutex, WasmCommand, 8>,
 ) {
+    log::info!("[espnow] task starting");
+
     // Phase 8: OTA receiver owns the PSRAM staging buffer for this task.
     let mut ota = OtaReceiver::new();
 
     // Create ESP-NOW in coexistence mode (WiFi STA already running).
     // new_with_wifi does NOT need the WIFI peripheral — it uses the already-
     // initialized radio started by `new_with_mode` in main().
+    log::info!("[espnow] EspNow::new_with_wifi — start");
+    let t0 = embassy_time::Instant::now();
     let mut esp_now = EspNow::new_with_wifi(init, token).unwrap();
+    let dt = (embassy_time::Instant::now() - t0).as_millis();
+    log::info!("[espnow] EspNow::new_with_wifi — done ({}ms)", dt);
 
     // Send an initial beacon so the PC sees us immediately.
     send_beacon(&mut esp_now).await;
+    log::info!("[espnow] initial beacon sent — entering loop");
 
     let mut beacon_deadline = embassy_time::Instant::now()
         + embassy_time::Duration::from_millis(BEACON_INTERVAL_MS);

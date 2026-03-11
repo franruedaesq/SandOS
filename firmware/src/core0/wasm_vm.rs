@@ -48,6 +48,7 @@ use abi::{
 };
 use alloc::vec;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Receiver};
+use embassy_time;
 use wasmi::{Caller, Engine, Linker, Memory, Module, Store};
 
 use super::abi::AbiHost;
@@ -100,11 +101,24 @@ pub async fn wasm_run_task(
     receiver: Receiver<'static, CriticalSectionRawMutex, WasmCommand, 8>,
     mut host: AbiHost,
 ) {
+    log::info!("[wasm_vm] task starting — guest binary {} bytes", GUEST_WASM.len());
+
     // Build the initial engine from the baked-in guest binary.
+    log::info!("[wasm_vm] build_vm — start");
+    let t0 = embassy_time::Instant::now();
     let (mut engine, mut store, mut run_command) = match build_vm(GUEST_WASM, &mut host) {
-        Some(v) => v,
-        None    => return, // malformed initial binary — halt
+        Some(v) => {
+            let dt = (embassy_time::Instant::now() - t0).as_millis();
+            log::info!("[wasm_vm] build_vm — done ({}ms)", dt);
+            v
+        }
+        None => {
+            log::error!("[wasm_vm] build_vm FAILED — halting");
+            return; // malformed initial binary — halt
+        }
     };
+
+    log::info!("[wasm_vm] entering command loop (waiting for commands)");
 
     // ── Command loop ──────────────────────────────────────────────────────────
     loop {

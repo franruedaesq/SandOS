@@ -6,5 +6,7 @@ runner = "espflash flash --monitor"
 rustflags = ["-C", "link-arg=-nostartfiles"]
 
 [env]
-WIFI_SSID = "WLAN14192654"
-WIFI_PASSWORD = "xssaMcTc5kjf"
+# WIFI_SSID = "WLAN14192654"
+# WIFI_PASSWORD = "xssaMcTc5kjf"
+WIFI_SSID = "FRITZ!Box 7583 DR"
+WIFI_PASSWORD = "35385987231661973116"

@@ -28,10 +28,7 @@ use embassy_sync::{
     channel::Channel,
     signal::Signal,
 };
-use esp_hal::{
-    gpio::{GpioPin, Io},
-    peripherals::I2C0,
-};
+use esp_hal::gpio::Io;
 use esp_wifi::esp_now::EspNowWithWifiCreateToken;
 use portable_atomic::AtomicU32;
 use core::sync::atomic::Ordering;
@@ -96,12 +93,12 @@ pub async fn brain_task(
     io: Io,
     wifi_init: &'static esp_wifi::EspWifiController<'static>,
     espnow_token: EspNowWithWifiCreateToken,
-    i2c0: I2C0,
-    gpio8: GpioPin<8>,
-    gpio9: GpioPin<9>,
 ) {
-    // Initialise the display task + ABI display handle (Phase 2).
-    crate::display::spawn_display_task(spawner, i2c0, gpio8, gpio9);
+    log::info!("[brain] task starting");
+
+    // Display task is spawned directly from main() before network tasks
+    // so it gets exclusive CPU time for init + splash.  Only the ABI
+    // channel handle lives here (cross-task via CriticalSectionRawMutex).
     let display = DisplayDriver::new();
 
     // Initialise the RGB LED (Phase 9).
@@ -111,19 +108,22 @@ pub async fn brain_task(
     let abi_host = AbiHost::new(io, display, rgb_led);
 
     // Start the ESP-NOW receiver task (also owns the OTA receiver).
+    log::info!("[brain] spawning espnow_rx_task");
     spawner
         .spawn(espnow::espnow_rx_task(wifi_init, espnow_token, CMD_CHANNEL.sender()))
         .unwrap();
 
     // Start the Wasm engine task (also handles OTA hot-swap signals).
+    log::info!("[brain] spawning wasm_run_task");
     spawner
         .spawn(wasm_vm::wasm_run_task(CMD_CHANNEL.receiver(), abi_host))
         .unwrap();
 
     // Start the OS Router task (Phase 5).
-    // The Router drains MovementIntents from the OS Message Bus and
-    // dispatches them to Core 1 (Single-Board) or ESP-NOW (Distributed).
+    log::info!("[brain] spawning router_task");
     spawner
         .spawn(router::router_task())
         .unwrap();
+
+    log::info!("[brain] all sub-tasks spawned");
 }

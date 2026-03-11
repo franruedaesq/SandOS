@@ -197,6 +197,10 @@ its real-time loop uninterrupted throughout.
 Wasm calls `host_draw_eye()` + `host_write_text()` → 60 FPS robot face on
 screen. Core 1 never halted.
 
+. $HOME/export-esp.sh
+cargo install espup
+espup install
+
 espflash erase-flash -p /dev/cu.usbmodem5B5F1229581
 cargo run --release
 espflash monitor

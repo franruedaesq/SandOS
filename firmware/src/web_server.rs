@@ -10,10 +10,34 @@
 
 use embassy_executor::task;
 use embassy_net::{tcp::TcpSocket, Stack};
-use embassy_time::{Duration, Instant};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_io_async::Write;
 
+use portable_atomic::AtomicBool;
+use core::sync::atomic::Ordering;
 use crate::led_state;
+
+// ── Web server enable/disable toggle ─────────────────────────────────────────
+
+/// Starts **disabled** — the display menu toggles it on.
+/// The web UI `/api/server/stop` endpoint turns it off.
+pub static WEB_SERVER_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable the web server (called from display menu).
+pub fn enable_web_server() {
+    WEB_SERVER_ENABLED.store(true, Ordering::Relaxed);
+    log::info!("[web_server] ENABLED by user");
+}
+
+/// Disable the web server (called from web UI or display menu).
+pub fn disable_web_server() {
+    WEB_SERVER_ENABLED.store(false, Ordering::Relaxed);
+    log::info!("[web_server] DISABLED by user");
+}
+
+pub fn is_web_server_enabled() -> bool {
+    WEB_SERVER_ENABLED.load(Ordering::Relaxed)
+}
 
 // ── Boot time ────────────────────────────────────────────────────────────────
 
@@ -180,7 +204,11 @@ const HTML_DASHBOARD: &str = r#"<!DOCTYPE html>
         <div style="font-size:0.85em; opacity:0.6;">RGB: <span id="led-values">0, 0, 0</span></div>
     </div>
 
-    <footer>SandOS v0.1.0 · Embassy + Rust 🦀 · Refreshing every 2 s</footer>
+    <div style="text-align:center;margin:18px 0 8px;display:flex;justify-content:center;gap:12px;">
+        <button onclick="refresh()" style="padding:12px 32px;background:rgba(167,139,250,0.2);border:1px solid rgba(167,139,250,0.4);color:#a78bfa;border-radius:10px;cursor:pointer;font-size:1em;font-weight:600;">Refresh Now</button>
+        <button onclick="stopServer()" style="padding:12px 32px;background:rgba(248,113,113,0.2);border:1px solid rgba(248,113,113,0.4);color:#f87171;border-radius:10px;cursor:pointer;font-size:1em;font-weight:600;">Stop Server</button>
+    </div>
+    <footer>SandOS v0.1.0 · Embassy + Rust 🦀 · Auto-refresh every 20 s</footer>
 </div>
 
 <script>
@@ -230,15 +258,20 @@ async function refresh() {
 
         document.getElementById('hotswaps').textContent = d.hot_swaps;
 
-        // Refresh LED status
-        setTimeout(refreshLED, 500);
+        // Refresh LED status inline (no extra delayed request)
+        refreshLED();
     } catch (e) {
         document.getElementById('wifi-status').className = 'card-value offline';
         document.getElementById('wifi-status').textContent = '○ OFFLINE';
     }
 }
+async function stopServer() {
+    if (!confirm('Stop the web server? Re-enable from the BOOT button menu on the device.')) return;
+    try { await fetch('/api/server/stop', {method:'POST'}); } catch(e) {}
+    document.body.innerHTML = '<div style="text-align:center;margin-top:40vh;color:#f87171;font-size:1.4em;">Server stopped.<br>Use BOOT button menu to restart.</div>';
+}
 refresh();
-setInterval(refresh, 2000);
+setInterval(refresh, 20000);
 </script>
 </body>
 </html>"#;
@@ -248,16 +281,33 @@ setInterval(refresh, 2000);
 /// HTTP server task — listens on port 80, serves the SandOS dashboard.
 #[task]
 pub async fn web_server_task(stack: &'static Stack<'static>) {
-    log::info!("[web_server] waiting for network…");
-    stack.wait_config_up().await;
-    log::info!("[web_server] listening on port 80");
-
-    unsafe { BOOT_TIME = Some(Instant::now()); }
+    // Don't touch the network until the user enables us from the menu.
+    // This avoids wait_config_up() starving the display during DHCP.
+    log::info!("[web_server] idle (disabled by default — enable from BOOT menu)");
 
     let mut rx_buf = [0u8; 1024];
     let mut tx_buf = [0u8; 8192];
 
+    let mut was_enabled = false;
+
     loop {
+        // Sleep while disabled — display menu or web UI can toggle.
+        while !is_web_server_enabled() {
+            was_enabled = false;
+            Timer::after(Duration::from_millis(500)).await;
+        }
+
+        // First time enabled (or re-enabled): wait for network + log once.
+        if !was_enabled {
+            if stack.config_v4().is_none() {
+                log::info!("[web_server] waiting for network…");
+                stack.wait_config_up().await;
+            }
+            unsafe { if BOOT_TIME.is_none() { BOOT_TIME = Some(Instant::now()); } }
+            log::info!("[web_server] listening on port 80");
+            was_enabled = true;
+        }
+
         let mut socket = TcpSocket::new(*stack, &mut rx_buf, &mut tx_buf);
         socket.set_timeout(Some(Duration::from_secs(10)));
 
@@ -274,14 +324,30 @@ pub async fn web_server_task(stack: &'static Stack<'static>) {
         };
 
         let req = core::str::from_utf8(&req_buf[..n]).unwrap_or("");
-        log::info!("[web_server] {} bytes", n);
+        // Only log non-routine requests to avoid UART flooding.
+        if !req.starts_with("GET /api/stats") {
+            log::info!("[web_server] {} bytes", n);
+        }
 
-        if req.starts_with("GET /api/stats") {
+        if req.starts_with("POST /api/server/stop") {
+            // Send response BEFORE disabling so the browser gets a reply.
+            let body = r#"{"status":"stopping"}"#;
+            let mut hdr: heapless::String<128> = heapless::String::new();
+            let _ = core::fmt::write(&mut hdr, format_args!(
+                "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            ));
+            let _ = socket.write_all(hdr.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+            let _ = socket.flush().await;
+            socket.close();
+            disable_web_server();
+            continue;
+        } else if req.starts_with("GET /api/stats") {
             serve_api_stats(&mut socket).await;
         } else if req.starts_with("GET /api/led/get") {
             serve_led_get(&mut socket).await;
         } else if req.starts_with("POST /api/led/set") {
-            // Extract the POST body from the request buffer
             let body = extract_http_body(&req_buf[..n]);
             serve_led_set(&mut socket, body).await;
         } else {
@@ -289,6 +355,11 @@ pub async fn web_server_task(stack: &'static Stack<'static>) {
         }
 
         socket.close();
+
+        // Rate-limit: yield 20 ms between requests so the display task
+        // (and other Core 0 tasks) get regular executor time.  Without
+        // this, back-to-back HTTP requests starve the display loop.
+        Timer::after(Duration::from_millis(20)).await;
     }
 }
 

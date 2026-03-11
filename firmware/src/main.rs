@@ -23,6 +23,7 @@ extern crate alloc;
 use core::ptr::addr_of_mut;
 
 use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
 use esp_hal::{
     cpu_control::{CpuControl, Stack},
     gpio::Io,
@@ -59,7 +60,7 @@ use esp_backtrace as _;
 
 // ── Core 1 stack ──────────────────────────────────────────────────────────────
 
-/// Dedicated stack for Core 1 (64 KiB — enough for Embassy + motor loops).
+/// Dedicated stack for Core 1 (32 KiB — enough for Embassy + motor loops).
 static mut APP_CORE_STACK: Stack<32768> = Stack::new();
 
 // ── Core 1 executor ───────────────────────────────────────────────────────────
@@ -74,14 +75,11 @@ fn core1_entry() {
     });
 }
 
-// ── Shared WiFi radio init ────────────────────────────────────────────────────
+// ── Shared WiFi radio init (disabled — display-only mode) ─────────────────────
 //
-// ESP-NOW and WiFi STA both use the same physical radio.  They must share one
-// `EspWifiController` that is initialised exactly once in `main()` and then
-// borrowed as `&'static`.
-
-use esp_wifi::{esp_now::EspNowWithWifiCreateToken, EspWifiController};
-static WIFI_INIT: StaticCell<EspWifiController<'static>> = StaticCell::new();
+// TODO: re-enable when WiFi/ESP-NOW are needed.
+// use esp_wifi::{esp_now::EspNowWithWifiCreateToken, EspWifiController};
+// static WIFI_INIT: StaticCell<EspWifiController<'static>> = StaticCell::new();
 
 // ── Main (Core 0) ─────────────────────────────────────────────────────────────
 
@@ -109,7 +107,11 @@ async fn main(spawner: Spawner) {
     esp_hal_embassy::init(timg0.timer0);
 
     // ── 5. GPIO ──────────────────────────────────────────────────────────────
-    let io = Io::new(peripherals.IO_MUX);
+    // BOOT button (GPIO 0, active-LOW with hardware pull-up) — must be taken
+    // from peripherals before Io::new() consumes IO_MUX.
+    let boot_btn = esp_hal::gpio::Input::new(peripherals.GPIO0, esp_hal::gpio::Pull::Up);
+
+    let _io = Io::new(peripherals.IO_MUX);
 
     // ── RGB LED init (GPIO 48 via RMT) ────────────────────────────────────────
     let rmt = esp_hal::rmt::Rmt::new(peripherals.RMT, 80_u32.MHz())
@@ -147,53 +149,31 @@ async fn main(spawner: Spawner) {
     // ── 7. ULP paramedic ─────────────────────────────────────────────────────
     ulp::start(peripherals.LPWR);
 
-    // ── 8. WiFi radio — init ONCE (shared by ESP-NOW + WiFi STA) ────────────
-    let timg1 = TimerGroup::new(peripherals.TIMG1);
-    let raw_init = esp_wifi::init(
-        timg1.timer0,
-        esp_hal::rng::Rng::new(peripherals.RNG),
-        peripherals.RADIO_CLK,
-    )
-    .expect("esp_wifi::init failed");
-    let wifi_init: &'static _ = WIFI_INIT.init(raw_init);
-    log::info!("WiFi radio initialised");
-
-    // ── 9. WiFi STA interface (shares the radio with ESP-NOW) ────────────────
-    use esp_wifi::wifi::WifiStaDevice;
-    let (wifi_interface, wifi_controller) =
-        esp_wifi::wifi::new_with_mode(wifi_init, peripherals.WIFI, WifiStaDevice)
-            .expect("wifi new_with_mode failed");
-
-    // ── 10. embassy-net stack (DHCP) ─────────────────────────────────────────
-    let (stack, runner) = wifi::make_stack(wifi_interface);
-
-    // ── 11. Spawn network tasks ───────────────────────────────────────────────
-    spawner.spawn(wifi::net_task(runner)).expect("net_task");
-    spawner
-        .spawn(wifi::wifi_task(wifi_controller, stack))
-        .expect("wifi_task");
-    spawner
-        .spawn(web_server::web_server_task(stack))
-        .expect("web_server_task");
-    log::info!("WiFi + web-server tasks spawned — open http://<IP>/ in your browser");
-
-    // ── 12. Core 0 tasks — Wasm VM + ESP-NOW + Router ────────────────────────
+    // ── 8. Display — spawn FIRST, before WiFi ───────────────────────────────
     //
-    // SAFETY: EspNowWithWifiCreateToken is a ZST { _private: () } with no data.
-    // We transmute () into it to satisfy the type-system proof that WiFi is
-    // already initialised — which it is (new_with_mode ran above).
-    let espnow_token: EspNowWithWifiCreateToken = unsafe { core::mem::transmute(()) };
-    spawner
-        .spawn(core0::brain_task(
-            spawner,
-            io,
-            wifi_init,
-            espnow_token,
-            peripherals.I2C0,
-            peripherals.GPIO8,
-            peripherals.GPIO9,
-        ))
-        .unwrap();
+    // The display task runs on Core 0 and is starved by net_task during heavy
+    // WiFi traffic (DHCP can hold the executor for 30–50 s).  By spawning the
+    // display before any network task exists, it gets exclusive CPU time for
+    // its I2C init, splash screen (900 ms) and the first few render frames.
+    display::spawn_display_task(
+        spawner,
+        peripherals.I2C0,
+        peripherals.GPIO8,
+        peripherals.GPIO9,
+        boot_btn,
+    );
+    log::info!("Display task spawned — waiting for splash…");
 
-    log::info!("All tasks spawned — entering executor");
+    // ── Display-only mode ───────────────────────────────────────────────────
+    //
+    // All WiFi, ESP-NOW, web-server, and brain tasks are disabled so the
+    // display + BOOT button can run without any starvation.
+    // TODO: re-enable radio tasks once display resilience is confirmed.
+
+    log::info!("Display-only mode — all network tasks disabled");
+
+    // Keep main alive forever so _core1_guard and other locals are not dropped.
+    loop {
+        Timer::after(Duration::from_secs(60)).await;
+    }
 }
