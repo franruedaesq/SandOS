@@ -27,7 +27,7 @@
 //! CRC-32 verification [`super::OTA_SWAP_SIGNAL`] is fired, which wakes the
 //! [`super::wasm_vm::wasm_run_task`] to perform the live hot-swap.
 use core::sync::atomic::Ordering;
-use portable_atomic::{AtomicBool, AtomicU64};
+use portable_atomic::AtomicU64;
 
 use abi::{cmd, EspNowCommand, TelemetryPacket, ESPNOW_MAX_PAYLOAD, RADIO_SILENCE_THRESHOLD_MS};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
@@ -51,22 +51,6 @@ use crate::telemetry;
 /// Initialised to `0` so the link is considered silent until the first packet
 /// arrives.
 pub static RADIO_LAST_RX_MS: AtomicU64 = AtomicU64::new(0);
-
-/// Global pause gate for ESP-NOW traffic while STA association is in progress.
-///
-/// When `true`, the ESP-NOW task temporarily skips RX/TX operations to reduce
-/// coexistence pressure during fragile Wi-Fi connect transitions.
-static ESPNOW_IO_PAUSED: AtomicBool = AtomicBool::new(false);
-
-#[inline]
-pub fn set_espnow_io_paused(paused: bool) {
-    ESPNOW_IO_PAUSED.store(paused, Ordering::Release);
-}
-
-#[inline]
-fn espnow_io_paused() -> bool {
-    ESPNOW_IO_PAUSED.load(Ordering::Acquire)
-}
 
 /// Return `true` when a valid command was received within the radio-silence
 /// threshold window.
@@ -134,13 +118,6 @@ pub async fn espnow_rx_task(
         + embassy_time::Duration::from_millis(BEACON_INTERVAL_MS);
 
     loop {
-        if espnow_io_paused() {
-            embassy_time::Timer::after_millis(20).await;
-            beacon_deadline = embassy_time::Instant::now()
-                + embassy_time::Duration::from_millis(BEACON_INTERVAL_MS);
-            continue;
-        }
-
         // ── Phase 6: drain outgoing telemetry (non-blocking) ─────────────────
         for _ in 0..MAX_TELEMETRY_DRAIN_PER_ITER {
             match telemetry::TELEMETRY_TX_CHANNEL.try_receive() {

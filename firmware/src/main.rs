@@ -181,21 +181,16 @@ async fn main(spawner: Spawner) {
 
     // ── 10. WiFi STA interface + ESP-NOW coexistence token ───────────────────
     //
-    // In esp-wifi 0.12 the API is split into two calls:
-    //   1. `enable_esp_now_with_wifi` — consumes and returns the WIFI peripheral
-    //      plus an `EspNowWithWifiCreateToken` that authorises EspNow to coexist
-    //      with an active WiFi STA connection.
-    //   2. `new_with_mode` — consumes the WIFI peripheral (returned above) and
-    //      creates the `WifiDevice` (embassy-net) + `WifiController` (assoc/DHCP).
-    let (wifi_peri, espnow_token) =
-        esp_wifi::esp_now::enable_esp_now_with_wifi(peripherals.WIFI);
+    // Create the WiFi STA interface directly (without enable_esp_now_with_wifi,
+    // which was found to break STA connections on this hardware).
+    // The ESP-NOW token is a zero-sized type — we transmute () into it since
+    // WiFi is already initialized above.
     let (wifi_interface, wifi_controller) = esp_wifi::wifi::new_with_mode(
         wifi_init,
-        wifi_peri,
+        peripherals.WIFI,
         esp_wifi::wifi::WifiStaDevice,
     )
     .expect("Failed to create WiFi STA interface");
-
     // ── 11. Embassy-net stack ────────────────────────────────────────────────
     let (stack, runner) = wifi::make_stack(wifi_interface);
 
@@ -218,7 +213,7 @@ async fn main(spawner: Spawner) {
     //
     // Spawns the ESP-NOW receiver, the Wasm engine, and the OS router tasks.
     spawner
-        .spawn(core0::brain_task(spawner, io, wifi_init, espnow_token))
+        .spawn(core0::brain_task(spawner, io, wifi_init))
         .unwrap();
     log::info!("Brain task spawned");
 

@@ -29,7 +29,6 @@ use embassy_sync::{
     signal::Signal,
 };
 use esp_hal::gpio::Io;
-use esp_wifi::esp_now::EspNowWithWifiCreateToken;
 use portable_atomic::AtomicU32;
 use core::sync::atomic::Ordering;
 
@@ -91,8 +90,7 @@ pub static OTA_SWAP_SIGNAL: Signal<CriticalSectionRawMutex, u32> = Signal::new()
 pub async fn brain_task(
     spawner: Spawner,
     io: Io,
-    wifi_init: &'static esp_wifi::EspWifiController<'static>,
-    espnow_token: EspNowWithWifiCreateToken,
+    _wifi_init: &'static esp_wifi::EspWifiController<'static>,
 ) {
     log::info!("[brain] task starting");
 
@@ -107,11 +105,7 @@ pub async fn brain_task(
     // Build the ABI host context (LED pin, display handle, RGB LED, …).
     let abi_host = AbiHost::new(io, display, rgb_led);
 
-    // Start the ESP-NOW receiver task (also owns the OTA receiver).
-    log::info!("[brain] spawning espnow_rx_task");
-    spawner
-        .spawn(espnow::espnow_rx_task(wifi_init, espnow_token, CMD_CHANNEL.sender()))
-        .unwrap();
+    // ESP-NOW disabled for WiFi debugging — will re-enable later.
 
     // Start the Wasm engine task (also handles OTA hot-swap signals).
     log::info!("[brain] spawning wasm_run_task");

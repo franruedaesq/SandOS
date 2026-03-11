@@ -6,6 +6,8 @@ runner = "espflash flash --monitor"
 rustflags = ["-C", "link-arg=-nostartfiles"]
 
 [env]
+# WIFI_SSID = "iPhone de Francisco"
+# WIFI_PASSWORD = "12345679"
 WIFI_SSID = "WLAN14192654"
 WIFI_PASSWORD = "xssaMcTc5kjf"
 # WIFI_SSID = "FRITZ!Box 7583 DR"
