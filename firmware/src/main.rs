@@ -130,7 +130,7 @@ async fn main(spawner: Spawner) {
 
     unsafe {
         rgb_led::RGB_LED = Some(rgb_led::RgbLedDriver::new());
-        if let Some(led) = &mut rgb_led::RGB_LED {
+        if let Some(led) = (*core::ptr::addr_of_mut!(rgb_led::RGB_LED)).as_mut() {
             led.attach_tx_channel_gpio48(tx_channel_48);
             led.off();
         }

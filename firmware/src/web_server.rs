@@ -303,7 +303,12 @@ pub async fn web_server_task(stack: &'static Stack<'static>) {
                 log::info!("[web_server] waiting for network…");
                 stack.wait_config_up().await;
             }
-            unsafe { if BOOT_TIME.is_none() { BOOT_TIME = Some(Instant::now()); } }
+            unsafe {
+                let bt = core::ptr::addr_of_mut!(BOOT_TIME);
+                if (*bt).is_none() {
+                    *bt = Some(Instant::now());
+                }
+            }
             log::info!("[web_server] listening on port 80");
             was_enabled = true;
         }
@@ -403,7 +408,7 @@ async fn serve_dashboard(socket: &mut TcpSocket<'_>) {
 async fn serve_api_stats(socket: &mut TcpSocket<'_>) {
     // Uptime
     let uptime_secs = unsafe {
-        BOOT_TIME
+        (*core::ptr::addr_of!(BOOT_TIME))
             .map(|t| Instant::now().duration_since(t).as_secs())
             .unwrap_or(0)
     };
