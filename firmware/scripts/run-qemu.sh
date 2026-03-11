@@ -23,7 +23,7 @@ set -euo pipefail
 readonly CHIP="esp32s3"
 readonly FLASH_SIZE="16mb"
 readonly FLASH_MODE="qio"
-readonly FLASH_FREQ="80m"
+readonly FLASH_FREQ="80mhz"
 readonly QEMU_MACHINE="esp32s3"
 readonly QEMU_BINARY="qemu-system-xtensa"
 readonly ESPFLASH_MIN_MAJOR=3
@@ -138,7 +138,11 @@ info  "ELF    : $ELF"
 echo ""
 
 check_espflash
-check_qemu
+
+# Only require QEMU when we are actually going to boot it.
+if [[ "${SANDOS_VALIDATE_ONLY:-0}" != "1" ]]; then
+    check_qemu
+fi
 
 elf_to_bin
 

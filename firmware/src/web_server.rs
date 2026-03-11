@@ -10,7 +10,7 @@
 
 use embassy_executor::task;
 use embassy_net::{tcp::TcpSocket, Stack};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 use embedded_io_async::Write;
 
 use portable_atomic::AtomicBool;
@@ -41,7 +41,10 @@ pub fn is_web_server_enabled() -> bool {
 
 // ── Boot time ────────────────────────────────────────────────────────────────
 
-static mut BOOT_TIME: Option<Instant> = None;
+/// Ticks recorded when the web server first becomes active.
+/// 0 means "not yet set" (server has not been enabled yet).
+static BOOT_SERVER_STARTED_TICKS: portable_atomic::AtomicU64 =
+    portable_atomic::AtomicU64::new(0);
 
 // ── HTML Dashboard ────────────────────────────────────────────────────────────
 
@@ -303,13 +306,14 @@ pub async fn web_server_task(stack: &'static Stack<'static>) {
                 log::info!("[web_server] waiting for network…");
                 stack.wait_config_up().await;
             }
-            unsafe {
-                let bt = core::ptr::addr_of_mut!(BOOT_TIME);
-                if (*bt).is_none() {
-                    *bt = Some(Instant::now());
-                }
-            }
             log::info!("[web_server] listening on port 80");
+            // Record the tick when the server first becomes active (write-once).
+            BOOT_SERVER_STARTED_TICKS.compare_exchange(
+                0,
+                embassy_time::Instant::now().as_ticks(),
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+            ).ok();
             was_enabled = true;
         }
 
@@ -406,11 +410,14 @@ async fn serve_dashboard(socket: &mut TcpSocket<'_>) {
 }
 
 async fn serve_api_stats(socket: &mut TcpSocket<'_>) {
-    // Uptime
-    let uptime_secs = unsafe {
-        (*core::ptr::addr_of!(BOOT_TIME))
-            .map(|t| Instant::now().duration_since(t).as_secs())
-            .unwrap_or(0)
+    // Uptime since the web server was first enabled.
+    let start_ticks = BOOT_SERVER_STARTED_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+    let uptime_secs = if start_ticks > 0 {
+        embassy_time::Instant::now()
+            .duration_since(embassy_time::Instant::from_ticks(start_ticks))
+            .as_secs()
+    } else {
+        0
     };
 
     // Heap stats via esp-alloc
