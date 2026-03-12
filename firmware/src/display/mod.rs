@@ -27,9 +27,9 @@
 //!
 //! - **Face mode** (default): full 128×64 animated face with idle expression
 //!   cycling and auto-blink.
-//! - **Menu mode**: face shrinks to the right 64 px; a 4-item menu appears
-//!   on the left 64 px. Triggered by the BOOT button (GPIO 0).
-//! - **MenuAction mode**: left panel shows the selected action result.
+//! - **Menu mode**: face shrinks to the right 64 px; a categorised menu
+//!   appears on the left 64 px. Triggered by the BOOT button (GPIO 0).
+//! - **Full-screen modes**: Pomodoro, System Monitor, Clock, Vienna Lines.
 //!
 //! ## BOOT button
 //!
@@ -342,20 +342,27 @@ async fn display_task(
             handle_button_event(btn_event, &mut state);
         }
 
-        // 3. Auto-return to face mode after 10 s of inactivity in menu/action.
-        // In WebMenu, pause this timeout while WiFi is actively connecting.
-        let pause_idle_timeout = matches!(state.ui_mode, UiMode::WebMenu)
+        // 2b. Drive LED effects (flashlight / party mode).
+        tick_led_effects(&mut state);
+
+        // 3. Auto-return to face mode after inactivity.
+        // Pause idle timeout while WiFi connecting or Pomodoro running.
+        let pause_idle_timeout = (matches!(state.ui_mode, UiMode::WebMenu)
             && crate::web_server::is_web_server_enabled()
-            && crate::wifi::wifi_status() == crate::wifi::WIFI_STATUS_CONNECTING;
-        let idle_secs = if matches!(state.ui_mode, UiMode::ViennaLines | UiMode::ViennaDetail) { 30 } else { 10 };
+            && crate::wifi::wifi_status() == crate::wifi::WIFI_STATUS_CONNECTING)
+            || (matches!(state.ui_mode, UiMode::Pomodoro)
+                && state.pomodoro_start.is_some()
+                && !state.pomodoro_done);
+        let idle_secs: u64 = match state.ui_mode {
+            UiMode::ViennaLines | UiMode::ViennaDetail
+            | UiMode::SystemMonitor | UiMode::ClockView => 30,
+            UiMode::Flashlight | UiMode::PartyMode => 60,
+            _ => 10,
+        };
         if !matches!(state.ui_mode, UiMode::Face) && !pause_idle_timeout {
             let idle = Instant::now() - state.last_button_time;
             if idle >= Duration::from_secs(idle_secs) {
-                state.ui_mode = UiMode::Face;
-                state.text.clear();
-                state.expression = EyeExpression::Neutral;
-                state.expression_override = false;
-                state.expression_override_since = None;
+                return_to_face(&mut state);
             }
         }
 
@@ -461,102 +468,319 @@ async fn display_task(
 enum UiMode {
     /// Full 128×64 animated face.
     Face,
-    /// Split: 4-item menu on left 64 px, mini-face on right 64 px.
-    Menu,
+    /// Top-level category menu (split: left menu, right mini-face).
+    TopMenu,
+    /// Category submenu (split: left menu, right mini-face).
+    SubMenu(MenuCategory),
     /// Web control submenu (ON/OFF selector + status line).
     WebMenu,
-    /// Action result displayed on left panel after a long-press selection.
-    MenuAction(u8),
+    /// Flashlight mode — RGB LED full white, status on OLED.
+    Flashlight,
+    /// Pomodoro timer — full-screen 25-minute countdown.
+    Pomodoro,
+    /// Party mode — RGB LED color cycling, status on OLED.
+    PartyMode,
+    /// System monitor — WiFi, IP, uptime, memory.
+    SystemMonitor,
+    /// Digital clock — NTP time or uptime fallback.
+    ClockView,
     /// Full-screen Vienna public transport departures (station→direction list).
     ViennaLines,
     /// Detail view for a selected Vienna stop (all departure times).
     ViennaDetail,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum MenuCategory {
+    Tools,
+    Info,
+    Transport,
+    Settings,
+}
+
+// ── Menu data structures ────────────────────────────────────────────────────
+
+struct MenuItem {
+    label: &'static str,
+    action: MenuItemAction,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MenuItemAction {
+    OpenSub(MenuCategory),
+    OpenWebMenu,
+    ToggleFlashlight,
+    TogglePartyMode,
+    EnterPomodoro,
+    EnterSystemMonitor,
+    EnterClockView,
+    EnterViennaLines,
+    CycleBrightness,
+    Back,
+}
+
 // ── Button helpers ────────────────────────────────────────────────────────────
 
 // ── UI state machine ──────────────────────────────────────────────────────────
 
-const MENU_ITEMS: [&str; 5] = ["Talk", "Clock", "Web", "Help", "Wiener L"];
+const TOP_MENU: &[MenuItem] = &[
+    MenuItem { label: "Tools",     action: MenuItemAction::OpenSub(MenuCategory::Tools) },
+    MenuItem { label: "Info",      action: MenuItemAction::OpenSub(MenuCategory::Info) },
+    MenuItem { label: "Transport", action: MenuItemAction::OpenSub(MenuCategory::Transport) },
+    MenuItem { label: "Web",       action: MenuItemAction::OpenWebMenu },
+    MenuItem { label: "Settings",  action: MenuItemAction::OpenSub(MenuCategory::Settings) },
+];
+
+const TOOLS_MENU: &[MenuItem] = &[
+    MenuItem { label: "Flashlight", action: MenuItemAction::ToggleFlashlight },
+    MenuItem { label: "Pomodoro",   action: MenuItemAction::EnterPomodoro },
+    MenuItem { label: "Party Mode", action: MenuItemAction::TogglePartyMode },
+    MenuItem { label: "< Back",     action: MenuItemAction::Back },
+];
+
+const INFO_MENU: &[MenuItem] = &[
+    MenuItem { label: "System",  action: MenuItemAction::EnterSystemMonitor },
+    MenuItem { label: "Clock",   action: MenuItemAction::EnterClockView },
+    MenuItem { label: "< Back",  action: MenuItemAction::Back },
+];
+
+const TRANSPORT_MENU: &[MenuItem] = &[
+    MenuItem { label: "Wiener L", action: MenuItemAction::EnterViennaLines },
+    MenuItem { label: "< Back",   action: MenuItemAction::Back },
+];
+
+const SETTINGS_MENU: &[MenuItem] = &[
+    MenuItem { label: "Brightness", action: MenuItemAction::CycleBrightness },
+    MenuItem { label: "< Back",     action: MenuItemAction::Back },
+];
+
 const WEB_MENU_ITEMS: [&str; 2] = ["ON", "OFF"];
+
+/// Return the menu item slice for a given UI mode.
+fn get_menu_items(mode: &UiMode) -> &'static [MenuItem] {
+    match mode {
+        UiMode::TopMenu => TOP_MENU,
+        UiMode::SubMenu(MenuCategory::Tools) => TOOLS_MENU,
+        UiMode::SubMenu(MenuCategory::Info) => INFO_MENU,
+        UiMode::SubMenu(MenuCategory::Transport) => TRANSPORT_MENU,
+        UiMode::SubMenu(MenuCategory::Settings) => SETTINGS_MENU,
+        _ => TOP_MENU,
+    }
+}
+
+/// Return the selected index for the current menu mode.
+fn get_menu_selected(state: &FaceState) -> u8 {
+    match state.ui_mode {
+        UiMode::TopMenu => state.top_menu_selected,
+        UiMode::SubMenu(_) => state.sub_menu_selected,
+        _ => 0,
+    }
+}
+
+/// Helper to cleanly return to Face mode, resetting all transient state.
+fn return_to_face(state: &mut FaceState) {
+    state.ui_mode = UiMode::Face;
+    state.text.clear();
+    state.expression = EyeExpression::Neutral;
+    state.expression_override = false;
+    state.expression_override_since = None;
+    // Turn off LED effects when returning to face
+    if state.flashlight_on {
+        state.flashlight_on = false;
+        crate::led_state::set_led_color(0, 0, 0);
+    }
+    if state.party_mode_on {
+        state.party_mode_on = false;
+        crate::led_state::set_led_color(0, 0, 0);
+    }
+    log::info!("[display] -> Face");
+}
+
+/// Execute a menu item action from a long press in TopMenu or SubMenu.
+fn execute_menu_action(action: MenuItemAction, state: &mut FaceState) {
+    match action {
+        MenuItemAction::OpenSub(cat) => {
+            state.ui_mode = UiMode::SubMenu(cat);
+            state.sub_menu_selected = 0;
+            log::info!("[display] -> SubMenu");
+        }
+        MenuItemAction::OpenWebMenu => {
+            state.ui_mode = UiMode::WebMenu;
+            state.web_menu_selected = if crate::web_server::is_web_server_enabled() { 1 } else { 0 };
+            log::info!("[display] -> WebMenu");
+        }
+        MenuItemAction::ToggleFlashlight => {
+            state.flashlight_on = !state.flashlight_on;
+            if state.flashlight_on {
+                // Flashlight and party are mutually exclusive
+                state.party_mode_on = false;
+                state.ui_mode = UiMode::Flashlight;
+                crate::led_state::set_led_color(255, 255, 255);
+            } else {
+                crate::led_state::set_led_color(0, 0, 0);
+                state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+            }
+            log::info!("[display] flashlight = {}", state.flashlight_on);
+        }
+        MenuItemAction::TogglePartyMode => {
+            state.party_mode_on = !state.party_mode_on;
+            if state.party_mode_on {
+                // Party and flashlight are mutually exclusive
+                state.flashlight_on = false;
+                state.party_hue = 0;
+                state.ui_mode = UiMode::PartyMode;
+            } else {
+                crate::led_state::set_led_color(0, 0, 0);
+                state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+            }
+            log::info!("[display] party = {}", state.party_mode_on);
+        }
+        MenuItemAction::EnterPomodoro => {
+            state.ui_mode = UiMode::Pomodoro;
+            state.pomodoro_start = Some(Instant::now());
+            state.pomodoro_paused_remaining = None;
+            state.pomodoro_done = false;
+            log::info!("[display] -> Pomodoro");
+        }
+        MenuItemAction::EnterSystemMonitor => {
+            state.ui_mode = UiMode::SystemMonitor;
+            log::info!("[display] -> SystemMonitor");
+        }
+        MenuItemAction::EnterClockView => {
+            state.ui_mode = UiMode::ClockView;
+            log::info!("[display] -> ClockView");
+        }
+        MenuItemAction::EnterViennaLines => {
+            state.vienna_selected = 0;
+            state.vienna_scroll_x = -20;
+            state.ui_mode = UiMode::ViennaLines;
+            log::info!("[display] -> ViennaLines");
+        }
+        MenuItemAction::CycleBrightness => {
+            state.brightness_level = (state.brightness_level + 1) % 3;
+            let val = match state.brightness_level {
+                0 => 64u8,
+                1 => 160u8,
+                _ => 255u8,
+            };
+            state.brightness = val;
+            let _ = DISPLAY_CHANNEL
+                .sender()
+                .try_send(DisplayCommand::SetBrightness(val));
+            log::info!("[display] brightness level = {}", state.brightness_level);
+        }
+        MenuItemAction::Back => {
+            state.ui_mode = UiMode::TopMenu;
+            log::info!("[display] -> TopMenu (back)");
+        }
+    }
+}
 
 fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
     match ev {
         ButtonEvent::ShortPress => {
-            log::info!("[display] BOOT short press");
-            state.last_button_time = Instant::now();
+            let now = Instant::now();
+
+            // ── Double press detection (2 short presses within 400ms) ──
+            let since_last = now - state.last_short_press_time;
+            state.last_short_press_time = now;
+            if since_last <= Duration::from_millis(400)
+                && !matches!(state.ui_mode, UiMode::Face)
+            {
+                log::info!("[display] double press -> Face");
+                return_to_face(state);
+                state.last_button_time = now;
+                return;
+            }
+
+            state.last_button_time = now;
+            log::info!("[display] short press");
+
             match state.ui_mode {
                 UiMode::Face => {
-                    state.ui_mode = UiMode::Menu;
-                    state.menu_selected = 0;
-                    log::info!("[display] mode -> Menu (selected: {})", MENU_ITEMS[0]);
+                    state.ui_mode = UiMode::TopMenu;
+                    state.top_menu_selected = 0;
                 }
-                UiMode::Menu => {
-                    state.menu_selected = (state.menu_selected + 1) % 5;
-                    log::info!(
-                        "[display] menu next -> {}",
-                        MENU_ITEMS[state.menu_selected as usize]
-                    );
+                UiMode::TopMenu => {
+                    state.top_menu_selected =
+                        (state.top_menu_selected + 1) % TOP_MENU.len() as u8;
+                }
+                UiMode::SubMenu(cat) => {
+                    let items = get_menu_items(&UiMode::SubMenu(cat));
+                    state.sub_menu_selected =
+                        (state.sub_menu_selected + 1) % items.len() as u8;
                 }
                 UiMode::WebMenu => {
                     state.web_menu_selected = (state.web_menu_selected + 1) % 2;
-                    log::info!(
-                        "[display] web menu next -> {}",
-                        WEB_MENU_ITEMS[state.web_menu_selected as usize]
-                    );
                 }
-                UiMode::MenuAction(_) => {
-                    state.ui_mode = UiMode::Menu;
-                    state.text.clear();
-                    log::info!("[display] action dismissed -> Menu");
+                UiMode::Flashlight => {
+                    // Any press exits flashlight
+                    state.flashlight_on = false;
+                    crate::led_state::set_led_color(0, 0, 0);
+                    state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+                }
+                UiMode::PartyMode => {
+                    // Any press exits party mode
+                    state.party_mode_on = false;
+                    crate::led_state::set_led_color(0, 0, 0);
+                    state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+                }
+                UiMode::Pomodoro => {
+                    // Short press: pause/resume
+                    if state.pomodoro_done {
+                        state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+                    } else if let Some(paused_ms) = state.pomodoro_paused_remaining {
+                        // Resume: set start so that elapsed = total - paused_ms
+                        let total_ms = 25u64 * 60 * 1000;
+                        let elapsed = total_ms.saturating_sub(paused_ms);
+                        state.pomodoro_start =
+                            Some(Instant::now() - Duration::from_millis(elapsed));
+                        state.pomodoro_paused_remaining = None;
+                    } else if let Some(start) = state.pomodoro_start {
+                        // Pause: store remaining
+                        let total_ms = 25u64 * 60 * 1000;
+                        let elapsed = (Instant::now() - start).as_millis();
+                        state.pomodoro_paused_remaining =
+                            Some(total_ms.saturating_sub(elapsed));
+                    }
+                }
+                UiMode::SystemMonitor => {
+                    state.ui_mode = UiMode::SubMenu(MenuCategory::Info);
+                }
+                UiMode::ClockView => {
+                    state.ui_mode = UiMode::SubMenu(MenuCategory::Info);
                 }
                 UiMode::ViennaLines => {
                     let data = crate::vienna_fetch::get_lines();
                     if !data.stops.is_empty() {
-                        state.vienna_selected = (state.vienna_selected + 1) % data.stops.len();
-                        state.vienna_scroll_x = 0;
+                        state.vienna_selected =
+                            (state.vienna_selected + 1) % data.stops.len();
+                        state.vienna_scroll_x = -20;
                     }
-                    log::info!("[display] vienna scroll -> {}", state.vienna_selected);
                 }
                 UiMode::ViennaDetail => {
                     state.ui_mode = UiMode::ViennaLines;
                     state.vienna_scroll_x = 0;
-                    log::info!("[display] vienna detail dismissed -> list");
                 }
             }
         }
         ButtonEvent::LongPress => {
-            log::info!("[display] BOOT long press");
             state.last_button_time = Instant::now();
+            log::info!("[display] long press");
+
             match state.ui_mode {
                 UiMode::Face => {
-                    state.ui_mode = UiMode::Menu;
-                    state.menu_selected = 0;
-                    log::info!("[display] mode -> Menu (selected: {})", MENU_ITEMS[0]);
+                    state.ui_mode = UiMode::TopMenu;
+                    state.top_menu_selected = 0;
                 }
-                UiMode::Menu => {
-                    if state.menu_selected == 2 {
-                        // Enter Web ON/OFF submenu.
-                        state.ui_mode = UiMode::WebMenu;
-                        state.web_menu_selected = if crate::web_server::is_web_server_enabled() {
-                            1
-                        } else {
-                            0
-                        };
-                        log::info!("[display] selected -> Web submenu");
-                    } else if state.menu_selected == 4 {
-                        // Enter Vienna Lines full-screen view.
-                        state.vienna_selected = 0;
-                        state.ui_mode = UiMode::ViennaLines;
-                        log::info!("[display] selected -> Wiener Linien");
-                    } else {
-                        apply_menu_action(state.menu_selected, state);
-                        state.ui_mode = UiMode::MenuAction(state.menu_selected);
-                        log::info!(
-                            "[display] selected -> {}",
-                            MENU_ITEMS[state.menu_selected as usize]
-                        );
-                    }
+                UiMode::TopMenu => {
+                    let action = TOP_MENU[state.top_menu_selected as usize].action;
+                    execute_menu_action(action, state);
+                }
+                UiMode::SubMenu(cat) => {
+                    let items = get_menu_items(&UiMode::SubMenu(cat));
+                    let action = items[state.sub_menu_selected as usize].action;
+                    execute_menu_action(action, state);
                 }
                 UiMode::WebMenu => {
                     if state.web_menu_selected == 0 {
@@ -572,74 +796,39 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                         WEB_MENU_ITEMS[state.web_menu_selected as usize]
                     );
                 }
-                UiMode::MenuAction(_) => {
-                    state.ui_mode = UiMode::Menu;
-                    state.text.clear();
-                    log::info!("[display] action dismissed -> Menu");
+                UiMode::Flashlight => {
+                    state.flashlight_on = false;
+                    crate::led_state::set_led_color(0, 0, 0);
+                    state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+                }
+                UiMode::PartyMode => {
+                    state.party_mode_on = false;
+                    crate::led_state::set_led_color(0, 0, 0);
+                    state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+                }
+                UiMode::Pomodoro => {
+                    // Long press: cancel timer and return
+                    state.pomodoro_start = None;
+                    state.pomodoro_paused_remaining = None;
+                    state.pomodoro_done = false;
+                    state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+                }
+                UiMode::SystemMonitor => {
+                    state.ui_mode = UiMode::SubMenu(MenuCategory::Info);
+                }
+                UiMode::ClockView => {
+                    state.ui_mode = UiMode::SubMenu(MenuCategory::Info);
                 }
                 UiMode::ViennaLines => {
                     state.ui_mode = UiMode::ViennaDetail;
-                    log::info!("[display] vienna -> detail for {}", state.vienna_selected);
                 }
                 UiMode::ViennaDetail => {
                     state.ui_mode = UiMode::ViennaLines;
                     state.vienna_scroll_x = 0;
-                    log::info!("[display] vienna detail dismissed -> list");
                 }
             }
         }
     }
-}
-
-fn apply_menu_action(item: u8, state: &mut FaceState) {
-    state.text.clear();
-    match item {
-        0 => {
-            // Talk
-            state.expression = EyeExpression::Thinking;
-            let _ = state.text.push_str("...");
-        }
-        1 => {
-            // Clock — show uptime
-            state.expression = EyeExpression::Happy;
-            let secs = Instant::now().as_millis() / 1000;
-            format_uptime(secs, &mut state.text);
-        }
-        2 => {
-            // Web handled by UiMode::WebMenu.
-            state.expression = EyeExpression::Neutral;
-            let _ = state.text.push_str("Web menu");
-        }
-        3 => {
-            // Help
-            state.expression = EyeExpression::Neutral;
-            let _ = state.text.push_str("Pr:nxt Hld:sel");
-        }
-        _ => {}
-    }
-}
-
-/// Format `secs` as "Up: NNNs" into `out` without heap allocation.
-fn format_uptime(secs: u64, out: &mut heapless::String<64>) {
-    let _ = out.push_str("Up: ");
-    let mut buf = [0u8; 10];
-    let mut n = secs;
-    let mut len = 0usize;
-    if n == 0 {
-        buf[0] = b'0';
-        len = 1;
-    } else {
-        while n > 0 {
-            buf[len] = b'0' + (n % 10) as u8;
-            n /= 10;
-            len += 1;
-        }
-        buf[..len].reverse();
-    }
-    for &b in &buf[..len] {
-        let _ = out.push(b as char);
-    }
-    let _ = out.push('s');
 }
 
 // ── Face state ────────────────────────────────────────────────────────────────
@@ -654,13 +843,25 @@ struct FaceState {
     /// Timestamp of last ABI expression override.
     expression_override_since: Option<Instant>,
     ui_mode: UiMode,
-    menu_selected: u8,
+    // ── Menu navigation ──
+    top_menu_selected: u8,
+    sub_menu_selected: u8,
     web_menu_selected: u8,
     vienna_selected: usize,
     /// Horizontal scroll pixel offset for the selected Vienna list item (marquee).
     vienna_scroll_x: i32,
-    /// Updated on every button event; used for the 10-second inactivity timeout.
+    /// Updated on every button event; used for the inactivity timeout.
     last_button_time: Instant,
+    // ── Feature state ──
+    flashlight_on: bool,
+    party_mode_on: bool,
+    party_hue: u16,
+    pomodoro_start: Option<Instant>,
+    pomodoro_paused_remaining: Option<u64>,
+    pomodoro_done: bool,
+    brightness_level: u8,
+    // ── Double press detection ──
+    last_short_press_time: Instant,
     // ── Rich animation state ──
     rng: Rng,
     /// Millisecond timestamp when the next blink should start.
@@ -689,11 +890,20 @@ impl Default for FaceState {
             expression_override: false,
             expression_override_since: None,
             ui_mode: UiMode::Face,
-            menu_selected: 0,
+            top_menu_selected: 0,
+            sub_menu_selected: 0,
             web_menu_selected: 0,
             vienna_selected: 0,
             vienna_scroll_x: 0,
             last_button_time: Instant::from_ticks(0),
+            flashlight_on: false,
+            party_mode_on: false,
+            party_hue: 0,
+            pomodoro_start: None,
+            pomodoro_paused_remaining: None,
+            pomodoro_done: false,
+            brightness_level: 2, // High (255)
+            last_short_press_time: Instant::from_ticks(0),
             rng: Rng(0xDEAD_BEEF),
             next_blink_ms: 2500,
             blink_end_ms: 0,
@@ -706,6 +916,43 @@ impl Default for FaceState {
     }
 }
 
+// ── LED effects ──────────────────────────────────────────────────────────────
+
+/// Integer-only HSV to RGB conversion.
+/// h: 0-359 (hue degrees), s: 0-255 (saturation), v: 0-255 (value).
+fn hsv_to_rgb(h: u16, s: u8, v: u8) -> (u8, u8, u8) {
+    if s == 0 {
+        return (v, v, v);
+    }
+    let region = h / 60;
+    let remainder = ((h % 60) as u32 * 255) / 60;
+    let p = ((v as u32) * (255 - s as u32)) / 255;
+    let q = ((v as u32) * (255 - (s as u32 * remainder) / 255)) / 255;
+    let t = ((v as u32) * (255 - (s as u32 * (255 - remainder)) / 255)) / 255;
+    let (r, g, b) = match region {
+        0 => (v as u32, t, p),
+        1 => (q, v as u32, p),
+        2 => (p, v as u32, t),
+        3 => (p, q, v as u32),
+        4 => (t, p, v as u32),
+        _ => (v as u32, p, q),
+    };
+    (r as u8, g as u8, b as u8)
+}
+
+/// Drive LED effects each frame (called from display loop).
+fn tick_led_effects(state: &mut FaceState) {
+    if state.flashlight_on {
+        crate::led_state::set_led_color(255, 255, 255);
+        return;
+    }
+    if state.party_mode_on {
+        state.party_hue = (state.party_hue + 7) % 360;
+        let (r, g, b) = hsv_to_rgb(state.party_hue, 255, 255);
+        crate::led_state::set_led_color(r, g, b);
+    }
+}
+
 // ── Render dispatcher ─────────────────────────────────────────────────────────
 
 fn render_frame(oled: &mut OledDisplay, state: &mut FaceState) {
@@ -713,7 +960,12 @@ fn render_frame(oled: &mut OledDisplay, state: &mut FaceState) {
         UiMode::Face => render_full_face(oled, state),
         UiMode::ViennaLines => render_vienna_lines(oled, state),
         UiMode::ViennaDetail => render_vienna_detail(oled, state),
-        _ => render_menu_mode(oled, state),
+        UiMode::Pomodoro => render_pomodoro(oled, state),
+        UiMode::SystemMonitor => render_system_monitor(oled, state),
+        UiMode::ClockView => render_clock_view(oled, state),
+        UiMode::Flashlight => render_flashlight(oled, state),
+        UiMode::PartyMode => render_party_mode(oled, state),
+        _ => render_menu_mode(oled, state), // TopMenu, SubMenu, WebMenu
     }
 }
 
@@ -1126,17 +1378,13 @@ fn render_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
         return;
     }
 
-    if let UiMode::MenuAction(_) = state.ui_mode {
-        // Show the action result text and a dismiss hint.
-        render_action_text(oled, &state.text);
-        return;
-    }
+    // Get the menu items and selected index for the current mode.
+    let items = get_menu_items(&state.ui_mode);
+    let sel = get_menu_selected(state) as usize;
+    let total = items.len();
+    let max_visible: usize = 4;
 
     // Scrolling window: show 4 items at a time (4 × 16 = 64px fits).
-    // Scroll so the selected item is always visible.
-    let total = MENU_ITEMS.len();
-    let max_visible: usize = 4;
-    let sel = state.menu_selected as usize;
     let scroll_start = if sel >= max_visible {
         sel - (max_visible - 1)
     } else {
@@ -1148,7 +1396,7 @@ fn render_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
         if i >= total {
             break;
         }
-        let label = MENU_ITEMS[i];
+        let label = items[i].label;
         let y_top = (slot as i32) * 16;
         if i == sel {
             let _ = Rectangle::new(Point::new(0, y_top), Size::new(63, 16))
@@ -1221,23 +1469,266 @@ fn render_web_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
     let _ = Text::new(&status, Point::new(2, 62), normal_style).draw(oled);
 }
 
-/// Render action result text in the left panel; chunk into 10-char lines.
-fn render_action_text(oled: &mut OledDisplay, text: &heapless::String<64>) {
+// ── New full-screen mode renderers ───────────────────────────────────────────
+
+/// Full-screen Pomodoro timer (25-minute countdown + progress bar).
+fn render_pomodoro(oled: &mut OledDisplay, state: &mut FaceState) {
+    use core::fmt::Write;
+
+    oled.clear(BinaryColor::Off);
     let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let bytes = text.as_bytes();
-    let mut y = 11i32;
-    for chunk in bytes.chunks(10) {
-        if y > 42 {
-            break;
-        }
-        if let Ok(line) = core::str::from_utf8(chunk) {
-            let _ = Text::new(line, Point::new(2, y), style).draw(oled);
-        }
-        y += 14;
+    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+
+    // Header bar
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(oled);
+    let _ = Text::new("POMODORO", Point::new(34, 9), inv_style).draw(oled);
+
+    let total_ms: u64 = 25 * 60 * 1000;
+    let remaining_ms = if state.pomodoro_done {
+        0u64
+    } else if let Some(paused) = state.pomodoro_paused_remaining {
+        paused
+    } else if let Some(start) = state.pomodoro_start {
+        let elapsed = (Instant::now() - start).as_millis();
+        total_ms.saturating_sub(elapsed)
+    } else {
+        total_ms
+    };
+
+    // Check completion
+    if remaining_ms == 0 && !state.pomodoro_done && state.pomodoro_start.is_some() {
+        state.pomodoro_done = true;
+        state.expression = EyeExpression::Surprised;
+        state.expression_override = true;
+        state.expression_override_since = Some(Instant::now());
     }
-    // Dismiss hint at bottom.
-    let hint = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let _ = Text::new(">press", Point::new(2, 60), hint).draw(oled);
+
+    let total_secs = (remaining_ms / 1000) as u32;
+    let mm = total_secs / 60;
+    let ss = total_secs % 60;
+
+    // Large MM:SS display
+    let mut time_str = heapless::String::<8>::new();
+    let _ = write!(time_str, "{:02}:{:02}", mm, ss);
+    // Double-size: draw each character as 12×20 using FONT_6X10 twice
+    let _ = Text::new(&time_str, Point::new(34, 38), style).draw(oled);
+
+    // Status line
+    let status_str = if state.pomodoro_done {
+        "DONE! press to exit"
+    } else if state.pomodoro_paused_remaining.is_some() {
+        "PAUSED  press:resume"
+    } else {
+        "hold:cancel press:pause"
+    };
+    let _ = Text::new(status_str, Point::new(2, 50), style).draw(oled);
+
+    // Progress bar at bottom (y=54..62)
+    let _ = Rectangle::new(Point::new(0, 55), Size::new(128, 9))
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(oled);
+    let elapsed_ms = total_ms.saturating_sub(remaining_ms);
+    let fill_w = ((elapsed_ms * 126) / total_ms) as u32;
+    if fill_w > 0 {
+        let _ = Rectangle::new(Point::new(1, 56), Size::new(fill_w, 7))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .draw(oled);
+    }
+}
+
+/// Full-screen system monitor (WiFi, IP, uptime, memory).
+fn render_system_monitor(oled: &mut OledDisplay, _state: &mut FaceState) {
+    use core::fmt::Write;
+
+    oled.clear(BinaryColor::Off);
+    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+
+    // Header bar
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(oled);
+    let _ = Text::new("SYSTEM", Point::new(40, 9), inv_style).draw(oled);
+
+    // WiFi status
+    let wifi_str = match crate::wifi::wifi_status() {
+        crate::wifi::WIFI_STATUS_CONNECTED => "WiFi: Connected",
+        crate::wifi::WIFI_STATUS_CONNECTING => "WiFi: Connecting",
+        crate::wifi::WIFI_STATUS_ERROR => "WiFi: Error",
+        _ => "WiFi: Off",
+    };
+    let _ = Text::new(wifi_str, Point::new(2, 24), style).draw(oled);
+
+    // IP address
+    let mut ip_str = heapless::String::<22>::new();
+    let _ = ip_str.push_str("IP: ");
+    if let Some(ip) = crate::wifi::wifi_ipv4() {
+        let _ = write!(ip_str, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+    } else {
+        let _ = ip_str.push_str("--");
+    }
+    let _ = Text::new(&ip_str, Point::new(2, 36), style).draw(oled);
+
+    // Uptime
+    let secs = Instant::now().as_millis() / 1000;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let mut up_str = heapless::String::<22>::new();
+    let _ = write!(up_str, "Up: {}h {}m {}s", h, m, s);
+    let _ = Text::new(&up_str, Point::new(2, 48), style).draw(oled);
+
+    // Memory
+    let free_kb = esp_alloc::HEAP.free() / 1024;
+    let used_kb = esp_alloc::HEAP.used() / 1024;
+    let mut mem_str = heapless::String::<22>::new();
+    let _ = write!(mem_str, "Mem: {}k/{}k", free_kb, free_kb + used_kb);
+    let _ = Text::new(&mem_str, Point::new(2, 60), style).draw(oled);
+}
+
+/// Full-screen clock view (NTP time or uptime fallback).
+fn render_clock_view(oled: &mut OledDisplay, _state: &mut FaceState) {
+    use core::fmt::Write;
+
+    oled.clear(BinaryColor::Off);
+    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+
+    // Header bar
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(oled);
+    let _ = Text::new("CLOCK", Point::new(44, 9), inv_style).draw(oled);
+
+    if let Some(unix_secs) = crate::ntp::wall_clock_secs() {
+        // Convert to HH:MM:SS (UTC+1 for Vienna)
+        let local_secs = unix_secs + 3600; // UTC+1
+        let day_secs = (local_secs % 86400) as u32;
+        let hh = day_secs / 3600;
+        let mm = (day_secs % 3600) / 60;
+        let ss = day_secs % 60;
+
+        let mut time_str = heapless::String::<12>::new();
+        let _ = write!(time_str, "{:02}:{:02}:{:02}", hh, mm, ss);
+        let _ = Text::new(&time_str, Point::new(34, 35), style).draw(oled);
+
+        // Date: days since Unix epoch → Y/M/D
+        let total_days = (local_secs / 86400) as u32;
+        let (y, m, d) = days_to_date(total_days);
+        let mut date_str = heapless::String::<16>::new();
+        let _ = write!(date_str, "{:04}-{:02}-{:02}", y, m, d);
+        let _ = Text::new(&date_str, Point::new(28, 50), style).draw(oled);
+
+        let _ = Text::new("NTP synced", Point::new(28, 62), style).draw(oled);
+    } else {
+        // Fallback: show uptime
+        let secs = Instant::now().as_millis() / 1000;
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        let s = secs % 60;
+        let mut time_str = heapless::String::<16>::new();
+        let _ = write!(time_str, "{}h {:02}m {:02}s", h, m, s);
+        let _ = Text::new("Uptime:", Point::new(36, 30), style).draw(oled);
+        let _ = Text::new(&time_str, Point::new(24, 44), style).draw(oled);
+        let _ = Text::new("no NTP sync", Point::new(24, 62), style).draw(oled);
+    }
+}
+
+/// Convert days since Unix epoch (1970-01-01) to (year, month, day).
+fn days_to_date(days: u32) -> (u32, u32, u32) {
+    // Civil calendar algorithm
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Flashlight status screen (split: status left, mini-face right).
+fn render_flashlight(oled: &mut OledDisplay, state: &mut FaceState) {
+    state.frame = state.frame.wrapping_add(1);
+    let now_ms = Instant::now().as_millis() as u64;
+    tick_animation(state, now_ms);
+
+    oled.clear(BinaryColor::Off);
+
+    // Vertical divider
+    let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(oled);
+
+    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+
+    // Header
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(oled);
+    let _ = Text::new("LIGHT", Point::new(12, 9), inv_style).draw(oled);
+
+    // Status
+    let _ = Text::new("ON", Point::new(22, 32), style).draw(oled);
+
+    // Sun icon (simple circle with rays)
+    let _ = Circle::new(Point::new(24, 36), 10)
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(oled);
+
+    let _ = Text::new(">exit", Point::new(12, 60), style).draw(oled);
+
+    render_mini_face(oled, state);
+}
+
+/// Party mode status screen (split: status left, mini-face right).
+fn render_party_mode(oled: &mut OledDisplay, state: &mut FaceState) {
+    state.frame = state.frame.wrapping_add(1);
+    let now_ms = Instant::now().as_millis() as u64;
+    tick_animation(state, now_ms);
+
+    oled.clear(BinaryColor::Off);
+
+    // Vertical divider
+    let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(oled);
+
+    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+
+    // Header
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(oled);
+    let _ = Text::new("PARTY", Point::new(12, 9), inv_style).draw(oled);
+
+    // Animated note symbols based on frame
+    let phase = (state.frame / 4) % 3;
+    let note = match phase {
+        0 => "~ * ~",
+        1 => "* ~ *",
+        _ => "~ ~ ~",
+    };
+    let _ = Text::new(note, Point::new(4, 32), style).draw(oled);
+
+    // Show current hue angle
+    {
+        use core::fmt::Write;
+        let mut hue_str = heapless::String::<12>::new();
+        let _ = write!(hue_str, "Hue: {}", state.party_hue);
+        let _ = Text::new(&hue_str, Point::new(4, 46), style).draw(oled);
+    }
+
+    let _ = Text::new(">exit", Point::new(12, 60), style).draw(oled);
+
+    render_mini_face(oled, state);
 }
 
 /// Full-screen Vienna Lines list view (128×64).
@@ -1313,20 +1804,30 @@ fn render_vienna_lines(oled: &mut OledDisplay, state: &mut FaceState) {
                 .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
                 .draw(oled);
 
-            // Marquee scroll for selected row if text exceeds display width
             let text_w = label.len() as i32 * 6;
+
+            // Animación de marquesina si el texto excede el ancho (128px)
             if text_w > 128 {
-                let x = -state.vienna_scroll_x;
+                // Si el valor es negativo, el offset es 0 (se queda quieto).
+                // Si es positivo, usamos el valor para desplazarlo.
+                let scroll_offset = state.vienna_scroll_x.max(0);
+                let x = 1 - scroll_offset;
+
                 let _ = Text::new(&label, Point::new(x, y_top + 9), inv_style).draw(oled);
-                // Advance scroll; wrap when text fully exits left
+
+                // Avanzamos el contador/scroll en cada frame
                 state.vienna_scroll_x += 1;
+
+                // Cuando el texto sale completamente por la izquierda
                 if state.vienna_scroll_x > text_w {
-                    state.vienna_scroll_x = -128;
+                    // Reiniciamos a -20. Esto hará que el texto vuelva a aparecer
+                    // a la izquierda y espere 20 frames (2 segundos) antes de moverse.
+                    state.vienna_scroll_x = -20;
                 }
-            } else {
+        } else {
                 let _ = Text::new(&label, Point::new(1, y_top + 9), inv_style).draw(oled);
             }
-        } else {
+        }  else {
             // Truncate non-selected rows to fit 21 chars
             let trunc: &str = if label.len() > 21 {
                 &label[..21]

@@ -78,7 +78,7 @@ const PASSWORD: &str = match option_env!("WIFI_PASSWORD") {
 // Static allocations required by embassy-net
 // ---------------------------------------------------------------------------
 
-static STACK_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
+static STACK_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
 
 // ---------------------------------------------------------------------------
 // Tasks
