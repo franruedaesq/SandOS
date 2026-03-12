@@ -240,8 +240,12 @@ impl MockHost {
 
     /// Render an eye expression; validates the argument.
     pub fn draw_eye(&mut self, expression_raw: i32) -> i32 {
+        // Must match the ABI status values exactly for tests
         match EyeExpression::from_i32(expression_raw) {
-            Some(expr) => self.display.draw_eye(expr),
+            Some(expr) => {
+                self.display.draw_eye(expr);
+                status::OK
+            }
             None => status::ERR_INVALID_ARG,
         }
     }
