@@ -53,7 +53,7 @@ use embedded_graphics::{
     pixelcolor::BinaryColor,
     prelude::{Drawable, Point, Primitive},
     primitives::{
-        Circle, CornerRadii, Line, PrimitiveStyle, Rectangle, RoundedRectangle,
+        Circle, Line, PrimitiveStyle, Rectangle,
     },
     text::Text,
     Pixel,
@@ -101,16 +101,31 @@ impl Rng {
 
 // ── Expression schedule ───────────────────────────────────────────────────────
 
-/// Expressions to cycle through in idle mode — every consecutive pair
-/// differs so that each transition is visually distinct.
-const IDLE_EXPRESSIONS: [EyeExpression; 7] = [
+/// Expressions to cycle through in idle mode.
+///
+/// The cycle is designed to feel natural:
+///   Neutral (resting) → Happy (content) → Sleepy (dozing off) →
+///   Neutral (wakes) → Thinking (pondering) → Heart (affectionate) →
+///   Neutral → Surprised (alert) → Happy
+///
+/// Contextual overrides from system events take priority (see DisplayCommand):
+///   - WiFi connected       → Happy
+///   - WiFi connecting      → Thinking
+///   - WiFi error/timeout   → Sad
+///   - Repeated failures    → Angry
+///   - New ESP-NOW message  → Surprised
+///   - Button press         → Heart (greeting)
+///   - Long idle (>60s)     → Sleepy
+const IDLE_EXPRESSIONS: [EyeExpression; 9] = [
     EyeExpression::Neutral,
     EyeExpression::Happy,
+    EyeExpression::Sleepy,
+    EyeExpression::Neutral,
     EyeExpression::Thinking,
+    EyeExpression::Heart,
     EyeExpression::Neutral,
     EyeExpression::Surprised,
     EyeExpression::Happy,
-    EyeExpression::Sad,
 ];
 
 static DISPLAY_CHANNEL: Channel<CriticalSectionRawMutex, DisplayCommand, DISPLAY_QUEUE_DEPTH> =
@@ -744,22 +759,22 @@ fn tick_animation(state: &mut FaceState, now_ms: u64) {
     }
 }
 
-/// Smooth sine-ish breathing bob (triangle wave approximation, ±2 px).
+/// Smooth breathing bob (triangle wave, ±1 px — subtle).
 fn breathing_offset(now_ms: u64) -> i32 {
-    // 2.4 s cycle ; triangle wave 0→2→0→-2→0
-    let phase = (now_ms % 2400) as i32; // 0..2399
-    if phase < 600 {
-        (phase * 2) / 600           // 0 → 1 (we use 0→2 below)
-    } else if phase < 1200 {
-        2 - ((phase - 600) * 2) / 600 // 2 → 0
-    } else if phase < 1800 {
-        -(((phase - 1200) * 2) / 600)  // 0 → -2
+    // 3 s cycle ; triangle wave 0→1→0→-1→0
+    let phase = (now_ms % 3000) as i32; // 0..2999
+    if phase < 750 {
+        phase / 750           // 0 → 1
+    } else if phase < 1500 {
+        1 - (phase - 750) / 750 // 1 → 0
+    } else if phase < 2250 {
+        -((phase - 1500) / 750)  // 0 → -1
     } else {
-        -2 + ((phase - 1800) * 2) / 600 // -2 → 0
+        -1 + (phase - 2250) / 750 // -1 → 0
     }
 }
 
-/// Render the full 128×64 kawaii robot face.
+/// Render the full 128×64 kawaii face (frameless — eyes and mouth only).
 fn render_full_face(oled: &mut OledDisplay, state: &mut FaceState) {
     state.frame = state.frame.wrapping_add(1);
     let now_ms = Instant::now().as_millis() as u64;
@@ -771,140 +786,15 @@ fn render_full_face(oled: &mut OledDisplay, state: &mut FaceState) {
 
     oled.clear(BinaryColor::Off);
 
-    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
-    let fill_off = PrimitiveStyle::with_fill(BinaryColor::Off);
-    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let stroke2 = PrimitiveStyle::with_stroke(BinaryColor::On, 2);
-
-    // ── Face-plate (rounded rectangle visor) ──
-    let plate_y = 8 + bob_y;
-    let _ = RoundedRectangle::new(
-        Rectangle::new(Point::new(18, plate_y), Size::new(92, 38)),
-        CornerRadii::new(Size::new(11, 11)),
-    )
-    .into_styled(stroke2)
-    .draw(oled);
-
-    // ── Antenna nubs ──
-    let _ = Line::new(Point::new(46, plate_y), Point::new(46, plate_y - 3))
-        .into_styled(stroke)
-        .draw(oled);
-    let _ = Circle::new(Point::new(44, plate_y - 5), 5)
-        .into_styled(fill_on)
-        .draw(oled);
-    let _ = Line::new(Point::new(82, plate_y), Point::new(82, plate_y - 3))
-        .into_styled(stroke)
-        .draw(oled);
-    let _ = Circle::new(Point::new(80, plate_y - 5), 5)
-        .into_styled(fill_on)
-        .draw(oled);
-
     // ── Eyes ──
-    let eye_cy = 23 + bob_y;
-    let le_cx = 44 + state.eye_look_x; // left-eye centre X
-    let re_cx = 84 + state.eye_look_x; // right-eye centre X
-
-    if blinking {
-        // Blink: horizontal lines (kawaii closed eyes: ─ ─)
-        let _ = Line::new(Point::new(le_cx - 7, eye_cy), Point::new(le_cx + 7, eye_cy))
-            .into_styled(stroke2)
-            .draw(oled);
-        let _ = Line::new(Point::new(re_cx - 7, eye_cy), Point::new(re_cx + 7, eye_cy))
-            .into_styled(stroke2)
-            .draw(oled);
-    } else {
-        match state.expression {
-            EyeExpression::Happy => {
-                // Happy: upward arcs (＾ ＾)
-                let _ = Line::new(Point::new(le_cx - 7, eye_cy + 2), Point::new(le_cx, eye_cy - 4))
-                    .into_styled(stroke2).draw(oled);
-                let _ = Line::new(Point::new(le_cx, eye_cy - 4), Point::new(le_cx + 7, eye_cy + 2))
-                    .into_styled(stroke2).draw(oled);
-                let _ = Line::new(Point::new(re_cx - 7, eye_cy + 2), Point::new(re_cx, eye_cy - 4))
-                    .into_styled(stroke2).draw(oled);
-                let _ = Line::new(Point::new(re_cx, eye_cy - 4), Point::new(re_cx + 7, eye_cy + 2))
-                    .into_styled(stroke2).draw(oled);
-            }
-            EyeExpression::Sad => {
-                // Sad: half-closed droopy eyes
-                let r = 7i32;
-                let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                // Cut upper half as "droopy eyelid"
-                let _ = Rectangle::new(Point::new(le_cx - r, eye_cy - r - 1), Size::new((r * 2) as u32, (r + 2) as u32))
-                    .into_styled(fill_off).draw(oled);
-                let _ = Rectangle::new(Point::new(re_cx - r, eye_cy - r - 1), Size::new((r * 2) as u32, (r + 2) as u32))
-                    .into_styled(fill_off).draw(oled);
-                // Angled brow line
-                let _ = Line::new(Point::new(le_cx - 7, eye_cy - 3), Point::new(le_cx + 5, eye_cy - 1))
-                    .into_styled(stroke).draw(oled);
-                let _ = Line::new(Point::new(re_cx - 5, eye_cy - 1), Point::new(re_cx + 7, eye_cy - 3))
-                    .into_styled(stroke).draw(oled);
-            }
-            EyeExpression::Angry => {
-                // Angry: V-shaped brows + narrowed eyes
-                let r = 6i32;
-                let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                // Angry brows
-                let _ = Line::new(Point::new(le_cx - 8, eye_cy - 8), Point::new(le_cx + 5, eye_cy - 4))
-                    .into_styled(stroke2).draw(oled);
-                let _ = Line::new(Point::new(re_cx - 5, eye_cy - 4), Point::new(re_cx + 8, eye_cy - 8))
-                    .into_styled(stroke2).draw(oled);
-            }
-            EyeExpression::Surprised => {
-                // Surprised: open circle eyes
-                let r = 9i32;
-                let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(stroke2).draw(oled);
-                let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(stroke2).draw(oled);
-                // Pupils
-                let _ = Circle::new(Point::new(le_cx - 2, eye_cy - 2), 4)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(re_cx - 2, eye_cy - 2), 4)
-                    .into_styled(fill_on).draw(oled);
-                // Highlight
-                let _ = Circle::new(Point::new(le_cx + 2, eye_cy - 5), 3)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(re_cx + 2, eye_cy - 5), 3)
-                    .into_styled(fill_on).draw(oled);
-            }
-            EyeExpression::Thinking => {
-                // Thinking: one eye normal, one half closed + look-up pupils
-                let r = 7i32;
-                // Left eye normal
-                let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                // Highlight dot
-                let _ = Circle::new(Point::new(le_cx + 2, eye_cy - 4), 3)
-                    .into_styled(fill_off).draw(oled);
-                // Right eye half-closed (line)
-                let _ = Line::new(Point::new(re_cx - 7, eye_cy), Point::new(re_cx + 7, eye_cy))
-                    .into_styled(stroke2).draw(oled);
-            }
-            _ => {
-                // Neutral: filled circle eyes with highlight dot (kawaii default)
-                let r = 7i32;
-                let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                // Cute highlight (small off-circle in upper-right of each eye)
-                let _ = Circle::new(Point::new(le_cx + 2, eye_cy - 5), 3)
-                    .into_styled(fill_off).draw(oled);
-                let _ = Circle::new(Point::new(re_cx + 2, eye_cy - 5), 3)
-                    .into_styled(fill_off).draw(oled);
-            }
-        }
-    }
+    // Centred on 128×64: eyes at y≈24, spread wide for kawaii proportions
+    let eye_cy = 22 + bob_y;
+    let le_cx = 38 + state.eye_look_x; // left-eye centre X
+    let re_cx = 90 + state.eye_look_x; // right-eye centre X
+    draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 1);
 
     // ── Mouth ──
-    let mouth_cy = 37 + bob_y;
+    let mouth_cy = 46 + bob_y;
     draw_mouth(oled, state.expression, 64, mouth_cy, 1, now_ms);
 
     // ── Status text overlay ──
@@ -917,6 +807,200 @@ fn render_full_face(oled: &mut OledDisplay, state: &mut FaceState) {
     }
 }
 
+/// Draw both eyes for any expression.  `scale` 1 = full (128×64), 0 = mini (64px panel).
+fn draw_eyes(
+    oled: &mut OledDisplay,
+    expr: EyeExpression,
+    le_cx: i32,
+    re_cx: i32,
+    eye_cy: i32,
+    blinking: bool,
+    scale: i32,
+) {
+    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
+    let fill_off = PrimitiveStyle::with_fill(BinaryColor::Off);
+    let stroke2 = PrimitiveStyle::with_stroke(BinaryColor::On, if scale > 0 { 2 } else { 1 });
+
+    // Eye radius scales: full=12, mini=6
+    let r = if scale > 0 { 12i32 } else { 6i32 };
+    // Highlight radius: full=4, mini=2
+    let hr = if scale > 0 { 4i32 } else { 2i32 };
+
+    if blinking {
+        // Blink: thick horizontal lines (kawaii ─ ─)
+        let hw = r + 2;
+        let _ = Line::new(Point::new(le_cx - hw, eye_cy), Point::new(le_cx + hw, eye_cy))
+            .into_styled(stroke2).draw(oled);
+        let _ = Line::new(Point::new(re_cx - hw, eye_cy), Point::new(re_cx + hw, eye_cy))
+            .into_styled(stroke2).draw(oled);
+        return;
+    }
+
+    match expr {
+        EyeExpression::Neutral | EyeExpression::Blink => {
+            // Large filled circles with highlight dot (classic kawaii)
+            let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            // Highlight (upper-right of each eye)
+            let _ = Circle::new(Point::new(le_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
+                .into_styled(fill_off).draw(oled);
+            let _ = Circle::new(Point::new(re_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
+                .into_styled(fill_off).draw(oled);
+        }
+        EyeExpression::Happy => {
+            // Happy: filled upward arcs (＾ ＾) — draw filled circle then erase bottom half
+            let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            // Erase bottom 60% to create upward arc
+            let cut_h = (r * 6 / 5) as u32;
+            let _ = Rectangle::new(
+                Point::new(le_cx - r - 1, eye_cy - 1),
+                Size::new((r * 2 + 2) as u32, cut_h),
+            ).into_styled(fill_off).draw(oled);
+            let _ = Rectangle::new(
+                Point::new(re_cx - r - 1, eye_cy - 1),
+                Size::new((r * 2 + 2) as u32, cut_h),
+            ).into_styled(fill_off).draw(oled);
+        }
+        EyeExpression::Sad => {
+            // Sad: filled circles with droopy eyelid covering top 65%
+            let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            // Eyelid: erase top portion + angled lid line
+            let lid_h = (r * 13 / 10) as u32;
+            let _ = Rectangle::new(
+                Point::new(le_cx - r - 1, eye_cy - r - 1),
+                Size::new((r * 2 + 2) as u32, lid_h),
+            ).into_styled(fill_off).draw(oled);
+            let _ = Rectangle::new(
+                Point::new(re_cx - r - 1, eye_cy - r - 1),
+                Size::new((r * 2 + 2) as u32, lid_h),
+            ).into_styled(fill_off).draw(oled);
+            // Angled eyelid lines (drooping inward)
+            let _ = Line::new(
+                Point::new(le_cx - r, eye_cy - r / 3 - 2),
+                Point::new(le_cx + r, eye_cy + 1),
+            ).into_styled(stroke2).draw(oled);
+            let _ = Line::new(
+                Point::new(re_cx - r, eye_cy + 1),
+                Point::new(re_cx + r, eye_cy - r / 3 - 2),
+            ).into_styled(stroke2).draw(oled);
+        }
+        EyeExpression::Angry => {
+            // Angry: filled circles with thick V-brows pointing inward
+            let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            // Cut top portion for narrowed look
+            let cut = (r * 2 / 3) as u32;
+            let _ = Rectangle::new(
+                Point::new(le_cx - r - 1, eye_cy - r - 1),
+                Size::new((r * 2 + 2) as u32, cut),
+            ).into_styled(fill_off).draw(oled);
+            let _ = Rectangle::new(
+                Point::new(re_cx - r - 1, eye_cy - r - 1),
+                Size::new((r * 2 + 2) as u32, cut),
+            ).into_styled(fill_off).draw(oled);
+            // Thick angry brows angling inward
+            let bw = r + 4;
+            let _ = Line::new(
+                Point::new(le_cx - bw, eye_cy - r - 2),
+                Point::new(le_cx + bw / 2, eye_cy - r / 3),
+            ).into_styled(stroke2).draw(oled);
+            let _ = Line::new(
+                Point::new(re_cx - bw / 2, eye_cy - r / 3),
+                Point::new(re_cx + bw, eye_cy - r - 2),
+            ).into_styled(stroke2).draw(oled);
+        }
+        EyeExpression::Surprised => {
+            // Surprised: large open circles with pupils + highlights
+            let big_r = r + 2;
+            let _ = Circle::new(Point::new(le_cx - big_r, eye_cy - big_r), (big_r * 2) as u32)
+                .into_styled(stroke2).draw(oled);
+            let _ = Circle::new(Point::new(re_cx - big_r, eye_cy - big_r), (big_r * 2) as u32)
+                .into_styled(stroke2).draw(oled);
+            // Pupils (offset slightly down-centre)
+            let pr = if scale > 0 { 3i32 } else { 2i32 };
+            let _ = Circle::new(Point::new(le_cx - pr, eye_cy - pr + 1), (pr * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            let _ = Circle::new(Point::new(re_cx - pr, eye_cy - pr + 1), (pr * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            // Highlight
+            let _ = Circle::new(Point::new(le_cx + big_r / 3, eye_cy - big_r / 2), hr as u32)
+                .into_styled(fill_on).draw(oled);
+            let _ = Circle::new(Point::new(re_cx + big_r / 3, eye_cy - big_r / 2), hr as u32)
+                .into_styled(fill_on).draw(oled);
+        }
+        EyeExpression::Thinking => {
+            // Thinking: left eye normal (with look-up pupil), right eye half-closed
+            let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            let _ = Circle::new(Point::new(le_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
+                .into_styled(fill_off).draw(oled);
+            // Right eye: thick horizontal line (half-closed)
+            let hw = r + 2;
+            let _ = Line::new(Point::new(re_cx - hw, eye_cy), Point::new(re_cx + hw, eye_cy))
+                .into_styled(stroke2).draw(oled);
+        }
+        EyeExpression::Heart => {
+            // Heart eyes: pixel-art hearts
+            draw_heart(oled, le_cx, eye_cy, r);
+            draw_heart(oled, re_cx, eye_cy, r);
+        }
+        EyeExpression::Sleepy => {
+            // Sleepy: U-shaped closed eyes (like the image row 2 col 2)
+            let hw = r;
+            // Left eye: upside-down arc — draw circle, erase top half
+            let _ = Circle::new(Point::new(le_cx - hw, eye_cy - hw), (hw * 2) as u32)
+                .into_styled(stroke2).draw(oled);
+            let _ = Rectangle::new(
+                Point::new(le_cx - hw - 1, eye_cy - hw - 1),
+                Size::new((hw * 2 + 2) as u32, (hw + 1) as u32),
+            ).into_styled(fill_off).draw(oled);
+            // Right eye
+            let _ = Circle::new(Point::new(re_cx - hw, eye_cy - hw), (hw * 2) as u32)
+                .into_styled(stroke2).draw(oled);
+            let _ = Rectangle::new(
+                Point::new(re_cx - hw - 1, eye_cy - hw - 1),
+                Size::new((hw * 2 + 2) as u32, (hw + 1) as u32),
+            ).into_styled(fill_off).draw(oled);
+        }
+    }
+}
+
+/// Draw a filled pixel-art heart centred at (cx, cy) with radius `r`.
+fn draw_heart(oled: &mut OledDisplay, cx: i32, cy: i32, r: i32) {
+    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
+    // Heart = two overlapping circles on top + triangle pointing down
+    let hr = r * 2 / 3; // radius of each lobe
+    // Left lobe
+    let _ = Circle::new(Point::new(cx - hr - hr / 2, cy - hr), (hr * 2) as u32)
+        .into_styled(fill_on).draw(oled);
+    // Right lobe
+    let _ = Circle::new(Point::new(cx + hr / 2 - hr, cy - hr), (hr * 2) as u32)
+        .into_styled(fill_on).draw(oled);
+    // Bottom triangle: fill rows from the circle equator down to the tip
+    for dy in 0..=hr {
+        let progress = dy as u32;
+        let total = hr as u32;
+        // Width narrows linearly from full width to 0
+        let half_w = ((hr as u32 + hr as u32 / 2) * (total - progress) / total) as i32;
+        if half_w > 0 {
+            let _ = Line::new(
+                Point::new(cx - half_w, cy + dy),
+                Point::new(cx + half_w, cy + dy),
+            ).into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1)).draw(oled);
+        }
+    }
+}
+
 // ── Shared mouth drawing ──────────────────────────────────────────────────────
 
 /// Draw the mouth centred at (`cx`, `cy`).  `scale` 1 = full size, 0 = mini.
@@ -926,66 +1010,88 @@ fn draw_mouth(
     cx: i32,
     cy: i32,
     scale: i32,
-    now_ms: u64,
+    _now_ms: u64,
 ) {
+    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
+    let fill_off = PrimitiveStyle::with_fill(BinaryColor::Off);
     let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     let stroke2 = PrimitiveStyle::with_stroke(BinaryColor::On, if scale > 0 { 2 } else { 1 });
-    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
-    let hw = 11 + scale * 4; // half-width
-    let hh = 3 + scale * 2;  // half-height
+    // Mouth dimensions scale with mode
+    let mr = if scale > 0 { 10i32 } else { 6i32 }; // mouth radius for curves
 
     match expr {
-        EyeExpression::Happy => {
-            // Wide smile: V shape, thicker
-            let _ = Line::new(Point::new(cx - hw, cy - 1), Point::new(cx, cy + hh))
-                .into_styled(stroke2).draw(oled);
-            let _ = Line::new(Point::new(cx, cy + hh), Point::new(cx + hw, cy - 1))
-                .into_styled(stroke2).draw(oled);
+        EyeExpression::Happy | EyeExpression::Heart => {
+            // Wide smile: filled crescent (circle + erase top half)
+            let _ = Circle::new(Point::new(cx - mr, cy - mr), (mr * 2) as u32)
+                .into_styled(fill_on).draw(oled);
+            // Erase top half + a bit more to make a crescent smile
+            let _ = Rectangle::new(
+                Point::new(cx - mr - 1, cy - mr - 1),
+                Size::new((mr * 2 + 2) as u32, (mr + 1) as u32),
+            ).into_styled(fill_off).draw(oled);
         }
         EyeExpression::Sad => {
-            // Frown: inverted V
-            let _ = Line::new(Point::new(cx - hw + 4, cy + 2), Point::new(cx, cy - hh + 2))
-                .into_styled(stroke).draw(oled);
-            let _ = Line::new(Point::new(cx, cy - hh + 2), Point::new(cx + hw - 4, cy + 2))
-                .into_styled(stroke).draw(oled);
+            // Frown: inverted crescent (circle + erase bottom half)
+            let _ = Circle::new(Point::new(cx - mr, cy - mr / 2), (mr * 2) as u32)
+                .into_styled(stroke2).draw(oled);
+            // Erase bottom half
+            let _ = Rectangle::new(
+                Point::new(cx - mr - 1, cy + mr / 2),
+                Size::new((mr * 2 + 2) as u32, (mr + 2) as u32),
+            ).into_styled(fill_off).draw(oled);
+            // Erase top portion to keep just the bottom arc
+            let _ = Rectangle::new(
+                Point::new(cx - mr - 1, cy - mr / 2 - 1),
+                Size::new((mr * 2 + 2) as u32, (mr / 2 + 1) as u32),
+            ).into_styled(fill_off).draw(oled);
         }
         EyeExpression::Angry => {
-            // Gritted teeth: small rectangle with vertical lines
-            let w = (hw * 2 - 4) as u32;
-            let _ = Rectangle::new(Point::new(cx - hw + 2, cy - 2), Size::new(w, 5))
+            // Gritted teeth: rectangle with vertical black bars
+            let tw = mr + scale * 4;
+            let th = if scale > 0 { 6i32 } else { 4i32 };
+            let _ = Rectangle::new(Point::new(cx - tw, cy - th / 2), Size::new((tw * 2) as u32, th as u32))
                 .into_styled(fill_on).draw(oled);
-            // Teeth lines (black vertical bars inside the white rect)
-            let fill_off = PrimitiveStyle::with_fill(BinaryColor::Off);
-            for i in 0..4 {
-                let tx = cx - hw + 6 + i * ((hw * 2 - 8) / 4);
-                let _ = Rectangle::new(Point::new(tx, cy - 1), Size::new(1, 3))
+            // Teeth gaps
+            let teeth = if scale > 0 { 4 } else { 3 };
+            for i in 1..teeth {
+                let tx = cx - tw + i * (tw * 2 / teeth);
+                let _ = Rectangle::new(Point::new(tx, cy - th / 2 + 1), Size::new(1, (th - 2) as u32))
                     .into_styled(fill_off).draw(oled);
             }
         }
         EyeExpression::Surprised => {
-            // Small open "O" mouth
-            let r = (3 + scale * 2) as u32;
-            let _ = Circle::new(Point::new(cx - r as i32, cy - r as i32), r * 2)
+            // Open "O" mouth — small filled circle
+            let or = if scale > 0 { 5i32 } else { 3i32 };
+            let _ = Circle::new(Point::new(cx - or, cy - or), (or * 2) as u32)
                 .into_styled(stroke2).draw(oled);
         }
         EyeExpression::Thinking => {
-            // Squiggly/wavy line
-            let _ = Line::new(Point::new(cx - 8, cy), Point::new(cx - 3, cy - 2))
+            // Wavy squiggle (3-segment line)
+            let seg = mr * 2 / 3;
+            let _ = Line::new(Point::new(cx - seg * 2, cy), Point::new(cx - seg, cy - 2))
                 .into_styled(stroke).draw(oled);
-            let _ = Line::new(Point::new(cx - 3, cy - 2), Point::new(cx + 3, cy + 2))
+            let _ = Line::new(Point::new(cx - seg, cy - 2), Point::new(cx + seg, cy + 2))
                 .into_styled(stroke).draw(oled);
-            let _ = Line::new(Point::new(cx + 3, cy + 2), Point::new(cx + 8, cy))
+            let _ = Line::new(Point::new(cx + seg, cy + 2), Point::new(cx + seg * 2, cy))
+                .into_styled(stroke).draw(oled);
+        }
+        EyeExpression::Sleepy => {
+            // Tiny "w" mouth — two small V's side by side
+            let w = mr / 2;
+            let _ = Line::new(Point::new(cx - w * 2, cy), Point::new(cx - w, cy + 2))
+                .into_styled(stroke).draw(oled);
+            let _ = Line::new(Point::new(cx - w, cy + 2), Point::new(cx, cy))
+                .into_styled(stroke).draw(oled);
+            let _ = Line::new(Point::new(cx, cy), Point::new(cx + w, cy + 2))
+                .into_styled(stroke).draw(oled);
+            let _ = Line::new(Point::new(cx + w, cy + 2), Point::new(cx + w * 2, cy))
                 .into_styled(stroke).draw(oled);
         }
         _ => {
-            // Neutral: gentle wobbling line
-            let wobble = if (now_ms % 1000) < 500 { 0 } else { 1 };
-            let _ = Line::new(
-                Point::new(cx - hw + 4, cy + wobble),
-                Point::new(cx + hw - 4, cy + wobble),
-            )
-            .into_styled(stroke)
-            .draw(oled);
+            // Neutral: small thick horizontal line (subtle, calm)
+            let hw = if scale > 0 { 6i32 } else { 4i32 };
+            let _ = Line::new(Point::new(cx - hw, cy), Point::new(cx + hw, cy))
+                .into_styled(stroke2).draw(oled);
         }
     }
 }
@@ -1321,86 +1427,16 @@ fn render_mini_face(oled: &mut OledDisplay, state: &FaceState) {
     let blinking = now_ms < state.blink_end_ms || now_ms < state.transition_end_ms;
 
     let bob_y = breathing_offset(now_ms) / 2; // subtler in mini
-    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
-    let fill_off = PrimitiveStyle::with_fill(BinaryColor::Off);
-    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
 
-    // Mini visor
-    let plate_y = 6 + bob_y;
-    let _ = RoundedRectangle::new(
-        Rectangle::new(Point::new(67, plate_y), Size::new(56, 36)),
-        CornerRadii::new(Size::new(8, 8)),
-    )
-    .into_styled(stroke)
-    .draw(oled);
+    // Eye positions centred in the right 64px panel
+    let le_cx = 80 + state.eye_look_x / 2;
+    let re_cx = 110 + state.eye_look_x / 2;
+    let eye_cy = 22 + bob_y;
 
-    let le_cx = 82 + state.eye_look_x / 2;
-    let re_cx = 108 + state.eye_look_x / 2;
-    let eye_cy = 20 + bob_y;
-    let r = 5i32;
+    draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 0);
 
-    if blinking {
-        let _ = Line::new(Point::new(le_cx - r, eye_cy), Point::new(le_cx + r, eye_cy))
-            .into_styled(stroke).draw(oled);
-        let _ = Line::new(Point::new(re_cx - r, eye_cy), Point::new(re_cx + r, eye_cy))
-            .into_styled(stroke).draw(oled);
-    } else {
-        match state.expression {
-            EyeExpression::Happy => {
-                // Mini happy arcs
-                let _ = Line::new(Point::new(le_cx - 5, eye_cy + 1), Point::new(le_cx, eye_cy - 3))
-                    .into_styled(stroke).draw(oled);
-                let _ = Line::new(Point::new(le_cx, eye_cy - 3), Point::new(le_cx + 5, eye_cy + 1))
-                    .into_styled(stroke).draw(oled);
-                let _ = Line::new(Point::new(re_cx - 5, eye_cy + 1), Point::new(re_cx, eye_cy - 3))
-                    .into_styled(stroke).draw(oled);
-                let _ = Line::new(Point::new(re_cx, eye_cy - 3), Point::new(re_cx + 5, eye_cy + 1))
-                    .into_styled(stroke).draw(oled);
-            }
-            EyeExpression::Angry => {
-                let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Line::new(Point::new(le_cx - 6, eye_cy - 7), Point::new(le_cx + 4, eye_cy - 3))
-                    .into_styled(stroke).draw(oled);
-                let _ = Line::new(Point::new(re_cx - 4, eye_cy - 3), Point::new(re_cx + 6, eye_cy - 7))
-                    .into_styled(stroke).draw(oled);
-            }
-            EyeExpression::Surprised => {
-                let _ = Circle::new(Point::new(le_cx - r - 1, eye_cy - r - 1), ((r + 1) * 2) as u32)
-                    .into_styled(stroke).draw(oled);
-                let _ = Circle::new(Point::new(re_cx - r - 1, eye_cy - r - 1), ((r + 1) * 2) as u32)
-                    .into_styled(stroke).draw(oled);
-                let _ = Circle::new(Point::new(le_cx - 2, eye_cy - 2), 4)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(re_cx - 2, eye_cy - 2), 4)
-                    .into_styled(fill_on).draw(oled);
-            }
-            EyeExpression::Thinking => {
-                let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(le_cx + 1, eye_cy - 4), 3)
-                    .into_styled(fill_off).draw(oled);
-                let _ = Line::new(Point::new(re_cx - 5, eye_cy), Point::new(re_cx + 5, eye_cy))
-                    .into_styled(stroke).draw(oled);
-            }
-            _ => {
-                // Neutral mini eyes with highlight
-                let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                    .into_styled(fill_on).draw(oled);
-                let _ = Circle::new(Point::new(le_cx + 1, eye_cy - 4), 3)
-                    .into_styled(fill_off).draw(oled);
-                let _ = Circle::new(Point::new(re_cx + 1, eye_cy - 4), 3)
-                    .into_styled(fill_off).draw(oled);
-            }
-        }
-    }
-
-    // Mini mouth (reuse shared helper)
-    draw_mouth(oled, state.expression, 95, 34 + bob_y, 0, now_ms);
+    // Mini mouth
+    draw_mouth(oled, state.expression, 95, 38 + bob_y, 0, now_ms);
 }
 
 // ── SSD1306 low-level driver ──────────────────────────────────────────────────
