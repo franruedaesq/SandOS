@@ -77,7 +77,7 @@ abi = { path = "../abi", default-features = false }
 esp-build = "0.2"
 
 [features]
-default = ["esp32s3"]
+default = ["esp32s3", "espnow"]
 
 # ESP-NOW coexistence — disabled by default while debugging WiFi STA.
 # Enable with: cargo build --features espnow

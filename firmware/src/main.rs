@@ -228,6 +228,15 @@ async fn main(spawner: Spawner) {
     // ── 14. Core 0 brain task ────────────────────────────────────────────────
     //
     // Spawns the ESP-NOW receiver, the Wasm engine, and the OS router tasks.
+    #[cfg(feature = "espnow")]
+    let esp_now_token = unsafe { core::mem::transmute::<(), esp_wifi::esp_now::EspNowWithWifiCreateToken>(()) };
+
+    #[cfg(feature = "espnow")]
+    spawner
+        .spawn(core0::brain_task(spawner, io, wifi_init, esp_now_token))
+        .unwrap();
+
+    #[cfg(not(feature = "espnow"))]
     spawner
         .spawn(core0::brain_task(spawner, io, wifi_init))
         .unwrap();
