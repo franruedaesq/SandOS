@@ -41,6 +41,7 @@ mod inference;
 mod led_state;
 mod message_bus;
 mod motors;
+mod ntp;
 mod rgb_led;
 mod router;
 mod sensors;
@@ -219,6 +220,10 @@ async fn main(spawner: Spawner) {
         .spawn(vienna_fetch::vienna_fetch_task(stack))
         .unwrap();
     log::info!("Vienna fetch task spawned");
+
+    // ── 13c. NTP time sync task ──────────────────────────────────────────────
+    spawner.spawn(ntp::ntp_sync_task(stack)).unwrap();
+    log::info!("NTP sync task spawned");
 
     // ── 14. Core 0 brain task ────────────────────────────────────────────────
     //

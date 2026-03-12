@@ -113,6 +113,8 @@ pub enum EyeExpression {
     Surprised = 4,
     Thinking  = 5,
     Blink     = 6,
+    Heart     = 7,
+    Sleepy    = 8,
 }
 
 impl EyeExpression {
@@ -130,6 +132,8 @@ impl EyeExpression {
             4 => Some(Self::Surprised),
             5 => Some(Self::Thinking),
             6 => Some(Self::Blink),
+            7 => Some(Self::Heart),
+            8 => Some(Self::Sleepy),
             _ => None,
         }
     }
@@ -909,7 +913,7 @@ mod tests {
 
     #[test]
     fn eye_expression_round_trips() {
-        for i in 0..=6i32 {
+        for i in 0..=8i32 {
             let expr = EyeExpression::from_i32(i).expect("valid expression");
             assert_eq!(expr as i32, i);
         }
@@ -918,7 +922,7 @@ mod tests {
     #[test]
     fn unknown_eye_expression_returns_none() {
         assert!(EyeExpression::from_i32(-1).is_none());
-        assert!(EyeExpression::from_i32(7).is_none());
+        assert!(EyeExpression::from_i32(9).is_none());
         assert!(EyeExpression::from_i32(255).is_none());
     }
 
