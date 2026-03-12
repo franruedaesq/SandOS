@@ -36,6 +36,7 @@ use abi::{RoutingMode, DEAD_MANS_SWITCH_MS};
 use embassy_time::Duration;
 
 use crate::{inference, message_bus, motors};
+#[cfg(feature = "espnow")]
 use crate::core0::espnow;
 
 // ── Inference audio snapshot channel ─────────────────────────────────────────
@@ -102,8 +103,16 @@ pub async fn router_task() {
 
                 // Phase 7: if the radio link is also silent, activate the
                 // local inference pipeline with any pending audio snapshot.
-                let now_ms = embassy_time::Instant::now().as_millis();
-                if !espnow::is_radio_link_alive(now_ms) {
+                #[cfg(feature = "espnow")]
+                {
+                    let now_ms = embassy_time::Instant::now().as_millis();
+                    if !espnow::is_radio_link_alive(now_ms) {
+                        run_fallback_inference();
+                    }
+                }
+                #[cfg(not(feature = "espnow"))]
+                {
+                    // ESP-NOW disabled — always run fallback inference on timeout.
                     run_fallback_inference();
                 }
             }

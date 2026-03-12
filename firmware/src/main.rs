@@ -46,6 +46,7 @@ mod router;
 mod sensors;
 mod telemetry;
 mod ulp;
+mod vienna_fetch;
 mod web_server;
 mod wifi;
 
@@ -92,7 +93,11 @@ async fn main(spawner: Spawner) {
     // ── 2. Heap init (must come before any `alloc` call) ─────────────────────
     // Add a small internal-SRAM region first so the allocator is always valid.
     // Keep this small — the real heap is PSRAM; internal SRAM is scarce.
-    esp_alloc::heap_allocator!(90 * 1024);
+    // The WiFi blob allocates ~60-80 KB from this via the Rust global
+    // allocator (wifi_malloc → alloc).  Those buffers MUST land in internal
+    // SRAM — PSRAM pointers cause null-deref crashes in the blob's DMA paths.
+    // 72 KB leaves headroom after WiFi creation for the scan channel list.
+    esp_alloc::heap_allocator!(72 * 1024);
     // Add external PSRAM (octal/quad) as a large, lower-priority region.
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
 
@@ -208,6 +213,12 @@ async fn main(spawner: Spawner) {
     // waits for a DHCP lease and then serves the dashboard on port 80.
     spawner.spawn(web_server::web_server_task(stack)).unwrap();
     log::info!("Web server task spawned (disabled by default)");
+
+    // ── 13b. Vienna departures fetch task ───────────────────────────────────
+    spawner
+        .spawn(vienna_fetch::vienna_fetch_task(stack))
+        .unwrap();
+    log::info!("Vienna fetch task spawned");
 
     // ── 14. Core 0 brain task ────────────────────────────────────────────────
     //

@@ -16,6 +16,7 @@
 //! The Wasm VM and the Router communicate through a lock-free Embassy channel
 //! (the OS Message Bus) so the real-time routing loop never blocks the engine.
 pub mod abi;
+#[cfg(feature = "espnow")]
 pub mod espnow;
 pub mod ota;
 pub mod wasm_vm;

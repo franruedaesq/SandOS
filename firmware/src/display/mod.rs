@@ -73,9 +73,9 @@ const DISPLAY_BUF_SIZE: usize = (DISPLAY_WIDTH as usize) * (DISPLAY_HEIGHT as us
 const DISPLAY_QUEUE_DEPTH: usize = 8;
 const EXPRESSION_OVERRIDE_TIMEOUT: Duration = Duration::from_secs(8);
 // OLED stability baseline (validated on device): do not change casually.
-const FRAME_PERIOD: Duration = Duration::from_millis(150);
-const FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
-const OLED_PAGE_WRITE_CHUNK_SIZE: usize = 32;
+const FRAME_PERIOD: Duration = Duration::from_millis(50);
+const FLUSH_TIMEOUT: Duration = Duration::from_millis(400);
+const OLED_PAGE_WRITE_CHUNK_SIZE: usize = 16;
 const DIAG_SKIP_FLUSH: bool = false;
 
 // ── Tiny xorshift32 PRNG (no-std, no-alloc) ──────────────────────────────────
@@ -262,7 +262,7 @@ async fn display_task(
     // OLED stability baseline (validated on device): do not change casually.
     let mut cfg = I2cConfig::default();
     cfg.frequency = 200.kHz();
-    cfg.timeout = BusTimeout::BusCycles(4000);
+    cfg.timeout = BusTimeout::BusCycles(100_000);
 
     let i2c = match I2c::new(i2c0, cfg) {
         Ok(bus) => bus.with_sda(sda).with_scl(scl).into_async(),
@@ -332,9 +332,10 @@ async fn display_task(
         let pause_idle_timeout = matches!(state.ui_mode, UiMode::WebMenu)
             && crate::web_server::is_web_server_enabled()
             && crate::wifi::wifi_status() == crate::wifi::WIFI_STATUS_CONNECTING;
+        let idle_secs = if matches!(state.ui_mode, UiMode::ViennaLines | UiMode::ViennaDetail) { 30 } else { 10 };
         if !matches!(state.ui_mode, UiMode::Face) && !pause_idle_timeout {
             let idle = Instant::now() - state.last_button_time;
-            if idle >= Duration::from_secs(10) {
+            if idle >= Duration::from_secs(idle_secs) {
                 state.ui_mode = UiMode::Face;
                 state.text.clear();
                 state.expression = EyeExpression::Neutral;
@@ -451,13 +452,17 @@ enum UiMode {
     WebMenu,
     /// Action result displayed on left panel after a long-press selection.
     MenuAction(u8),
+    /// Full-screen Vienna public transport departures (station→direction list).
+    ViennaLines,
+    /// Detail view for a selected Vienna stop (all departure times).
+    ViennaDetail,
 }
 
 // ── Button helpers ────────────────────────────────────────────────────────────
 
 // ── UI state machine ──────────────────────────────────────────────────────────
 
-const MENU_ITEMS: [&str; 4] = ["Talk", "Clock", "Web", "Help"];
+const MENU_ITEMS: [&str; 5] = ["Talk", "Clock", "Web", "Help", "Wiener L"];
 const WEB_MENU_ITEMS: [&str; 2] = ["ON", "OFF"];
 
 fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
@@ -472,7 +477,7 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                     log::info!("[display] mode -> Menu (selected: {})", MENU_ITEMS[0]);
                 }
                 UiMode::Menu => {
-                    state.menu_selected = (state.menu_selected + 1) % 4;
+                    state.menu_selected = (state.menu_selected + 1) % 5;
                     log::info!(
                         "[display] menu next -> {}",
                         MENU_ITEMS[state.menu_selected as usize]
@@ -489,6 +494,19 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                     state.ui_mode = UiMode::Menu;
                     state.text.clear();
                     log::info!("[display] action dismissed -> Menu");
+                }
+                UiMode::ViennaLines => {
+                    let data = crate::vienna_fetch::get_lines();
+                    if !data.stops.is_empty() {
+                        state.vienna_selected = (state.vienna_selected + 1) % data.stops.len();
+                        state.vienna_scroll_x = 0;
+                    }
+                    log::info!("[display] vienna scroll -> {}", state.vienna_selected);
+                }
+                UiMode::ViennaDetail => {
+                    state.ui_mode = UiMode::ViennaLines;
+                    state.vienna_scroll_x = 0;
+                    log::info!("[display] vienna detail dismissed -> list");
                 }
             }
         }
@@ -511,6 +529,11 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                             0
                         };
                         log::info!("[display] selected -> Web submenu");
+                    } else if state.menu_selected == 4 {
+                        // Enter Vienna Lines full-screen view.
+                        state.vienna_selected = 0;
+                        state.ui_mode = UiMode::ViennaLines;
+                        log::info!("[display] selected -> Wiener Linien");
                     } else {
                         apply_menu_action(state.menu_selected, state);
                         state.ui_mode = UiMode::MenuAction(state.menu_selected);
@@ -538,6 +561,15 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                     state.ui_mode = UiMode::Menu;
                     state.text.clear();
                     log::info!("[display] action dismissed -> Menu");
+                }
+                UiMode::ViennaLines => {
+                    state.ui_mode = UiMode::ViennaDetail;
+                    log::info!("[display] vienna -> detail for {}", state.vienna_selected);
+                }
+                UiMode::ViennaDetail => {
+                    state.ui_mode = UiMode::ViennaLines;
+                    state.vienna_scroll_x = 0;
+                    log::info!("[display] vienna detail dismissed -> list");
                 }
             }
         }
@@ -609,6 +641,9 @@ struct FaceState {
     ui_mode: UiMode,
     menu_selected: u8,
     web_menu_selected: u8,
+    vienna_selected: usize,
+    /// Horizontal scroll pixel offset for the selected Vienna list item (marquee).
+    vienna_scroll_x: i32,
     /// Updated on every button event; used for the 10-second inactivity timeout.
     last_button_time: Instant,
     // ── Rich animation state ──
@@ -641,6 +676,8 @@ impl Default for FaceState {
             ui_mode: UiMode::Face,
             menu_selected: 0,
             web_menu_selected: 0,
+            vienna_selected: 0,
+            vienna_scroll_x: 0,
             last_button_time: Instant::from_ticks(0),
             rng: Rng(0xDEAD_BEEF),
             next_blink_ms: 2500,
@@ -659,6 +696,8 @@ impl Default for FaceState {
 fn render_frame(oled: &mut OledDisplay, state: &mut FaceState) {
     match state.ui_mode {
         UiMode::Face => render_full_face(oled, state),
+        UiMode::ViennaLines => render_vienna_lines(oled, state),
+        UiMode::ViennaDetail => render_vienna_detail(oled, state),
         _ => render_menu_mode(oled, state),
     }
 }
@@ -987,10 +1026,25 @@ fn render_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
         return;
     }
 
-    for (i, &label) in MENU_ITEMS.iter().enumerate() {
-        let y_top = (i as i32) * 16;
-        if i == state.menu_selected as usize {
-            // Filled highlight: white rectangle, black text.
+    // Scrolling window: show 4 items at a time (4 × 16 = 64px fits).
+    // Scroll so the selected item is always visible.
+    let total = MENU_ITEMS.len();
+    let max_visible: usize = 4;
+    let sel = state.menu_selected as usize;
+    let scroll_start = if sel >= max_visible {
+        sel - (max_visible - 1)
+    } else {
+        0
+    };
+
+    for slot in 0..max_visible {
+        let i = scroll_start + slot;
+        if i >= total {
+            break;
+        }
+        let label = MENU_ITEMS[i];
+        let y_top = (slot as i32) * 16;
+        if i == sel {
             let _ = Rectangle::new(Point::new(0, y_top), Size::new(63, 16))
                 .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
                 .draw(oled);
@@ -998,6 +1052,14 @@ fn render_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
         } else {
             let _ = Text::new(label, Point::new(4, y_top + 12), normal_style).draw(oled);
         }
+    }
+
+    // Scroll indicators
+    if scroll_start > 0 {
+        let _ = Text::new("\x1e", Point::new(56, 8), normal_style).draw(oled);
+    }
+    if scroll_start + max_visible < total {
+        let _ = Text::new("\x1f", Point::new(56, 62), normal_style).draw(oled);
     }
 }
 
@@ -1070,6 +1132,187 @@ fn render_action_text(oled: &mut OledDisplay, text: &heapless::String<64>) {
     // Dismiss hint at bottom.
     let hint = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let _ = Text::new(">press", Point::new(2, 60), hint).draw(oled);
+}
+
+/// Full-screen Vienna Lines list view (128×64).
+///
+/// Layout:
+///   Rows 0-35:  3 visible station→direction items (12px each)
+///               Selected row is inverted and scrolls horizontally (marquee)
+///   Row 37:     separator line
+///   Rows 39-63: route lines + wait minutes for the selected stop
+///
+/// Navigation: short press = next item, long press = detail view
+fn render_vienna_lines(oled: &mut OledDisplay, state: &mut FaceState) {
+    use core::fmt::Write;
+
+    oled.clear(BinaryColor::Off);
+
+    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let data = crate::vienna_fetch::get_lines();
+
+    // Loading / error / empty states
+    if data.loading && data.stops.is_empty() {
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .draw(oled);
+        let _ = Text::new("Wiener Linien", Point::new(22, 9), inv_style).draw(oled);
+        let _ = Text::new("Loading...", Point::new(28, 36), style).draw(oled);
+        return;
+    }
+    if data.error && data.stops.is_empty() {
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .draw(oled);
+        let _ = Text::new("Wiener Linien", Point::new(22, 9), inv_style).draw(oled);
+        let _ = Text::new("Fetch error", Point::new(24, 36), style).draw(oled);
+        return;
+    }
+    if data.stops.is_empty() {
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .draw(oled);
+        let _ = Text::new("Wiener Linien", Point::new(22, 9), inv_style).draw(oled);
+        let _ = Text::new("No data yet", Point::new(24, 36), style).draw(oled);
+        return;
+    }
+
+    let total = data.stops.len();
+    let sel = state.vienna_selected % total;
+
+    // List area: 3 visible rows
+    let max_visible: usize = 3;
+    let scroll_start = if sel >= max_visible {
+        sel - (max_visible - 1)
+    } else {
+        0
+    };
+
+    for slot in 0..max_visible {
+        let idx = scroll_start + slot;
+        if idx >= total {
+            break;
+        }
+        let stop = &data.stops[idx];
+        let y_top = (slot as i32) * 12;
+        let is_selected = idx == sel;
+
+        // Build display string: "STATION > DIRECTION"
+        let mut label = heapless::String::<80>::new();
+        let _ = write!(label, "{} > {}", stop.station, stop.direction);
+
+        if is_selected {
+            let _ = Rectangle::new(Point::new(0, y_top), Size::new(128, 12))
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(oled);
+
+            // Marquee scroll for selected row if text exceeds display width
+            let text_w = label.len() as i32 * 6;
+            if text_w > 128 {
+                let x = -state.vienna_scroll_x;
+                let _ = Text::new(&label, Point::new(x, y_top + 9), inv_style).draw(oled);
+                // Advance scroll; wrap when text fully exits left
+                state.vienna_scroll_x += 1;
+                if state.vienna_scroll_x > text_w {
+                    state.vienna_scroll_x = -128;
+                }
+            } else {
+                let _ = Text::new(&label, Point::new(1, y_top + 9), inv_style).draw(oled);
+            }
+        } else {
+            // Truncate non-selected rows to fit 21 chars
+            let trunc: &str = if label.len() > 21 {
+                &label[..21]
+            } else {
+                &label
+            };
+            let _ = Text::new(trunc, Point::new(1, y_top + 9), style).draw(oled);
+        }
+    }
+
+    // Separator line
+    let _ = Line::new(Point::new(0, 37), Point::new(127, 37))
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(oled);
+
+    // Bottom area: show routes for selected stop (up to 2 lines)
+    let selected = &data.stops[sel];
+    let mut y = 48i32;
+    for route in selected.routes.iter() {
+        if y > 62 {
+            break;
+        }
+        let mut detail = heapless::String::<64>::new();
+        let _ = write!(detail, "{}:", route.line);
+        for dep in route.departures.iter() {
+            let _ = write!(detail, " {}", dep.wait_minutes);
+        }
+        let _ = Text::new(&detail, Point::new(1, y), style).draw(oled);
+        y += 12;
+    }
+}
+
+/// Detail view for a selected Vienna stop — shows all departure info.
+///
+/// Layout:
+///   Row 0:  inverted header with station name
+///   Row 12: "→ Direction"
+///   Rows 24+: each route line with wait times and clock times
+///
+/// Any button press returns to the list view.
+fn render_vienna_detail(oled: &mut OledDisplay, state: &FaceState) {
+    use core::fmt::Write;
+
+    oled.clear(BinaryColor::Off);
+
+    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let data = crate::vienna_fetch::get_lines();
+
+    if data.stops.is_empty() {
+        let _ = Text::new("No data", Point::new(34, 36), style).draw(oled);
+        return;
+    }
+
+    let sel = state.vienna_selected % data.stops.len();
+    let stop = &data.stops[sel];
+
+    // Header bar: station name
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 12))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(oled);
+    let hdr: &str = &stop.station;
+    let hdr_x = ((128i32 - (hdr.len() as i32) * 6) / 2).max(0);
+    let _ = Text::new(hdr, Point::new(hdr_x, 9), inv_style).draw(oled);
+
+    // Direction row
+    let mut dir_buf = heapless::String::<36>::new();
+    let _ = dir_buf.push_str("> ");
+    let _ = dir_buf.push_str(&stop.direction);
+    let dir_trunc: &str = if dir_buf.len() > 21 { &dir_buf[..21] } else { &dir_buf };
+    let _ = Text::new(dir_trunc, Point::new(1, 22), style).draw(oled);
+
+    // Routes with full departure info
+    let mut y = 34i32;
+    for route in stop.routes.iter() {
+        if y > 62 {
+            break;
+        }
+        // Line name + wait minutes + clock times
+        // e.g. "U6: 2m(09:00) 6m(09:04)"
+        let mut line_buf: heapless::String<64> = heapless::String::new();
+        let _ = write!(line_buf, "{}:", route.line);
+        for dep in route.departures.iter() {
+            if dep.time_str.is_empty() {
+                let _ = write!(line_buf, " {}m", dep.wait_minutes);
+            } else {
+                let _ = write!(line_buf, " {}m({})", dep.wait_minutes, dep.time_str);
+            }
+        }
+        let _ = Text::new(&line_buf, Point::new(1, y), style).draw(oled);
+        y += 12;
+    }
 }
 
 /// Draw the mini animated face on the right 64-px panel (x=64..127).

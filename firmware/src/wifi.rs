@@ -78,7 +78,7 @@ const PASSWORD: &str = match option_env!("WIFI_PASSWORD") {
 // Static allocations required by embassy-net
 // ---------------------------------------------------------------------------
 
-static STACK_RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
+static STACK_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
 
 // ---------------------------------------------------------------------------
 // Tasks
@@ -140,10 +140,10 @@ pub async fn wifi_task(controller: WifiController<'static>, stack: &'static Stac
         log::error!("[wifi] start_async failed: {:?} — task halted", e);
         return;
     }
-    log::info!("[wifi] radio started");
-
-    // Auto-enable the web server so the user doesn't have to navigate the menu.
-    web_server::enable_web_server();
+    log::info!("[wifi] radio started — warm-up delay");
+    // Give the radio firmware a moment to finish internal init (blacklist,
+    // scan cache, channel-management tables) before attempting association.
+    Timer::after_millis(500).await;
 
     log::info!("[wifi] connecting to '{}'…", SSID);
 
@@ -174,6 +174,10 @@ pub async fn wifi_task(controller: WifiController<'static>, stack: &'static Stac
                     "[wifi] IP: {}.{}.{}.{}",
                     octets[0], octets[1], octets[2], octets[3]
                 );
+                // Auto-enable the web server now that we have an IP.
+                // Previously this was called before connect_async(), which
+                // was harmless but confusing in logs during debugging.
+                web_server::enable_web_server();
                 log::info!("[wifi] Web UI → http://{}.{}.{}.{}/", octets[0], octets[1], octets[2], octets[3]);
                 break;
             }
@@ -187,7 +191,8 @@ pub async fn wifi_task(controller: WifiController<'static>, stack: &'static Stac
             } else {
                 WIFI_STATUS.store(WIFI_STATUS_DISCONNECTED, Ordering::Relaxed);
                 WIFI_IPV4_BE.store(0, Ordering::Relaxed);
-                log::warn!("[wifi] disconnected — reconnecting…");
+                log::warn!("[wifi] disconnected — reconnecting in 2 s…");
+                Timer::after_millis(2_000).await;
                 break;
             }
         }
