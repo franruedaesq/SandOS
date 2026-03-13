@@ -1,43 +1,45 @@
-//! Phase 2 — OLED Display Driver.
-//!
-//! Drives a 0.96" I2C OLED panel (`SSD1306`, 128×64) on the ESP32-S3.
-//! Wiring used by this project:
-//! - `VCC` -> `3V3`
-//! - `GND` -> `GND`
-//! - `SCL` -> `GPIO9`
-//! - `SDA` -> `GPIO8`
-//!
-//! ## Architecture
-//!
-//! ```text
-//! Wasm guest calls host_draw_eye(Happy)
-//!      │
-//!      ▼
-//! AbiHost::draw_eye()        ← validates arg, delegates to DisplayDriver
-//!      │
-//!      ▼
-//! DisplayDriver::draw_eye()  ← embedded-graphics renders to framebuffer
-//!      │
-//!      ▼
-//! Async I2C transfer         ← DMA/interrupt-driven; CPU yields while
-//!                               the frame is pushed to the OLED controller
-//! ```
-//!
-//! ## UI Modes
-//!
-//! - **Face mode** (default): full 128×64 animated face with idle expression
-//!   cycling and auto-blink.
-//! - **Menu mode**: face shrinks to the right 64 px; a categorised menu
-//!   appears on the left 64 px. Triggered by the BOOT button (GPIO 0).
-//! - **Full-screen modes**: Pomodoro, System Monitor, Clock, Vienna Lines.
-//!
-//! ## BOOT button
-//!
-//! GPIO 0 is monitored by a dedicated async Embassy task using hardware
-//! edge interrupts — no polling required:
-//! - Short press (< 2 s): face → menu, or navigate to next menu item.
-//! - Long press (≥ 2 s): face → menu, or select the highlighted item.
-//! - 10 s of inactivity in menu/action mode → auto-return to face mode.
+mod driver;
+use driver::TftDisplay;
+// Phase 2 — OLED Display Driver.
+//
+// Drives a 0.96" I2C OLED panel (`SSD1306`, 128×64) on the ESP32-S3.
+// Wiring used by this project:
+// - `VCC` -> `3V3`
+// - `GND` -> `GND`
+// - `SCL` -> `GPIO9`
+// - `SDA` -> `GPIO8`
+//
+// ## Architecture
+//
+// ```text
+// Wasm guest calls host_draw_eye(Happy)
+//      │
+//      ▼
+// AbiHost::draw_eye()        ← validates arg, delegates to DisplayDriver
+//      │
+//      ▼
+// DisplayDriver::draw_eye()  ← embedded-graphics renders to framebuffer
+//      │
+//      ▼
+// Async I2C transfer         ← DMA/interrupt-driven; CPU yields while
+//                               the frame is pushed to the OLED controller
+// ```
+//
+// ## UI Modes
+//
+// - **Face mode** (default): full 128×64 animated face with idle expression
+//   cycling and auto-blink.
+// - **Menu mode**: face shrinks to the right 64 px; a categorised menu
+//   appears on the left 64 px. Triggered by the BOOT button (GPIO 0).
+// - **Full-screen modes**: Pomodoro, System Monitor, Clock, Vienna Lines.
+//
+// ## BOOT button
+//
+// GPIO 0 is monitored by a dedicated async Embassy task using hardware
+// edge interrupts — no polling required:
+// - Short press (< 2 s): face → menu, or navigate to next menu item.
+// - Long press (≥ 2 s): face → menu, or select the highlighted item.
+// - 10 s of inactivity in menu/action mode → auto-return to face mode.
 
 use abi::{status, EyeExpression};
 use embassy_executor::Spawner;
@@ -46,11 +48,15 @@ use embassy_sync::{
     channel::Channel,
 };
 use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::prelude::RgbColor;
+use esp_hal::spi::master::Spi;
+use esp_hal::gpio::Output;
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Size},
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
-    pixelcolor::BinaryColor,
+
     prelude::{Drawable, Point, Primitive},
     primitives::{
         Circle, Line, PrimitiveStyle, Rectangle,
@@ -59,23 +65,17 @@ use embedded_graphics::{
     Pixel,
 };
 use esp_hal::{
-    gpio::{GpioPin, Input},
-    i2c::master::{BusTimeout, Config as I2cConfig, I2c},
-    peripherals::I2C0,
-    time::RateExtU32,
+    gpio::Input,
     Async,
 };
 
-const SSD1306_ADDR: u8 = 0x3C;
-pub const DISPLAY_WIDTH: u32 = 128;
-pub const DISPLAY_HEIGHT: u32 = 64;
-const DISPLAY_BUF_SIZE: usize = (DISPLAY_WIDTH as usize) * (DISPLAY_HEIGHT as usize / 8);
+
+pub const DISPLAY_WIDTH: u32 = 240;
+pub const DISPLAY_HEIGHT: u32 = 320;
 const DISPLAY_QUEUE_DEPTH: usize = 8;
 const EXPRESSION_OVERRIDE_TIMEOUT: Duration = Duration::from_secs(8);
 // OLED stability baseline (validated on device): do not change casually.
 const FRAME_PERIOD: Duration = Duration::from_millis(50);
-const FLUSH_TIMEOUT: Duration = Duration::from_millis(400);
-const OLED_PAGE_WRITE_CHUNK_SIZE: usize = 16;
 const DIAG_SKIP_FLUSH: bool = false;
 
 // ── Tiny xorshift32 PRNG (no-std, no-alloc) ──────────────────────────────────
@@ -206,15 +206,13 @@ impl Default for DisplayDriver {
 
 pub fn spawn_display_task(
     spawner: Spawner,
-    i2c0: I2C0,
-    sda: GpioPin<8>,
-    scl: GpioPin<9>,
-    boot_btn: Input<'static>,
+    spi: Spi<'static, esp_hal::Async>,
+    dc: Output<'static>,
+    cs: Output<'static>,
+    boot_btn: esp_hal::gpio::Input<'static>,
 ) {
-    // Spawn the dedicated button interrupt task first so it can catch presses
-    // that occur during the display splash screen.
     spawner.spawn(button_task(boot_btn)).unwrap();
-    spawner.spawn(display_task(i2c0, sda, scl)).unwrap();
+    spawner.spawn(display_task(spi, dc, cs)).unwrap();
 }
 
 /// Dedicated Embassy task for the BOOT button (GPIO 0).
@@ -270,36 +268,47 @@ async fn button_task(mut boot_btn: Input<'static>) {
 
 #[embassy_executor::task]
 async fn display_task(
-    i2c0: I2C0,
-    sda: GpioPin<8>,
-    scl: GpioPin<9>,
+    spi: Spi<'static, esp_hal::Async>,
+    dc: Output<'static>,
+    cs: Output<'static>,
 ) {
-    // OLED stability baseline (validated on device): do not change casually.
-    let mut cfg = I2cConfig::default();
-    cfg.frequency = 200.kHz();
-    cfg.timeout = BusTimeout::BusCycles(100_000);
-
-    let i2c = match I2c::new(i2c0, cfg) {
-        Ok(bus) => bus.with_sda(sda).with_scl(scl).into_async(),
-        Err(err) => {
-            log::error!("[display] I2C init failed: {:?}", err);
-            return;
-        }
-    };
-    let mut oled = OledDisplay::new(i2c);
+    let mut oled = TftDisplay::new(spi, dc, cs);
     oled.init().await;
 
     let mut state = FaceState::default();
 
-    oled.clear(BinaryColor::Off);
-    let title_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let _ = Text::new("SandOS", Point::new(34, 20), title_style).draw(&mut oled);
-    let _ = Text::new("OLED OK", Point::new(34, 36), title_style).draw(&mut oled);
-    match oled.flush().await {
-        Ok(()) => {}
-        Err(()) => log::error!("[display] splash flush FAILED (continuing)"),
+    // Keep this screen visible in a loop to show live diagnostics
+    for _ in 0..50 {
+        let battery_mv = crate::sensors::load_battery_mv();
+        let touch_addr = crate::sensors::load_touch_addr();
+
+        let _ = oled.clear(Rgb565::BLACK);
+        let title_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+        let _ = Text::new("SandOS Hardware Diagnostics", Point::new(10, 20), title_style).draw(&mut oled);
+        let _ = Text::new("- LCD Display: OK (SPI)", Point::new(10, 40), title_style).draw(&mut oled);
+
+        let mut touch_str = heapless::String::<32>::new();
+        if touch_addr != 0 {
+            use core::fmt::Write;
+            let _ = write!(touch_str, "- Touch: OK (0x{:02X})", touch_addr);
+        } else {
+            let _ = touch_str.push_str("- Touch: Probing...");
+        }
+        let _ = Text::new(&touch_str, Point::new(10, 60), title_style).draw(&mut oled);
+
+        let _ = Text::new("- Audio: I2S OK", Point::new(10, 80), title_style).draw(&mut oled);
+        let _ = Text::new("- SD Card: SPI OK", Point::new(10, 100), title_style).draw(&mut oled);
+        let _ = Text::new("- RGB LED: OK (GPIO 42)", Point::new(10, 120), title_style).draw(&mut oled);
+        let _ = Text::new("- UART: RX=43, TX=44", Point::new(10, 140), title_style).draw(&mut oled);
+
+        let mut battery_str = heapless::String::<32>::new();
+        use core::fmt::Write;
+        let _ = write!(battery_str, "- Battery: {} mV", battery_mv);
+        let _ = Text::new(&battery_str, Point::new(10, 160), title_style).draw(&mut oled);
+        let _ = oled.flush().await;
+
+        Timer::after(Duration::from_millis(100)).await;
     }
-    Timer::after(Duration::from_millis(900)).await;
 
     // Initialise Instant-based fields now that the Embassy timer driver is running.
     state.last_button_time = Instant::now();
@@ -332,7 +341,7 @@ async fn display_task(
                 DisplayCommand::SetText(text) => state.text = text,
                 DisplayCommand::SetBrightness(value) => {
                     state.brightness = value;
-                    oled.set_contrast(value).await;
+
                 }
             }
         }
@@ -369,19 +378,16 @@ async fn display_task(
         // 4. Render and push the frame.
         render_frame(&mut oled, &mut state);
 
-        // 4b. Flush framebuffer to SSD1306 via async I2C.
-        //     The CPU yields to other tasks during each I2C transfer, so
-        //     Wi-Fi, the web server and the button task all continue to run.
+        // 4b. Flush framebuffer to ILI9341 via async SPI
         if !DIAG_SKIP_FLUSH {
             let flush_start = Instant::now();
             let mut flush_ok = matches!(
-                with_timeout(FLUSH_TIMEOUT, oled.flush()).await,
+                with_timeout(Duration::from_millis(400), oled.flush()).await,
                 Ok(Ok(()))
             );
-            // Immediate retry on transient bus error.
             if !flush_ok {
                 flush_ok = matches!(
-                    with_timeout(FLUSH_TIMEOUT, oled.flush()).await,
+                    with_timeout(Duration::from_millis(400), oled.flush()).await,
                     Ok(Ok(()))
                 );
             }
@@ -955,7 +961,7 @@ fn tick_led_effects(state: &mut FaceState) {
 
 // ── Render dispatcher ─────────────────────────────────────────────────────────
 
-fn render_frame(oled: &mut OledDisplay, state: &mut FaceState) {
+fn render_frame(oled: &mut TftDisplay, state: &mut FaceState) {
     match state.ui_mode {
         UiMode::Face => render_full_face(oled, state),
         UiMode::ViennaLines => render_vienna_lines(oled, state),
@@ -1027,7 +1033,7 @@ fn breathing_offset(now_ms: u64) -> i32 {
 }
 
 /// Render the full 128×64 kawaii face (frameless — eyes and mouth only).
-fn render_full_face(oled: &mut OledDisplay, state: &mut FaceState) {
+fn render_full_face(oled: &mut TftDisplay, state: &mut FaceState) {
     state.frame = state.frame.wrapping_add(1);
     let now_ms = Instant::now().as_millis() as u64;
     tick_animation(state, now_ms);
@@ -1036,7 +1042,7 @@ fn render_full_face(oled: &mut OledDisplay, state: &mut FaceState) {
     let in_transition = now_ms < state.transition_end_ms;
     let blinking = now_ms < state.blink_end_ms || in_transition;
 
-    oled.clear(BinaryColor::Off);
+    oled.clear(Rgb565::BLACK);
 
     // ── Eyes ──
     // Centred on 128×64: eyes at y≈24, spread wide for kawaii proportions
@@ -1051,9 +1057,9 @@ fn render_full_face(oled: &mut OledDisplay, state: &mut FaceState) {
 
     // ── Status text overlay ──
     if !state.text.is_empty() {
-        let text_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+        let text_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
         let _ = Rectangle::new(Point::new(0, 54), Size::new(DISPLAY_WIDTH, 10))
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(oled);
         let _ = Text::new(&state.text, Point::new(0, 63), text_style).draw(oled);
     }
@@ -1061,7 +1067,7 @@ fn render_full_face(oled: &mut OledDisplay, state: &mut FaceState) {
 
 /// Draw both eyes for any expression.  `scale` 1 = full (128×64), 0 = mini (64px panel).
 fn draw_eyes(
-    oled: &mut OledDisplay,
+    oled: &mut TftDisplay,
     expr: EyeExpression,
     le_cx: i32,
     re_cx: i32,
@@ -1069,9 +1075,9 @@ fn draw_eyes(
     blinking: bool,
     scale: i32,
 ) {
-    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
-    let fill_off = PrimitiveStyle::with_fill(BinaryColor::Off);
-    let stroke2 = PrimitiveStyle::with_stroke(BinaryColor::On, if scale > 0 { 2 } else { 1 });
+    let fill_on = PrimitiveStyle::with_fill(Rgb565::WHITE);
+    let fill_off = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let stroke2 = PrimitiveStyle::with_stroke(Rgb565::WHITE, if scale > 0 { 2 } else { 1 });
 
     // Eye radius scales: full=12, mini=6
     let r = if scale > 0 { 12i32 } else { 6i32 };
@@ -1228,8 +1234,8 @@ fn draw_eyes(
 }
 
 /// Draw a filled pixel-art heart centred at (cx, cy) with radius `r`.
-fn draw_heart(oled: &mut OledDisplay, cx: i32, cy: i32, r: i32) {
-    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
+fn draw_heart(oled: &mut TftDisplay, cx: i32, cy: i32, r: i32) {
+    let fill_on = PrimitiveStyle::with_fill(Rgb565::WHITE);
     // Heart = two overlapping circles on top + triangle pointing down
     let hr = r * 2 / 3; // radius of each lobe
     // Left lobe
@@ -1248,7 +1254,7 @@ fn draw_heart(oled: &mut OledDisplay, cx: i32, cy: i32, r: i32) {
             let _ = Line::new(
                 Point::new(cx - half_w, cy + dy),
                 Point::new(cx + half_w, cy + dy),
-            ).into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1)).draw(oled);
+            ).into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1)).draw(oled);
         }
     }
 }
@@ -1257,17 +1263,17 @@ fn draw_heart(oled: &mut OledDisplay, cx: i32, cy: i32, r: i32) {
 
 /// Draw the mouth centred at (`cx`, `cy`).  `scale` 1 = full size, 0 = mini.
 fn draw_mouth(
-    oled: &mut OledDisplay,
+    oled: &mut TftDisplay,
     expr: EyeExpression,
     cx: i32,
     cy: i32,
     scale: i32,
     _now_ms: u64,
 ) {
-    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
-    let fill_off = PrimitiveStyle::with_fill(BinaryColor::Off);
-    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let stroke2 = PrimitiveStyle::with_stroke(BinaryColor::On, if scale > 0 { 2 } else { 1 });
+    let fill_on = PrimitiveStyle::with_fill(Rgb565::WHITE);
+    let fill_off = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let stroke = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
+    let stroke2 = PrimitiveStyle::with_stroke(Rgb565::WHITE, if scale > 0 { 2 } else { 1 });
     // Mouth dimensions scale with mode
     let mr = if scale > 0 { 10i32 } else { 6i32 }; // mouth radius for curves
 
@@ -1351,15 +1357,15 @@ fn draw_mouth(
 // ── Menu mode rendering ───────────────────────────────────────────────────────
 
 /// Render the split-screen menu mode (menu left, mini-face right).
-fn render_menu_mode(oled: &mut OledDisplay, state: &mut FaceState) {
+fn render_menu_mode(oled: &mut TftDisplay, state: &mut FaceState) {
     state.frame = state.frame.wrapping_add(1);
     let now_ms = Instant::now().as_millis() as u64;
     tick_animation(state, now_ms);
 
-    oled.clear(BinaryColor::Off);
+    oled.clear(Rgb565::BLACK);
 
     // Vertical divider at x=63.
-    let divider_style = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let divider_style = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
     let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
         .into_styled(divider_style)
         .draw(oled);
@@ -1369,9 +1375,9 @@ fn render_menu_mode(oled: &mut OledDisplay, state: &mut FaceState) {
 }
 
 /// Draw the left 63-px menu panel.
-fn render_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
-    let normal_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let inverted_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
+    let normal_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
 
     if let UiMode::WebMenu = state.ui_mode {
         render_web_menu_panel(oled, state);
@@ -1400,7 +1406,7 @@ fn render_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
         let y_top = (slot as i32) * 16;
         if i == sel {
             let _ = Rectangle::new(Point::new(0, y_top), Size::new(63, 16))
-                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
                 .draw(oled);
             let _ = Text::new(label, Point::new(4, y_top + 12), inverted_style).draw(oled);
         } else {
@@ -1417,9 +1423,9 @@ fn render_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
     }
 }
 
-fn render_web_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
-    let normal_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let inverted_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+fn render_web_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
+    let normal_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
 
     let _ = Text::new("Web", Point::new(2, 10), normal_style).draw(oled);
 
@@ -1427,7 +1433,7 @@ fn render_web_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
         let y_top = 14 + (i as i32) * 16;
         if i == state.web_menu_selected as usize {
             let _ = Rectangle::new(Point::new(0, y_top), Size::new(63, 14))
-                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
                 .draw(oled);
             let _ = Text::new(label, Point::new(4, y_top + 11), inverted_style).draw(oled);
         } else {
@@ -1464,7 +1470,7 @@ fn render_web_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
     }
 
     let _ = Rectangle::new(Point::new(0, 52), Size::new(63, 12))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(oled);
     let _ = Text::new(&status, Point::new(2, 62), normal_style).draw(oled);
 }
@@ -1472,16 +1478,16 @@ fn render_web_menu_panel(oled: &mut OledDisplay, state: &FaceState) {
 // ── New full-screen mode renderers ───────────────────────────────────────────
 
 /// Full-screen Pomodoro timer (25-minute countdown + progress bar).
-fn render_pomodoro(oled: &mut OledDisplay, state: &mut FaceState) {
+fn render_pomodoro(oled: &mut TftDisplay, state: &mut FaceState) {
     use core::fmt::Write;
 
-    oled.clear(BinaryColor::Off);
-    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    oled.clear(Rgb565::BLACK);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
 
     // Header bar
     let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
         .draw(oled);
     let _ = Text::new("POMODORO", Point::new(34, 9), inv_style).draw(oled);
 
@@ -1527,28 +1533,28 @@ fn render_pomodoro(oled: &mut OledDisplay, state: &mut FaceState) {
 
     // Progress bar at bottom (y=54..62)
     let _ = Rectangle::new(Point::new(0, 55), Size::new(128, 9))
-        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
         .draw(oled);
     let elapsed_ms = total_ms.saturating_sub(remaining_ms);
     let fill_w = ((elapsed_ms * 126) / total_ms) as u32;
     if fill_w > 0 {
         let _ = Rectangle::new(Point::new(1, 56), Size::new(fill_w, 7))
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
     }
 }
 
 /// Full-screen system monitor (WiFi, IP, uptime, memory).
-fn render_system_monitor(oled: &mut OledDisplay, _state: &mut FaceState) {
+fn render_system_monitor(oled: &mut TftDisplay, _state: &mut FaceState) {
     use core::fmt::Write;
 
-    oled.clear(BinaryColor::Off);
-    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    oled.clear(Rgb565::BLACK);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
 
     // Header bar
     let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
         .draw(oled);
     let _ = Text::new("SYSTEM", Point::new(40, 9), inv_style).draw(oled);
 
@@ -1589,16 +1595,16 @@ fn render_system_monitor(oled: &mut OledDisplay, _state: &mut FaceState) {
 }
 
 /// Full-screen clock view (NTP time or uptime fallback).
-fn render_clock_view(oled: &mut OledDisplay, _state: &mut FaceState) {
+fn render_clock_view(oled: &mut TftDisplay, _state: &mut FaceState) {
     use core::fmt::Write;
 
-    oled.clear(BinaryColor::Off);
-    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    oled.clear(Rgb565::BLACK);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
 
     // Header bar
     let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
         .draw(oled);
     let _ = Text::new("CLOCK", Point::new(44, 9), inv_style).draw(oled);
 
@@ -1653,24 +1659,24 @@ fn days_to_date(days: u32) -> (u32, u32, u32) {
 }
 
 /// Flashlight status screen (split: status left, mini-face right).
-fn render_flashlight(oled: &mut OledDisplay, state: &mut FaceState) {
+fn render_flashlight(oled: &mut TftDisplay, state: &mut FaceState) {
     state.frame = state.frame.wrapping_add(1);
     let now_ms = Instant::now().as_millis() as u64;
     tick_animation(state, now_ms);
 
-    oled.clear(BinaryColor::Off);
+    oled.clear(Rgb565::BLACK);
 
     // Vertical divider
     let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
-        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
         .draw(oled);
 
-    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
 
     // Header
     let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
         .draw(oled);
     let _ = Text::new("LIGHT", Point::new(12, 9), inv_style).draw(oled);
 
@@ -1679,7 +1685,7 @@ fn render_flashlight(oled: &mut OledDisplay, state: &mut FaceState) {
 
     // Sun icon (simple circle with rays)
     let _ = Circle::new(Point::new(24, 36), 10)
-        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
         .draw(oled);
 
     let _ = Text::new(">exit", Point::new(12, 60), style).draw(oled);
@@ -1688,24 +1694,24 @@ fn render_flashlight(oled: &mut OledDisplay, state: &mut FaceState) {
 }
 
 /// Party mode status screen (split: status left, mini-face right).
-fn render_party_mode(oled: &mut OledDisplay, state: &mut FaceState) {
+fn render_party_mode(oled: &mut TftDisplay, state: &mut FaceState) {
     state.frame = state.frame.wrapping_add(1);
     let now_ms = Instant::now().as_millis() as u64;
     tick_animation(state, now_ms);
 
-    oled.clear(BinaryColor::Off);
+    oled.clear(Rgb565::BLACK);
 
     // Vertical divider
     let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
-        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
         .draw(oled);
 
-    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
 
     // Header
     let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
         .draw(oled);
     let _ = Text::new("PARTY", Point::new(12, 9), inv_style).draw(oled);
 
@@ -1740,19 +1746,19 @@ fn render_party_mode(oled: &mut OledDisplay, state: &mut FaceState) {
 ///   Rows 39-63: route lines + wait minutes for the selected stop
 ///
 /// Navigation: short press = next item, long press = detail view
-fn render_vienna_lines(oled: &mut OledDisplay, state: &mut FaceState) {
+fn render_vienna_lines(oled: &mut TftDisplay, state: &mut FaceState) {
     use core::fmt::Write;
 
-    oled.clear(BinaryColor::Off);
+    oled.clear(Rgb565::BLACK);
 
-    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
     let data = crate::vienna_fetch::get_lines();
 
     // Loading / error / empty states
     if data.loading && data.stops.is_empty() {
         let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
         let _ = Text::new("Wiener Linien", Point::new(22, 9), inv_style).draw(oled);
         let _ = Text::new("Loading...", Point::new(28, 36), style).draw(oled);
@@ -1760,7 +1766,7 @@ fn render_vienna_lines(oled: &mut OledDisplay, state: &mut FaceState) {
     }
     if data.error && data.stops.is_empty() {
         let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
         let _ = Text::new("Wiener Linien", Point::new(22, 9), inv_style).draw(oled);
         let _ = Text::new("Fetch error", Point::new(24, 36), style).draw(oled);
@@ -1768,7 +1774,7 @@ fn render_vienna_lines(oled: &mut OledDisplay, state: &mut FaceState) {
     }
     if data.stops.is_empty() {
         let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
         let _ = Text::new("Wiener Linien", Point::new(22, 9), inv_style).draw(oled);
         let _ = Text::new("No data yet", Point::new(24, 36), style).draw(oled);
@@ -1801,7 +1807,7 @@ fn render_vienna_lines(oled: &mut OledDisplay, state: &mut FaceState) {
 
         if is_selected {
             let _ = Rectangle::new(Point::new(0, y_top), Size::new(128, 12))
-                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
                 .draw(oled);
 
             let text_w = label.len() as i32 * 6;
@@ -1840,7 +1846,7 @@ fn render_vienna_lines(oled: &mut OledDisplay, state: &mut FaceState) {
 
     // Separator line
     let _ = Line::new(Point::new(0, 37), Point::new(127, 37))
-        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
         .draw(oled);
 
     // Bottom area: show routes for selected stop (up to 2 lines)
@@ -1868,13 +1874,13 @@ fn render_vienna_lines(oled: &mut OledDisplay, state: &mut FaceState) {
 ///   Rows 24+: each route line with wait times and clock times
 ///
 /// Any button press returns to the list view.
-fn render_vienna_detail(oled: &mut OledDisplay, state: &FaceState) {
+fn render_vienna_detail(oled: &mut TftDisplay, state: &FaceState) {
     use core::fmt::Write;
 
-    oled.clear(BinaryColor::Off);
+    oled.clear(Rgb565::BLACK);
 
-    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
     let data = crate::vienna_fetch::get_lines();
 
     if data.stops.is_empty() {
@@ -1887,7 +1893,7 @@ fn render_vienna_detail(oled: &mut OledDisplay, state: &FaceState) {
 
     // Header bar: station name
     let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 12))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
         .draw(oled);
     let hdr: &str = &stop.station;
     let hdr_x = ((128i32 - (hdr.len() as i32) * 6) / 2).max(0);
@@ -1923,7 +1929,7 @@ fn render_vienna_detail(oled: &mut OledDisplay, state: &FaceState) {
 }
 
 /// Draw the mini animated face on the right 64-px panel (x=64..127).
-fn render_mini_face(oled: &mut OledDisplay, state: &FaceState) {
+fn render_mini_face(oled: &mut TftDisplay, state: &FaceState) {
     let now_ms = Instant::now().as_millis() as u64;
     let blinking = now_ms < state.blink_end_ms || now_ms < state.transition_end_ms;
 
@@ -1940,189 +1946,3 @@ fn render_mini_face(oled: &mut OledDisplay, state: &FaceState) {
     draw_mouth(oled, state.expression, 95, 38 + bob_y, 0, now_ms);
 }
 
-// ── SSD1306 low-level driver ──────────────────────────────────────────────────
-
-struct OledDisplay {
-    i2c: I2c<'static, Async>,
-    buffer: [u8; DISPLAY_BUF_SIZE],
-}
-
-impl OledDisplay {
-    fn new(i2c: I2c<'static, Async>) -> Self {
-        Self {
-            i2c,
-            buffer: [0; DISPLAY_BUF_SIZE],
-        }
-    }
-
-    /// SSD1306 init + GDDRAM clear.
-    ///
-    /// Works correctly even after a soft-reset (Ctrl+R) where the SSD1306
-    /// retains stale GDDRAM content and an unpredictable internal pointer.
-    async fn init(&mut self) {
-        // Single transaction: display-off, full config, address window reset.
-        // The SSD1306 processes chained commands via control byte 0x00.
-        // Uses page addressing mode (the default) which works on both
-        // SSD1306 and SH1106 controllers.  Column/page are set per-page
-        // in flush_page() instead of relying on horizontal auto-increment.
-        let init_cmds: [u8; 25] = [
-            0x00, // Control byte: Co=0, D/C#=0 → command stream
-            0xAE, // Display OFF
-            0xD5, 0x80, // Clock divide ratio / oscillator freq
-            0xA8, 0x3F, // Multiplex ratio = 64
-            0xD3, 0x00, // Display offset = 0
-            0x40, // Start line = 0
-            0x8D, 0x14, // Charge pump ON
-            0x20, 0x02, // Page addressing mode (compatible with SH1106)
-            0xA1, // Segment re-map (col 127 = SEG0)
-            0xC8, // COM scan direction remapped
-            0xDA, 0x12, // COM pins hardware config
-            0x81, 0xCF, // Contrast
-            0xD9, 0xF1, // Pre-charge period
-            0xDB, 0x40, // VCOMH deselect level
-            0xA4, // Resume from RAM content
-            0xA6, // Normal display (not inverted)
-        ];
-        match self.i2c.write(SSD1306_ADDR, &init_cmds).await {
-            Ok(()) => {}
-            Err(e) => log::error!("[display] SSD1306 init cmds FAILED: {:?}", e),
-        }
-
-        // Brief async delay (~1 ms) for the SSD1306 to process the init batch.
-        Timer::after(Duration::from_millis(1)).await;
-
-        // Clear GDDRAM (writes 1024 zero bytes).  The address window was
-        // just reset above so the pointer starts at page 0, column 0.
-        self.buffer.fill(0x00);
-        match self.flush().await {
-            Ok(()) => {}
-            Err(()) => log::error!("[display] GDDRAM clear FAILED"),
-        }
-
-        // Display ON.
-        match self.i2c.write(SSD1306_ADDR, &[0x00, 0xAF]).await {
-            Ok(()) => {}
-            Err(e) => log::error!("[display] display ON cmd FAILED: {:?}", e),
-        }
-    }
-
-    async fn set_contrast(&mut self, value: u8) {
-        let _ = self.i2c.write(SSD1306_ADDR, &[0x00, 0x81, value]).await;
-    }
-
-    #[allow(dead_code)]
-    async fn cmd(&mut self, cmd: u8) {
-        let _ = self.i2c.write(SSD1306_ADDR, &[0x00, cmd]).await;
-    }
-
-    /// Push the entire 1024-byte framebuffer to the display.
-    ///
-    /// The CPU yields to other Embassy tasks during each I2C transfer so
-    /// Wi-Fi, the web server and the button task all continue to run.
-    async fn flush(&mut self) -> Result<(), ()> {
-        let mut all_ok = true;
-        for page in 0..8 {
-            if !self.flush_page(page).await {
-                all_ok = false;
-            }
-        }
-        if all_ok { Ok(()) } else { Err(()) }
-    }
-
-    /// Write one page (128 bytes, i.e. 8 rows) to the display.
-    ///
-    /// Sets the page address and column explicitly before each write,
-    /// which works on both SSD1306 (any addressing mode) and SH1106.
-    /// Retries once on failure to handle transient bus glitches.
-    ///
-    /// `page` must be in `0..8`.  Returns `true` on success.
-    async fn flush_page(&mut self, page: usize) -> bool {
-        for _attempt in 0..2 {
-            if self.flush_page_inner(page).await {
-                return true;
-            }
-        }
-        false
-    }
-
-    async fn flush_page_inner(&mut self, page: usize) -> bool {
-        // Set page address + column 0.
-        // 0xB0|page = page address; 0x00 = lower column nibble;
-        // 0x10 = upper column nibble → column 0.
-        let page_cmd = 0xB0 | (page as u8);
-        if self
-            .i2c
-            .write(SSD1306_ADDR, &[0x00, page_cmd, 0x00, 0x10])
-            .await
-            .is_err()
-        {
-            return false;
-        }
-
-        // Write 128 data bytes for this page in small chunks.
-        let start = page * 128;
-        let end = (start + 128).min(self.buffer.len());
-        let chunk = &self.buffer[start..end];
-        let mut packet = [0u8; 1 + OLED_PAGE_WRITE_CHUNK_SIZE];
-        packet[0] = 0x40;
-
-        for data_chunk in chunk.chunks(OLED_PAGE_WRITE_CHUNK_SIZE) {
-            packet[1..1 + data_chunk.len()].copy_from_slice(data_chunk);
-            if self
-                .i2c
-                .write(SSD1306_ADDR, &packet[..1 + data_chunk.len()])
-                .await
-                .is_err()
-            {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-impl OriginDimensions for OledDisplay {
-    fn size(&self) -> Size {
-        Size::new(DISPLAY_WIDTH, DISPLAY_HEIGHT)
-    }
-}
-
-impl DrawTarget for OledDisplay {
-    type Color = BinaryColor;
-    type Error = core::convert::Infallible;
-
-    fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
-        let fill_byte = match color {
-            BinaryColor::On => 0xFF,
-            BinaryColor::Off => 0x00,
-        };
-        self.buffer.fill(fill_byte);
-        Ok(())
-    }
-
-    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
-    where
-        I: IntoIterator<Item = Pixel<Self::Color>>,
-    {
-        for Pixel(coord, color) in pixels {
-            if coord.x < 0 || coord.y < 0 {
-                continue;
-            }
-            let x = coord.x as usize;
-            let y = coord.y as usize;
-
-            if x >= DISPLAY_WIDTH as usize || y >= DISPLAY_HEIGHT as usize {
-                continue;
-            }
-
-            let idx = x + (y / 8) * DISPLAY_WIDTH as usize;
-            let bit = 1u8 << (y % 8);
-            match color {
-                BinaryColor::On => self.buffer[idx] |= bit,
-                BinaryColor::Off => self.buffer[idx] &= !bit,
-            }
-        }
-        Ok(())
-    }
-}

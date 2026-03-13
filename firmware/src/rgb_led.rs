@@ -33,7 +33,7 @@ impl RgbLedDriver {
         }
     }
 
-    pub fn attach_tx_channel_gpio48(&mut self, tx_channel: Channel<Blocking, 1>) {
+    pub fn attach_tx_channel_gpio42(&mut self, tx_channel: Channel<Blocking, 1>) {
         self.tx_channel_48 = Some(tx_channel);
         log::info!("[rgb_led] RMT TX channel attached on GPIO48");
     }

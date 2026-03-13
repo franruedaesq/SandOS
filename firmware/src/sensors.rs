@@ -49,3 +49,31 @@ pub fn store_imu(reading: ImuReading) {
 pub fn load_imu() -> ImuReading {
     ImuReading::decode(IMU_DATA.load(Ordering::Acquire))
 }
+
+// ── Battery ADC status ────────────────────────────────────────────────────────
+
+pub static BATTERY_MV: portable_atomic::AtomicU16 = portable_atomic::AtomicU16::new(0);
+
+#[inline]
+pub fn store_battery_mv(mv: u16) {
+    BATTERY_MV.store(mv, Ordering::Release);
+}
+
+#[inline]
+pub fn load_battery_mv() -> u16 {
+    BATTERY_MV.load(Ordering::Acquire)
+}
+
+// ── Touchscreen I2C status ────────────────────────────────────────────────────────
+
+pub static TOUCH_ADDR: portable_atomic::AtomicU8 = portable_atomic::AtomicU8::new(0);
+
+#[inline]
+pub fn store_touch_addr(addr: u8) {
+    TOUCH_ADDR.store(addr, Ordering::Release);
+}
+
+#[inline]
+pub fn load_touch_addr() -> u8 {
+    TOUCH_ADDR.load(Ordering::Acquire)
+}
