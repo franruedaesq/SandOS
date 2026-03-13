@@ -72,6 +72,7 @@ portable-atomic = { version = "1", features = ["unsafe-assume-single-core"] }
 
 # Shared ABI definitions
 abi = { path = "../abi", default-features = false }
+embedded-hal = "1.0.0"
 
 [build-dependencies]
 esp-build = "0.2"
