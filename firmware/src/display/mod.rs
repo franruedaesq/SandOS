@@ -41,10 +41,7 @@
 
 use abi::{status, EyeExpression};
 use embassy_executor::Spawner;
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
-    channel::Channel,
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -52,9 +49,7 @@ use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::BinaryColor,
     prelude::{Drawable, Point, Primitive},
-    primitives::{
-        Circle, Line, PrimitiveStyle, Rectangle,
-    },
+    primitives::{Circle, Line, PrimitiveStyle, Rectangle},
     text::Text,
     Pixel,
 };
@@ -217,6 +212,17 @@ pub fn spawn_display_task(
     spawner.spawn(display_task(i2c0, sda, scl)).unwrap();
 }
 
+/// Best-effort boot/status text push from other subsystems.
+pub fn set_status_text(text: &str) {
+    let mut msg = heapless::String::<64>::new();
+    for ch in text.chars().take(64) {
+        let _ = msg.push(ch);
+    }
+    let _ = DISPLAY_CHANNEL
+        .sender()
+        .try_send(DisplayCommand::SetText(msg));
+}
+
 /// Dedicated Embassy task for the BOOT button (GPIO 0).
 ///
 /// Uses hardware edge interrupts (`wait_for_falling_edge`) instead of
@@ -232,12 +238,7 @@ async fn button_task(mut boot_btn: Input<'static>) {
 
         // Wait for release (rising edge) within 2 s.
         // If the timeout fires first it is a long press.
-        match with_timeout(
-            Duration::from_millis(2000),
-            boot_btn.wait_for_rising_edge(),
-        )
-        .await
-        {
+        match with_timeout(Duration::from_millis(2000), boot_btn.wait_for_rising_edge()).await {
             Ok(_) => {
                 let held_ms = (Instant::now() - press_start).as_millis();
                 log::info!("[button] short press (held {}ms)", held_ms);
@@ -269,11 +270,7 @@ async fn button_task(mut boot_btn: Input<'static>) {
 }
 
 #[embassy_executor::task]
-async fn display_task(
-    i2c0: I2C0,
-    sda: GpioPin<8>,
-    scl: GpioPin<9>,
-) {
+async fn display_task(i2c0: I2C0, sda: GpioPin<8>, scl: GpioPin<9>) {
     // OLED stability baseline (validated on device): do not change casually.
     let mut cfg = I2cConfig::default();
     cfg.frequency = 200.kHz();
@@ -283,11 +280,13 @@ async fn display_task(
         Ok(bus) => bus.with_sda(sda).with_scl(scl).into_async(),
         Err(err) => {
             log::error!("[display] I2C init failed: {:?}", err);
+            crate::hardware_profile::set_display_state(crate::hardware_profile::ModuleState::Fault);
             return;
         }
     };
     let mut oled = OledDisplay::new(i2c);
     oled.init().await;
+    crate::hardware_profile::set_display_state(crate::hardware_profile::ModuleState::Online);
 
     let mut state = FaceState::default();
 
@@ -354,8 +353,10 @@ async fn display_task(
                 && state.pomodoro_start.is_some()
                 && !state.pomodoro_done);
         let idle_secs: u64 = match state.ui_mode {
-            UiMode::ViennaLines | UiMode::ViennaDetail
-            | UiMode::SystemMonitor | UiMode::ClockView => 30,
+            UiMode::ViennaLines
+            | UiMode::ViennaDetail
+            | UiMode::SystemMonitor
+            | UiMode::ClockView => 30,
             UiMode::Flashlight | UiMode::PartyMode => 60,
             _ => 10,
         };
@@ -374,16 +375,11 @@ async fn display_task(
         //     Wi-Fi, the web server and the button task all continue to run.
         if !DIAG_SKIP_FLUSH {
             let flush_start = Instant::now();
-            let mut flush_ok = matches!(
-                with_timeout(FLUSH_TIMEOUT, oled.flush()).await,
-                Ok(Ok(()))
-            );
+            let mut flush_ok =
+                matches!(with_timeout(FLUSH_TIMEOUT, oled.flush()).await, Ok(Ok(())));
             // Immediate retry on transient bus error.
             if !flush_ok {
-                flush_ok = matches!(
-                    with_timeout(FLUSH_TIMEOUT, oled.flush()).await,
-                    Ok(Ok(()))
-                );
+                flush_ok = matches!(with_timeout(FLUSH_TIMEOUT, oled.flush()).await, Ok(Ok(())));
             }
             let last_flush_us = (Instant::now() - flush_start).as_micros() as u64;
             if flush_ok {
@@ -429,8 +425,10 @@ async fn display_task(
                 if yield_us > 200_000 {
                     if !starved {
                         starved = true;
-                        log::warn!("[display] FROZEN — executor busy (yield {}ms)",
-                            yield_us / 1000);
+                        log::warn!(
+                            "[display] FROZEN — executor busy (yield {}ms)",
+                            yield_us / 1000
+                        );
                     }
                 } else if starved {
                     starved = false;
@@ -446,8 +444,10 @@ async fn display_task(
                     if yield_us > 200_000 {
                         if !starved {
                             starved = true;
-                            log::warn!("[display] FROZEN — executor busy (yield {}ms)",
-                                yield_us / 1000);
+                            log::warn!(
+                                "[display] FROZEN — executor busy (yield {}ms)",
+                                yield_us / 1000
+                            );
                         }
                     } else if starved {
                         starved = false;
@@ -524,34 +524,82 @@ enum MenuItemAction {
 // ── UI state machine ──────────────────────────────────────────────────────────
 
 const TOP_MENU: &[MenuItem] = &[
-    MenuItem { label: "Tools",     action: MenuItemAction::OpenSub(MenuCategory::Tools) },
-    MenuItem { label: "Info",      action: MenuItemAction::OpenSub(MenuCategory::Info) },
-    MenuItem { label: "Transport", action: MenuItemAction::OpenSub(MenuCategory::Transport) },
-    MenuItem { label: "Web",       action: MenuItemAction::OpenWebMenu },
-    MenuItem { label: "Settings",  action: MenuItemAction::OpenSub(MenuCategory::Settings) },
+    MenuItem {
+        label: "Tools",
+        action: MenuItemAction::OpenSub(MenuCategory::Tools),
+    },
+    MenuItem {
+        label: "Info",
+        action: MenuItemAction::OpenSub(MenuCategory::Info),
+    },
+    MenuItem {
+        label: "Transport",
+        action: MenuItemAction::OpenSub(MenuCategory::Transport),
+    },
+    MenuItem {
+        label: "Web",
+        action: MenuItemAction::OpenWebMenu,
+    },
+    MenuItem {
+        label: "Settings",
+        action: MenuItemAction::OpenSub(MenuCategory::Settings),
+    },
 ];
 
 const TOOLS_MENU: &[MenuItem] = &[
-    MenuItem { label: "Flashlight", action: MenuItemAction::ToggleFlashlight },
-    MenuItem { label: "Pomodoro",   action: MenuItemAction::EnterPomodoro },
-    MenuItem { label: "Party Mode", action: MenuItemAction::TogglePartyMode },
-    MenuItem { label: "< Back",     action: MenuItemAction::Back },
+    MenuItem {
+        label: "Flashlight",
+        action: MenuItemAction::ToggleFlashlight,
+    },
+    MenuItem {
+        label: "Pomodoro",
+        action: MenuItemAction::EnterPomodoro,
+    },
+    MenuItem {
+        label: "Party Mode",
+        action: MenuItemAction::TogglePartyMode,
+    },
+    MenuItem {
+        label: "< Back",
+        action: MenuItemAction::Back,
+    },
 ];
 
 const INFO_MENU: &[MenuItem] = &[
-    MenuItem { label: "System",  action: MenuItemAction::EnterSystemMonitor },
-    MenuItem { label: "Clock",   action: MenuItemAction::EnterClockView },
-    MenuItem { label: "< Back",  action: MenuItemAction::Back },
+    MenuItem {
+        label: "System",
+        action: MenuItemAction::EnterSystemMonitor,
+    },
+    MenuItem {
+        label: "Clock",
+        action: MenuItemAction::EnterClockView,
+    },
+    MenuItem {
+        label: "< Back",
+        action: MenuItemAction::Back,
+    },
 ];
 
 const TRANSPORT_MENU: &[MenuItem] = &[
-    MenuItem { label: "Wiener L", action: MenuItemAction::EnterViennaLines },
-    MenuItem { label: "< Back",   action: MenuItemAction::Back },
+    MenuItem {
+        label: "Wiener L",
+        action: MenuItemAction::EnterViennaLines,
+    },
+    MenuItem {
+        label: "< Back",
+        action: MenuItemAction::Back,
+    },
 ];
 
 const SETTINGS_MENU: &[MenuItem] = &[
-    MenuItem { label: "Brightness", action: MenuItemAction::CycleBrightness },
-    MenuItem { label: "< Back",     action: MenuItemAction::Back },
+    MenuItem {
+        label: "Brightness",
+        action: MenuItemAction::CycleBrightness,
+    },
+    MenuItem {
+        label: "< Back",
+        action: MenuItemAction::Back,
+    },
 ];
 
 const WEB_MENU_ITEMS: [&str; 2] = ["ON", "OFF"];
@@ -606,7 +654,11 @@ fn execute_menu_action(action: MenuItemAction, state: &mut FaceState) {
         }
         MenuItemAction::OpenWebMenu => {
             state.ui_mode = UiMode::WebMenu;
-            state.web_menu_selected = if crate::web_server::is_web_server_enabled() { 1 } else { 0 };
+            state.web_menu_selected = if crate::web_server::is_web_server_enabled() {
+                1
+            } else {
+                0
+            };
             log::info!("[display] -> WebMenu");
         }
         MenuItemAction::ToggleFlashlight => {
@@ -684,9 +736,7 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
             // ── Double press detection (2 short presses within 400ms) ──
             let since_last = now - state.last_short_press_time;
             state.last_short_press_time = now;
-            if since_last <= Duration::from_millis(400)
-                && !matches!(state.ui_mode, UiMode::Face)
-            {
+            if since_last <= Duration::from_millis(400) && !matches!(state.ui_mode, UiMode::Face) {
                 log::info!("[display] double press -> Face");
                 return_to_face(state);
                 state.last_button_time = now;
@@ -702,13 +752,11 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                     state.top_menu_selected = 0;
                 }
                 UiMode::TopMenu => {
-                    state.top_menu_selected =
-                        (state.top_menu_selected + 1) % TOP_MENU.len() as u8;
+                    state.top_menu_selected = (state.top_menu_selected + 1) % TOP_MENU.len() as u8;
                 }
                 UiMode::SubMenu(cat) => {
                     let items = get_menu_items(&UiMode::SubMenu(cat));
-                    state.sub_menu_selected =
-                        (state.sub_menu_selected + 1) % items.len() as u8;
+                    state.sub_menu_selected = (state.sub_menu_selected + 1) % items.len() as u8;
                 }
                 UiMode::WebMenu => {
                     state.web_menu_selected = (state.web_menu_selected + 1) % 2;
@@ -740,8 +788,7 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                         // Pause: store remaining
                         let total_ms = 25u64 * 60 * 1000;
                         let elapsed = (Instant::now() - start).as_millis();
-                        state.pomodoro_paused_remaining =
-                            Some(total_ms.saturating_sub(elapsed));
+                        state.pomodoro_paused_remaining = Some(total_ms.saturating_sub(elapsed));
                     }
                 }
                 UiMode::SystemMonitor => {
@@ -753,8 +800,7 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                 UiMode::ViennaLines => {
                     let data = crate::vienna_fetch::get_lines();
                     if !data.stops.is_empty() {
-                        state.vienna_selected =
-                            (state.vienna_selected + 1) % data.stops.len();
+                        state.vienna_selected = (state.vienna_selected + 1) % data.stops.len();
                         state.vienna_scroll_x = -20;
                     }
                 }
@@ -1016,11 +1062,11 @@ fn breathing_offset(now_ms: u64) -> i32 {
     // 3 s cycle ; triangle wave 0→1→0→-1→0
     let phase = (now_ms % 3000) as i32; // 0..2999
     if phase < 750 {
-        phase / 750           // 0 → 1
+        phase / 750 // 0 → 1
     } else if phase < 1500 {
         1 - (phase - 750) / 750 // 1 → 0
     } else if phase < 2250 {
-        -((phase - 1500) / 750)  // 0 → -1
+        -((phase - 1500) / 750) // 0 → -1
     } else {
         -1 + (phase - 2250) / 750 // -1 → 0
     }
@@ -1081,10 +1127,18 @@ fn draw_eyes(
     if blinking {
         // Blink: thick horizontal lines (kawaii ─ ─)
         let hw = r + 2;
-        let _ = Line::new(Point::new(le_cx - hw, eye_cy), Point::new(le_cx + hw, eye_cy))
-            .into_styled(stroke2).draw(oled);
-        let _ = Line::new(Point::new(re_cx - hw, eye_cy), Point::new(re_cx + hw, eye_cy))
-            .into_styled(stroke2).draw(oled);
+        let _ = Line::new(
+            Point::new(le_cx - hw, eye_cy),
+            Point::new(le_cx + hw, eye_cy),
+        )
+        .into_styled(stroke2)
+        .draw(oled);
+        let _ = Line::new(
+            Point::new(re_cx - hw, eye_cy),
+            Point::new(re_cx + hw, eye_cy),
+        )
+        .into_styled(stroke2)
+        .draw(oled);
         return;
     }
 
@@ -1092,114 +1146,171 @@ fn draw_eyes(
         EyeExpression::Neutral | EyeExpression::Blink => {
             // Large filled circles with highlight dot (classic kawaii)
             let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             // Highlight (upper-right of each eye)
-            let _ = Circle::new(Point::new(le_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
-                .into_styled(fill_off).draw(oled);
-            let _ = Circle::new(Point::new(re_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
-                .into_styled(fill_off).draw(oled);
+            let _ = Circle::new(
+                Point::new(le_cx + r / 4, eye_cy - r / 2 - hr / 2),
+                hr as u32,
+            )
+            .into_styled(fill_off)
+            .draw(oled);
+            let _ = Circle::new(
+                Point::new(re_cx + r / 4, eye_cy - r / 2 - hr / 2),
+                hr as u32,
+            )
+            .into_styled(fill_off)
+            .draw(oled);
         }
         EyeExpression::Happy => {
             // Happy: filled upward arcs (＾ ＾) — draw filled circle then erase bottom half
             let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             // Erase bottom 60% to create upward arc
             let cut_h = (r * 6 / 5) as u32;
             let _ = Rectangle::new(
                 Point::new(le_cx - r - 1, eye_cy - 1),
                 Size::new((r * 2 + 2) as u32, cut_h),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
             let _ = Rectangle::new(
                 Point::new(re_cx - r - 1, eye_cy - 1),
                 Size::new((r * 2 + 2) as u32, cut_h),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
         }
         EyeExpression::Sad => {
             // Sad: filled circles with droopy eyelid covering top 65%
             let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             // Eyelid: erase top portion + angled lid line
             let lid_h = (r * 13 / 10) as u32;
             let _ = Rectangle::new(
                 Point::new(le_cx - r - 1, eye_cy - r - 1),
                 Size::new((r * 2 + 2) as u32, lid_h),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
             let _ = Rectangle::new(
                 Point::new(re_cx - r - 1, eye_cy - r - 1),
                 Size::new((r * 2 + 2) as u32, lid_h),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
             // Angled eyelid lines (drooping inward)
             let _ = Line::new(
                 Point::new(le_cx - r, eye_cy - r / 3 - 2),
                 Point::new(le_cx + r, eye_cy + 1),
-            ).into_styled(stroke2).draw(oled);
+            )
+            .into_styled(stroke2)
+            .draw(oled);
             let _ = Line::new(
                 Point::new(re_cx - r, eye_cy + 1),
                 Point::new(re_cx + r, eye_cy - r / 3 - 2),
-            ).into_styled(stroke2).draw(oled);
+            )
+            .into_styled(stroke2)
+            .draw(oled);
         }
         EyeExpression::Angry => {
             // Angry: filled circles with thick V-brows pointing inward
             let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             // Cut top portion for narrowed look
             let cut = (r * 2 / 3) as u32;
             let _ = Rectangle::new(
                 Point::new(le_cx - r - 1, eye_cy - r - 1),
                 Size::new((r * 2 + 2) as u32, cut),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
             let _ = Rectangle::new(
                 Point::new(re_cx - r - 1, eye_cy - r - 1),
                 Size::new((r * 2 + 2) as u32, cut),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
             // Thick angry brows angling inward
             let bw = r + 4;
             let _ = Line::new(
                 Point::new(le_cx - bw, eye_cy - r - 2),
                 Point::new(le_cx + bw / 2, eye_cy - r / 3),
-            ).into_styled(stroke2).draw(oled);
+            )
+            .into_styled(stroke2)
+            .draw(oled);
             let _ = Line::new(
                 Point::new(re_cx - bw / 2, eye_cy - r / 3),
                 Point::new(re_cx + bw, eye_cy - r - 2),
-            ).into_styled(stroke2).draw(oled);
+            )
+            .into_styled(stroke2)
+            .draw(oled);
         }
         EyeExpression::Surprised => {
             // Surprised: large open circles with pupils + highlights
             let big_r = r + 2;
-            let _ = Circle::new(Point::new(le_cx - big_r, eye_cy - big_r), (big_r * 2) as u32)
-                .into_styled(stroke2).draw(oled);
-            let _ = Circle::new(Point::new(re_cx - big_r, eye_cy - big_r), (big_r * 2) as u32)
-                .into_styled(stroke2).draw(oled);
+            let _ = Circle::new(
+                Point::new(le_cx - big_r, eye_cy - big_r),
+                (big_r * 2) as u32,
+            )
+            .into_styled(stroke2)
+            .draw(oled);
+            let _ = Circle::new(
+                Point::new(re_cx - big_r, eye_cy - big_r),
+                (big_r * 2) as u32,
+            )
+            .into_styled(stroke2)
+            .draw(oled);
             // Pupils (offset slightly down-centre)
             let pr = if scale > 0 { 3i32 } else { 2i32 };
             let _ = Circle::new(Point::new(le_cx - pr, eye_cy - pr + 1), (pr * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             let _ = Circle::new(Point::new(re_cx - pr, eye_cy - pr + 1), (pr * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             // Highlight
             let _ = Circle::new(Point::new(le_cx + big_r / 3, eye_cy - big_r / 2), hr as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             let _ = Circle::new(Point::new(re_cx + big_r / 3, eye_cy - big_r / 2), hr as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
         }
         EyeExpression::Thinking => {
             // Thinking: left eye normal (with look-up pupil), right eye half-closed
             let _ = Circle::new(Point::new(le_cx - r, eye_cy - r), (r * 2) as u32)
-                .into_styled(fill_on).draw(oled);
-            let _ = Circle::new(Point::new(le_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
-                .into_styled(fill_off).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
+            let _ = Circle::new(
+                Point::new(le_cx + r / 4, eye_cy - r / 2 - hr / 2),
+                hr as u32,
+            )
+            .into_styled(fill_off)
+            .draw(oled);
             // Right eye: thick horizontal line (half-closed)
             let hw = r + 2;
-            let _ = Line::new(Point::new(re_cx - hw, eye_cy), Point::new(re_cx + hw, eye_cy))
-                .into_styled(stroke2).draw(oled);
+            let _ = Line::new(
+                Point::new(re_cx - hw, eye_cy),
+                Point::new(re_cx + hw, eye_cy),
+            )
+            .into_styled(stroke2)
+            .draw(oled);
         }
         EyeExpression::Heart => {
             // Heart eyes: pixel-art hearts
@@ -1211,18 +1322,24 @@ fn draw_eyes(
             let hw = r;
             // Left eye: upside-down arc — draw circle, erase top half
             let _ = Circle::new(Point::new(le_cx - hw, eye_cy - hw), (hw * 2) as u32)
-                .into_styled(stroke2).draw(oled);
+                .into_styled(stroke2)
+                .draw(oled);
             let _ = Rectangle::new(
                 Point::new(le_cx - hw - 1, eye_cy - hw - 1),
                 Size::new((hw * 2 + 2) as u32, (hw + 1) as u32),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
             // Right eye
             let _ = Circle::new(Point::new(re_cx - hw, eye_cy - hw), (hw * 2) as u32)
-                .into_styled(stroke2).draw(oled);
+                .into_styled(stroke2)
+                .draw(oled);
             let _ = Rectangle::new(
                 Point::new(re_cx - hw - 1, eye_cy - hw - 1),
                 Size::new((hw * 2 + 2) as u32, (hw + 1) as u32),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
         }
     }
 }
@@ -1232,12 +1349,14 @@ fn draw_heart(oled: &mut OledDisplay, cx: i32, cy: i32, r: i32) {
     let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
     // Heart = two overlapping circles on top + triangle pointing down
     let hr = r * 2 / 3; // radius of each lobe
-    // Left lobe
+                        // Left lobe
     let _ = Circle::new(Point::new(cx - hr - hr / 2, cy - hr), (hr * 2) as u32)
-        .into_styled(fill_on).draw(oled);
+        .into_styled(fill_on)
+        .draw(oled);
     // Right lobe
     let _ = Circle::new(Point::new(cx + hr / 2 - hr, cy - hr), (hr * 2) as u32)
-        .into_styled(fill_on).draw(oled);
+        .into_styled(fill_on)
+        .draw(oled);
     // Bottom triangle: fill rows from the circle equator down to the tip
     for dy in 0..=hr {
         let progress = dy as u32;
@@ -1248,7 +1367,9 @@ fn draw_heart(oled: &mut OledDisplay, cx: i32, cy: i32, r: i32) {
             let _ = Line::new(
                 Point::new(cx - half_w, cy + dy),
                 Point::new(cx + half_w, cy + dy),
-            ).into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1)).draw(oled);
+            )
+            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+            .draw(oled);
         }
     }
 }
@@ -1275,75 +1396,100 @@ fn draw_mouth(
         EyeExpression::Happy | EyeExpression::Heart => {
             // Wide smile: filled crescent (circle + erase top half)
             let _ = Circle::new(Point::new(cx - mr, cy - mr), (mr * 2) as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_on)
+                .draw(oled);
             // Erase top half + a bit more to make a crescent smile
             let _ = Rectangle::new(
                 Point::new(cx - mr - 1, cy - mr - 1),
                 Size::new((mr * 2 + 2) as u32, (mr + 1) as u32),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
         }
         EyeExpression::Sad => {
             // Frown: inverted crescent (circle + erase bottom half)
             let _ = Circle::new(Point::new(cx - mr, cy - mr / 2), (mr * 2) as u32)
-                .into_styled(stroke2).draw(oled);
+                .into_styled(stroke2)
+                .draw(oled);
             // Erase bottom half
             let _ = Rectangle::new(
                 Point::new(cx - mr - 1, cy + mr / 2),
                 Size::new((mr * 2 + 2) as u32, (mr + 2) as u32),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
             // Erase top portion to keep just the bottom arc
             let _ = Rectangle::new(
                 Point::new(cx - mr - 1, cy - mr / 2 - 1),
                 Size::new((mr * 2 + 2) as u32, (mr / 2 + 1) as u32),
-            ).into_styled(fill_off).draw(oled);
+            )
+            .into_styled(fill_off)
+            .draw(oled);
         }
         EyeExpression::Angry => {
             // Gritted teeth: rectangle with vertical black bars
             let tw = mr + scale * 4;
             let th = if scale > 0 { 6i32 } else { 4i32 };
-            let _ = Rectangle::new(Point::new(cx - tw, cy - th / 2), Size::new((tw * 2) as u32, th as u32))
-                .into_styled(fill_on).draw(oled);
+            let _ = Rectangle::new(
+                Point::new(cx - tw, cy - th / 2),
+                Size::new((tw * 2) as u32, th as u32),
+            )
+            .into_styled(fill_on)
+            .draw(oled);
             // Teeth gaps
             let teeth = if scale > 0 { 4 } else { 3 };
             for i in 1..teeth {
                 let tx = cx - tw + i * (tw * 2 / teeth);
-                let _ = Rectangle::new(Point::new(tx, cy - th / 2 + 1), Size::new(1, (th - 2) as u32))
-                    .into_styled(fill_off).draw(oled);
+                let _ = Rectangle::new(
+                    Point::new(tx, cy - th / 2 + 1),
+                    Size::new(1, (th - 2) as u32),
+                )
+                .into_styled(fill_off)
+                .draw(oled);
             }
         }
         EyeExpression::Surprised => {
             // Open "O" mouth — small filled circle
             let or = if scale > 0 { 5i32 } else { 3i32 };
             let _ = Circle::new(Point::new(cx - or, cy - or), (or * 2) as u32)
-                .into_styled(stroke2).draw(oled);
+                .into_styled(stroke2)
+                .draw(oled);
         }
         EyeExpression::Thinking => {
             // Wavy squiggle (3-segment line)
             let seg = mr * 2 / 3;
             let _ = Line::new(Point::new(cx - seg * 2, cy), Point::new(cx - seg, cy - 2))
-                .into_styled(stroke).draw(oled);
+                .into_styled(stroke)
+                .draw(oled);
             let _ = Line::new(Point::new(cx - seg, cy - 2), Point::new(cx + seg, cy + 2))
-                .into_styled(stroke).draw(oled);
+                .into_styled(stroke)
+                .draw(oled);
             let _ = Line::new(Point::new(cx + seg, cy + 2), Point::new(cx + seg * 2, cy))
-                .into_styled(stroke).draw(oled);
+                .into_styled(stroke)
+                .draw(oled);
         }
         EyeExpression::Sleepy => {
             // Tiny "w" mouth — two small V's side by side
             let w = mr / 2;
             let _ = Line::new(Point::new(cx - w * 2, cy), Point::new(cx - w, cy + 2))
-                .into_styled(stroke).draw(oled);
+                .into_styled(stroke)
+                .draw(oled);
             let _ = Line::new(Point::new(cx - w, cy + 2), Point::new(cx, cy))
-                .into_styled(stroke).draw(oled);
+                .into_styled(stroke)
+                .draw(oled);
             let _ = Line::new(Point::new(cx, cy), Point::new(cx + w, cy + 2))
-                .into_styled(stroke).draw(oled);
+                .into_styled(stroke)
+                .draw(oled);
             let _ = Line::new(Point::new(cx + w, cy + 2), Point::new(cx + w * 2, cy))
-                .into_styled(stroke).draw(oled);
+                .into_styled(stroke)
+                .draw(oled);
         }
         _ => {
             // Neutral: small thick horizontal line (subtle, calm)
             let hw = if scale > 0 { 6i32 } else { 4i32 };
             let _ = Line::new(Point::new(cx - hw, cy), Point::new(cx + hw, cy))
-                .into_styled(stroke2).draw(oled);
+                .into_styled(stroke2)
+                .draw(oled);
         }
     }
 }
@@ -1538,7 +1684,7 @@ fn render_pomodoro(oled: &mut OledDisplay, state: &mut FaceState) {
     }
 }
 
-/// Full-screen system monitor (WiFi, IP, uptime, memory).
+/// Full-screen system monitor with WiFi + hardware module readiness.
 fn render_system_monitor(oled: &mut OledDisplay, _state: &mut FaceState) {
     use core::fmt::Write;
 
@@ -1550,42 +1696,48 @@ fn render_system_monitor(oled: &mut OledDisplay, _state: &mut FaceState) {
     let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
         .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
         .draw(oled);
-    let _ = Text::new("SYSTEM", Point::new(40, 9), inv_style).draw(oled);
+    let _ = Text::new("HW MON", Point::new(42, 9), inv_style).draw(oled);
 
     // WiFi status
     let wifi_str = match crate::wifi::wifi_status() {
-        crate::wifi::WIFI_STATUS_CONNECTED => "WiFi: Connected",
-        crate::wifi::WIFI_STATUS_CONNECTING => "WiFi: Connecting",
-        crate::wifi::WIFI_STATUS_ERROR => "WiFi: Error",
-        _ => "WiFi: Off",
+        crate::wifi::WIFI_STATUS_CONNECTED => "WiFi:OK",
+        crate::wifi::WIFI_STATUS_CONNECTING => "WiFi:CONN",
+        crate::wifi::WIFI_STATUS_ERROR => "WiFi:ERR",
+        _ => "WiFi:OFF",
     };
-    let _ = Text::new(wifi_str, Point::new(2, 24), style).draw(oled);
+    let _ = Text::new(wifi_str, Point::new(2, 21), style).draw(oled);
 
-    // IP address
     let mut ip_str = heapless::String::<22>::new();
-    let _ = ip_str.push_str("IP: ");
+    let _ = ip_str.push_str("IP:");
     if let Some(ip) = crate::wifi::wifi_ipv4() {
         let _ = write!(ip_str, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
     } else {
         let _ = ip_str.push_str("--");
     }
-    let _ = Text::new(&ip_str, Point::new(2, 36), style).draw(oled);
+    let _ = Text::new(&ip_str, Point::new(64, 21), style).draw(oled);
 
-    // Uptime
-    let secs = Instant::now().as_millis() / 1000;
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    let mut up_str = heapless::String::<22>::new();
-    let _ = write!(up_str, "Up: {}h {}m {}s", h, m, s);
-    let _ = Text::new(&up_str, Point::new(2, 48), style).draw(oled);
-
-    // Memory
-    let free_kb = esp_alloc::HEAP.free() / 1024;
-    let used_kb = esp_alloc::HEAP.used() / 1024;
-    let mut mem_str = heapless::String::<22>::new();
-    let _ = write!(mem_str, "Mem: {}k/{}k", free_kb, free_kb + used_kb);
-    let _ = Text::new(&mem_str, Point::new(2, 60), style).draw(oled);
+    // Module states (UNK/CFG/OK/ERR)
+    let snap = crate::hardware_profile::snapshot();
+    let mut l1 = heapless::String::<32>::new();
+    let mut l2 = heapless::String::<32>::new();
+    let mut l3 = heapless::String::<32>::new();
+    let _ = write!(
+        l1,
+        "Disp:{} Touch:{}",
+        snap.display.short(),
+        snap.touch.short()
+    );
+    let _ = write!(l2, "Audio:{} SD:{}", snap.audio.short(), snap.sd.short());
+    let _ = write!(
+        l3,
+        "Bat:{} RGB:{} U:{}",
+        snap.battery.short(),
+        snap.rgb.short(),
+        snap.uart.short()
+    );
+    let _ = Text::new(&l1, Point::new(2, 34), style).draw(oled);
+    let _ = Text::new(&l2, Point::new(2, 46), style).draw(oled);
+    let _ = Text::new(&l3, Point::new(2, 58), style).draw(oled);
 }
 
 /// Full-screen clock view (NTP time or uptime fallback).
@@ -1824,10 +1976,10 @@ fn render_vienna_lines(oled: &mut OledDisplay, state: &mut FaceState) {
                     // a la izquierda y espere 20 frames (2 segundos) antes de moverse.
                     state.vienna_scroll_x = -20;
                 }
-        } else {
+            } else {
                 let _ = Text::new(&label, Point::new(1, y_top + 9), inv_style).draw(oled);
             }
-        }  else {
+        } else {
             // Truncate non-selected rows to fit 21 chars
             let trunc: &str = if label.len() > 21 {
                 &label[..21]
@@ -1897,7 +2049,11 @@ fn render_vienna_detail(oled: &mut OledDisplay, state: &FaceState) {
     let mut dir_buf = heapless::String::<36>::new();
     let _ = dir_buf.push_str("> ");
     let _ = dir_buf.push_str(&stop.direction);
-    let dir_trunc: &str = if dir_buf.len() > 21 { &dir_buf[..21] } else { &dir_buf };
+    let dir_trunc: &str = if dir_buf.len() > 21 {
+        &dir_buf[..21]
+    } else {
+        &dir_buf
+    };
     let _ = Text::new(dir_trunc, Point::new(1, 22), style).draw(oled);
 
     // Routes with full departure info
@@ -2026,7 +2182,11 @@ impl OledDisplay {
                 all_ok = false;
             }
         }
-        if all_ok { Ok(()) } else { Err(()) }
+        if all_ok {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 
     /// Write one page (128 bytes, i.e. 8 rows) to the display.
