@@ -306,6 +306,25 @@ async fn main(spawner: Spawner) {
         ))
         .unwrap();
     log::info!("Touch probe task spawned (FT6336 on I2C1)");
+    spawner
+        .spawn(hardware_profile::audio_probe_task(peripherals.GPIO1))
+        .unwrap();
+    log::info!("Audio probe task spawned (speaker amp enable)");
+    spawner
+        .spawn(hardware_profile::battery_probe_task())
+        .unwrap();
+    log::info!("Battery probe task spawned (ULP voltage monitor)");
+    spawner
+        .spawn(hardware_profile::sd_probe_task(
+            peripherals.GPIO38,
+            peripherals.GPIO40,
+            peripherals.GPIO39,
+            peripherals.GPIO41,
+            peripherals.GPIO48,
+            peripherals.GPIO47,
+        ))
+        .unwrap();
+    log::info!("SD probe task spawned (SDIO line sanity monitor)");
 
     // ── 14. Core 0 brain task ────────────────────────────────────────────────
     //
