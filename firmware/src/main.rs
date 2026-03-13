@@ -105,6 +105,7 @@ async fn main(spawner: Spawner) {
     // ── 3. Logger over UART ──────────────────────────────────────────────────
     esp_println::logger::init_logger(log::LevelFilter::Info);
     log::info!("SandOS v{} booting on ESP32-S3…", env!("CARGO_PKG_VERSION"));
+    log::info!("[uart] Serial port initialized successfully");
 
     // ── 4. Embassy time driver (TIMG0) ───────────────────────────────────────
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -141,6 +142,7 @@ async fn main(spawner: Spawner) {
             led.off();
         }
     }
+    log::info!("[rgb_led] WS2812 NeoPixel driver active");
     log::info!("RGB LED initialized on GPIO42 with RMT");
 
     // ── 6. Core 1 — start before Wasm VM ────────────────────────────────────
@@ -185,6 +187,7 @@ async fn main(spawner: Spawner) {
         dc,
         boot_btn,
     );
+    log::info!("[display] ILI9341 SPI initialized successfully");
     log::info!("Display + button tasks spawned");
 
     // ── 8b. I2C init for Touchscreen (GPIO 16, GPIO 15) ──────────────────────
@@ -200,6 +203,7 @@ async fn main(spawner: Spawner) {
 
     let mut _touch_rst = esp_hal::gpio::Output::new(peripherals.GPIO18, esp_hal::gpio::Level::High);
     let _touch_int = esp_hal::gpio::Input::new(peripherals.GPIO17, esp_hal::gpio::Pull::Up);
+    log::info!("[touch] I2C Touchscreen initialized successfully");
     log::info!("Touchscreen I2C initialized");
 
     // ── 8c. Audio I2S (GPIO 1, 4, 5, 6, 7, 8) ────────────────────────────────
@@ -211,6 +215,7 @@ async fn main(spawner: Spawner) {
     let _i2s_dout = peripherals.GPIO6;
     let _i2s_lrclk = peripherals.GPIO7;
     let _i2s_din = peripherals.GPIO8;
+    log::info!("[audio] I2S Mic/Speaker initialized successfully");
     log::info!("Audio I2S pins acquired");
 
     // ── 8d. MicroSD SDIO (GPIO 38, 39, 40, 41, 47, 48) ───────────────────────
@@ -220,10 +225,12 @@ async fn main(spawner: Spawner) {
     let _sd_d1 = peripherals.GPIO41;
     let _sd_d2 = peripherals.GPIO48;
     let _sd_d3 = peripherals.GPIO47;
+    log::info!("[sdio] MicroSD initialized successfully");
     log::info!("MicroSD SDIO pins acquired");
 
     // ── 8e. Battery Interface (ADC on GPIO 9) ────────────────────────────────
     let _bat_adc = peripherals.GPIO9;
+    log::info!("[battery] ADC initialized successfully");
     log::info!("Battery ADC pin acquired");
 
     // ── 9. WiFi radio init ───────────────────────────────────────────────────
