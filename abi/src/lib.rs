@@ -116,6 +116,8 @@ pub enum EyeExpression {
     Blink     = 6,
     Heart     = 7,
     Sleepy    = 8,
+    Listening = 9,
+    Processing = 10,
 }
 
 impl EyeExpression {
@@ -135,6 +137,8 @@ impl EyeExpression {
             6 => Some(Self::Blink),
             7 => Some(Self::Heart),
             8 => Some(Self::Sleepy),
+            9 => Some(Self::Listening),
+            10 => Some(Self::Processing),
             _ => None,
         }
     }

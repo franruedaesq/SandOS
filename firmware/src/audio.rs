@@ -70,3 +70,12 @@ pub async fn audio_tx_task(i2s_tx: I2sTx<'static, Async>, mut tx_buffer: &'stati
         }
     }
 }
+
+pub fn play_blip() {
+    let mut chunk = AudioChunk::new();
+    for i in 0..64 {
+        let val = if i % 2 == 0 { 0x3F } else { 0x00 };
+        let _ = chunk.push(val);
+    }
+    let _ = AUDIO_TX_CHANNEL.try_send(chunk);
+}
