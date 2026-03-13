@@ -1,0 +1,72 @@
+<<<<<<< SEARCH
+    let cs = esp_hal::gpio::Output::new(peripherals.GPIO10, esp_hal::gpio::Level::High);
+    let dc = esp_hal::gpio::Output::new(peripherals.GPIO46, esp_hal::gpio::Level::High);
+    let mut backlight = esp_hal::gpio::Output::new(peripherals.GPIO45, esp_hal::gpio::Level::High);
+
+    // Explicitly turn on backlight
+    backlight.set_high();
+
+    display::spawn_display_task(
+        spawner,
+        spi,
+        cs,
+        dc,
+        boot_btn,
+    );
+    log::info!("Display + button tasks spawned");
+=======
+    let cs = esp_hal::gpio::Output::new(peripherals.GPIO10, esp_hal::gpio::Level::High);
+    let dc = esp_hal::gpio::Output::new(peripherals.GPIO46, esp_hal::gpio::Level::High);
+    let mut backlight = esp_hal::gpio::Output::new(peripherals.GPIO45, esp_hal::gpio::Level::High);
+
+    // Explicitly turn on backlight
+    backlight.set_high();
+
+    display::spawn_display_task(
+        spawner,
+        spi,
+        cs,
+        dc,
+        boot_btn,
+    );
+    log::info!("Display + button tasks spawned");
+
+    // ── 8b. I2C init for Touchscreen (GPIO 16, GPIO 15) ──────────────────────
+    let mut i2c_cfg = esp_hal::i2c::master::Config::default();
+    i2c_cfg.frequency = 400_u32.kHz();
+    let _i2c = esp_hal::i2c::master::I2c::new(
+        peripherals.I2C0,
+        i2c_cfg,
+    )
+    .expect("Failed to initialize I2C0")
+    .with_sda(peripherals.GPIO16)
+    .with_scl(peripherals.GPIO15);
+
+    let mut _touch_rst = esp_hal::gpio::Output::new(peripherals.GPIO18, esp_hal::gpio::Level::High);
+    let _touch_int = esp_hal::gpio::Input::new(peripherals.GPIO17, esp_hal::gpio::Pull::Up);
+    log::info!("Touchscreen I2C initialized");
+
+    // ── 8c. Audio I2S (GPIO 1, 4, 5, 6, 7, 8) ────────────────────────────────
+    let mut _audio_en = esp_hal::gpio::Output::new(peripherals.GPIO1, esp_hal::gpio::Level::Low); // Low = Enable
+
+    // Stub for now to show we own the pins and they compile
+    let _i2s_mclk = peripherals.GPIO4;
+    let _i2s_bclk = peripherals.GPIO5;
+    let _i2s_dout = peripherals.GPIO6;
+    let _i2s_lrclk = peripherals.GPIO7;
+    let _i2s_din = peripherals.GPIO8;
+    log::info!("Audio I2S pins acquired");
+
+    // ── 8d. MicroSD SDIO (GPIO 38, 39, 40, 41, 47, 48) ───────────────────────
+    let _sd_clk = peripherals.GPIO38;
+    let _sd_cmd = peripherals.GPIO40;
+    let _sd_d0 = peripherals.GPIO39;
+    let _sd_d1 = peripherals.GPIO41;
+    let _sd_d2 = peripherals.GPIO48;
+    let _sd_d3 = peripherals.GPIO47;
+    log::info!("MicroSD SDIO pins acquired");
+
+    // ── 8e. Battery Interface (ADC on GPIO 9) ────────────────────────────────
+    let _bat_adc = peripherals.GPIO9;
+    log::info!("Battery ADC pin acquired");
+>>>>>>> REPLACE

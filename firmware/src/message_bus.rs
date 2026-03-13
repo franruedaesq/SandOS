@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! OS Message Bus — Core 0 ↔ routing layer.
 //!
 //! This module is the "nervous system" described in Phase 5: a hardware-agnostic

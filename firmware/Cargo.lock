@@ -524,6 +524,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-hal-bus"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d3980bf28e8577db59fe2bdb3df868a419469d2cecb363644eea2b6f7797669"
+dependencies = [
+ "critical-section",
+ "embedded-hal 1.0.0",
+ "portable-atomic",
+]
+
+[[package]]
 name = "embedded-hal-nb"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -935,12 +946,14 @@ version = "0.1.0"
 dependencies = [
  "abi",
  "defmt 0.3.100",
+ "display-interface",
  "display-interface-spi",
  "embassy-executor",
  "embassy-net",
  "embassy-sync 0.6.2",
  "embassy-time",
  "embedded-graphics",
+ "embedded-hal-bus",
  "embedded-io-async",
  "esp-alloc",
  "esp-backtrace",

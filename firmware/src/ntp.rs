@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Minimal SNTP client for SandOS.
 //!
 //! Syncs the wall clock once on startup (after WiFi connects), then

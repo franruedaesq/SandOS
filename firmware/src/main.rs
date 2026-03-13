@@ -121,10 +121,10 @@ async fn main(spawner: Spawner) {
     let rmt = esp_hal::rmt::Rmt::new(peripherals.RMT, 80_u32.MHz())
         .expect("Failed to initialize RMT");
 
-    let tx_channel_48 = rmt
+    let tx_channel_42 = rmt
         .channel1
         .configure(
-            peripherals.GPIO48,
+            peripherals.GPIO42,
             TxChannelConfig {
                 clk_divider: 4,
                 idle_output_level: false,
@@ -132,16 +132,16 @@ async fn main(spawner: Spawner) {
                 ..Default::default()
             },
         )
-        .expect("Failed to configure RMT TX channel 1 (GPIO48)");
+        .expect("Failed to configure RMT TX channel 1 (GPIO42)");
 
     unsafe {
         rgb_led::RGB_LED = Some(rgb_led::RgbLedDriver::new());
         if let Some(led) = (*core::ptr::addr_of_mut!(rgb_led::RGB_LED)).as_mut() {
-            led.attach_tx_channel_gpio48(tx_channel_48);
+            led.attach_tx_channel_gpio48(tx_channel_42);
             led.off();
         }
     }
-    log::info!("RGB LED initialized on GPIO48 with RMT");
+    log::info!("RGB LED initialized on GPIO42 with RMT");
 
     // ── 6. Core 1 — start before Wasm VM ────────────────────────────────────
     let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
@@ -161,14 +161,70 @@ async fn main(spawner: Spawner) {
     //
     // With async I2C the display no longer blocks Core 0, so it is safe to
     // run the Wi-Fi stack and web server alongside the display.
+    let spi_config = esp_hal::spi::master::Config::default()
+        .with_frequency(40_u32.MHz())
+        .with_mode(esp_hal::spi::Mode::_0);
+
+    let spi = esp_hal::spi::master::Spi::new(peripherals.SPI2, spi_config)
+        .expect("Failed to init SPI2")
+        .with_sck(peripherals.GPIO12)
+        .with_mosi(peripherals.GPIO11)
+        .with_miso(peripherals.GPIO13);
+
+    let cs = esp_hal::gpio::Output::new(peripherals.GPIO10, esp_hal::gpio::Level::High);
+    let dc = esp_hal::gpio::Output::new(peripherals.GPIO46, esp_hal::gpio::Level::High);
+    let mut backlight = esp_hal::gpio::Output::new(peripherals.GPIO45, esp_hal::gpio::Level::High);
+
+    // Explicitly turn on backlight
+    backlight.set_high();
+
     display::spawn_display_task(
         spawner,
-        peripherals.I2C0,
-        peripherals.GPIO8,
-        peripherals.GPIO9,
+        spi,
+        cs,
+        dc,
         boot_btn,
     );
     log::info!("Display + button tasks spawned");
+
+    // ── 8b. I2C init for Touchscreen (GPIO 16, GPIO 15) ──────────────────────
+    let mut i2c_cfg = esp_hal::i2c::master::Config::default();
+    i2c_cfg.frequency = 400_u32.kHz();
+    let _i2c = esp_hal::i2c::master::I2c::new(
+        peripherals.I2C0,
+        i2c_cfg,
+    )
+    .expect("Failed to initialize I2C0")
+    .with_sda(peripherals.GPIO16)
+    .with_scl(peripherals.GPIO15);
+
+    let mut _touch_rst = esp_hal::gpio::Output::new(peripherals.GPIO18, esp_hal::gpio::Level::High);
+    let _touch_int = esp_hal::gpio::Input::new(peripherals.GPIO17, esp_hal::gpio::Pull::Up);
+    log::info!("Touchscreen I2C initialized");
+
+    // ── 8c. Audio I2S (GPIO 1, 4, 5, 6, 7, 8) ────────────────────────────────
+    let mut _audio_en = esp_hal::gpio::Output::new(peripherals.GPIO1, esp_hal::gpio::Level::Low); // Low = Enable
+
+    // Ownership check for audio pins
+    let _i2s_mclk = peripherals.GPIO4;
+    let _i2s_bclk = peripherals.GPIO5;
+    let _i2s_dout = peripherals.GPIO6;
+    let _i2s_lrclk = peripherals.GPIO7;
+    let _i2s_din = peripherals.GPIO8;
+    log::info!("Audio I2S pins acquired");
+
+    // ── 8d. MicroSD SDIO (GPIO 38, 39, 40, 41, 47, 48) ───────────────────────
+    let _sd_clk = peripherals.GPIO38;
+    let _sd_cmd = peripherals.GPIO40;
+    let _sd_d0 = peripherals.GPIO39;
+    let _sd_d1 = peripherals.GPIO41;
+    let _sd_d2 = peripherals.GPIO48;
+    let _sd_d3 = peripherals.GPIO47;
+    log::info!("MicroSD SDIO pins acquired");
+
+    // ── 8e. Battery Interface (ADC on GPIO 9) ────────────────────────────────
+    let _bat_adc = peripherals.GPIO9;
+    log::info!("Battery ADC pin acquired");
 
     // ── 9. WiFi radio init ───────────────────────────────────────────────────
     //

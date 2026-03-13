@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! ULP Coprocessor — The Paramedic.
 //!
 //! The ESP32-S3's Ultra-Low-Power (ULP) core (RISC-V LP core) is programmed
