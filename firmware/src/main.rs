@@ -20,7 +20,6 @@
 #![no_main]
 
 extern crate alloc;
-use alloc::boxed::Box;
 use core::ptr::addr_of_mut;
 
 use embassy_executor::Spawner;
@@ -232,14 +231,14 @@ async fn main(spawner: Spawner) {
     let bclk_tx = unsafe { peripherals.GPIO5.clone_unchecked() };
     let ws_tx = unsafe { peripherals.GPIO7.clone_unchecked() };
 
-    let mut i2s_rx = i2s
+    let i2s_rx = i2s
         .i2s_rx
         .with_bclk(peripherals.GPIO5)
         .with_ws(peripherals.GPIO7)
         .with_din(peripherals.GPIO8)
         .build();
 
-    let mut i2s_tx = i2s
+    let i2s_tx = i2s
         .i2s_tx
         .with_bclk(bclk_tx)
         .with_ws(ws_tx)
@@ -250,6 +249,10 @@ async fn main(spawner: Spawner) {
     let mut speaker_en = esp_hal::gpio::Output::new(peripherals.GPIO1, esp_hal::gpio::Level::High);
     // Setting to low enables audio output based on user input
     speaker_en.set_low();
+
+    // Output pins like amplifier enable (amp_en) must be kept alive
+    // to prevent them from dropping and disabling the hardware.
+    core::mem::forget(speaker_en);
 
     // We need to pass static mutable references to the DMA buffers to the async tasks
     // Leak the rx_buffer and tx_buffer to make them 'static.
@@ -275,7 +278,7 @@ async fn main(spawner: Spawner) {
 
     let cs = esp_hal::gpio::Output::new(peripherals.GPIO10, esp_hal::gpio::Level::High);
     let dc = esp_hal::gpio::Output::new(peripherals.GPIO46, esp_hal::gpio::Level::Low);
-    let mut blk = esp_hal::gpio::Output::new(peripherals.GPIO45, esp_hal::gpio::Level::High);
+    let _blk = esp_hal::gpio::Output::new(peripherals.GPIO45, esp_hal::gpio::Level::High);
 
     display::spawn_display_task(
         spawner,
