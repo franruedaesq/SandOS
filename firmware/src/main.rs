@@ -204,7 +204,7 @@ async fn main(spawner: Spawner) {
     log::info!("Touch I2C task spawned");
 
     // ── 8. Audio I2S + DMA init ──────────────────────────────────────────────
-    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = esp_hal::dma_buffers!(4096, 4096);
+    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = esp_hal::dma_buffers!(12288, 12288);
 
     let i2s = I2s::new(
         peripherals.I2S0,
