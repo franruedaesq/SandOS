@@ -40,10 +40,10 @@
 extern crate alloc;
 
 use abi::{
-    validate_ptr_len, ImuReading, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    validate_ptr_len, ImuReading, MAX_AUDIO_READ, MAX_AUDIO_WRITE, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
     HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
     FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS,
-    FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT,
+    FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT, FN_WRITE_AUDIO,
     INFERENCE_RESULT_SIZE, OTA_STATUS_SIZE, status,
 };
 use alloc::vec;
@@ -233,7 +233,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
             HOST_MODULE,
             FN_GET_UPTIME_MS,
             |caller: Caller<'_, *mut AbiHost>| -> i64 {
-                let host = unsafe { &**caller.data() };
+                let host = unsafe { &mut **caller.data() };
                 host.get_uptime_ms() as i64
             },
         )
@@ -335,7 +335,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
             HOST_MODULE,
             FN_GET_AUDIO_AVAIL,
             |caller: Caller<'_, *mut AbiHost>| -> i32 {
-                let host = unsafe { &**caller.data() };
+                let host = unsafe { &mut **caller.data() };
                 host.get_audio_avail()
             },
         )
@@ -346,6 +346,9 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
             HOST_MODULE,
             FN_READ_AUDIO,
             |mut caller: Caller<'_, *mut AbiHost>, ptr: i32, max_len: i32| -> i32 {
+                if max_len as u32 > MAX_AUDIO_READ {
+                    return abi::status::ERR_BOUNDS;
+                }
                 let mem = match get_memory(&caller) {
                     Some(m) => m,
                     None => return status::ERR_BOUNDS,
@@ -354,21 +357,45 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 if validate_ptr_len(ptr as u32, max_len as u32, mem_size).is_err() {
                     return status::ERR_BOUNDS;
                 }
-                if max_len as u32 > MAX_AUDIO_READ {
-                    return status::ERR_BOUNDS;
-                }
-                // Temporarily extract audio into a scratch buffer, then
-                // write it into Wasm memory.
-                let n = max_len as usize;
-                let mut tmp = vec![0u8; n];
                 let host = unsafe { &mut **caller.data() };
-                let copied = host.read_audio(&mut tmp) as usize;
-                mem.data_mut(&mut caller)[ptr as usize..ptr as usize + copied]
+                // Temporarily extract audio into a scratch buffer, then
+                // copy it into Wasm memory.  This avoids holding the
+                // `caller.data()` mutable borrow at the same time as `mem.data_mut()`.
+                let mut tmp = alloc::vec![0u8; MAX_AUDIO_READ as usize];
+                let copied = host.read_audio(&mut tmp[..max_len as usize]) as usize;
+                mem.data_mut(&mut caller)[ptr as usize..(ptr as usize + copied)]
                     .copy_from_slice(&tmp[..copied]);
                 copied as i32
             },
         )
         .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_WRITE_AUDIO,
+            |caller: Caller<'_, *mut AbiHost>, ptr: u32, len: u32| -> i32 {
+                if len > MAX_AUDIO_WRITE {
+                    return abi::status::ERR_BOUNDS;
+                }
+                let memory = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return abi::status::ERR_BOUNDS,
+                };
+                let mem_size = memory.data(&caller).len() as u32;
+                if validate_ptr_len(ptr, len, mem_size).is_err() {
+                    return abi::status::ERR_BOUNDS;
+                }
+                let host = unsafe { &mut **caller.data() };
+                let mut tmp = alloc::vec![0u8; MAX_AUDIO_WRITE as usize];
+                let slice = &mut tmp[..len as usize];
+                // Wasm memory read to slice
+                slice.copy_from_slice(&memory.data(&caller)[ptr as usize..(ptr + len) as usize]);
+                host.write_audio(slice)
+            },
+        )
+        .unwrap();
+
 
     // ── Phase 3 — Sensors ─────────────────────────────────────────────────────
 
@@ -389,7 +416,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 if validate_ptr_len(roll_ptr as u32, 4, mem_size).is_err() {
                     return status::ERR_BOUNDS;
                 }
-                let host = unsafe { &**caller.data() };
+                let host = unsafe { &mut **caller.data() };
                 let ImuReading { pitch_millideg, roll_millideg } = host.get_pitch_roll();
                 let data = mem.data_mut(&mut caller);
                 data[pitch_ptr as usize..pitch_ptr as usize + 4]
@@ -411,7 +438,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 if left.abs() > MAX_MOTOR_SPEED || right.abs() > MAX_MOTOR_SPEED {
                     return status::ERR_INVALID_ARG;
                 }
-                let host = unsafe { &**caller.data() };
+                let host = unsafe { &mut **caller.data() };
                 host.set_motor_speed(left, right)
             },
         )
@@ -432,7 +459,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 if validate_ptr_len(out_ptr as u32, INFERENCE_RESULT_SIZE, mem_size).is_err() {
                     return status::ERR_BOUNDS;
                 }
-                let host = unsafe { &**caller.data() };
+                let host = unsafe { &mut **caller.data() };
                 let mut tmp = [0u8; INFERENCE_RESULT_SIZE as usize];
                 let status = host.get_local_inference(&mut tmp);
                 if status == status::OK {
@@ -460,8 +487,8 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 if validate_ptr_len(out_ptr as u32, OTA_STATUS_SIZE, mem_size).is_err() {
                     return status::ERR_BOUNDS;
                 }
-                let host = unsafe { &**caller.data() };
-                let mut tmp = [0u8; OTA_STATUS_SIZE as usize];
+                let host = unsafe { &mut **caller.data() };
+                let mut tmp = alloc::vec![0u8; OTA_STATUS_SIZE as usize];
                 let result = host.get_ota_status(&mut tmp);
                 if result == status::OK {
                     let end = out_ptr as usize + OTA_STATUS_SIZE as usize;

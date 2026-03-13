@@ -55,13 +55,14 @@
 //!   link is detected as silent.
 use abi::{
     status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent,
-    OdometryTelemetry, OtaState, OtaStatus, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
+    OdometryTelemetry, OtaState, OtaStatus, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_AUDIO_WRITE, MAX_BRIGHTNESS,
     MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_STATUS_SIZE,
 };
 use esp_hal::gpio::Io;
 
 use crate::display::DisplayDriver;
 use crate::rgb_led::RgbLedDriver;
+
 use crate::{inference, message_bus, motors, router, sensors, telemetry};
 
 // ── Host state ────────────────────────────────────────────────────────────────
@@ -206,8 +207,23 @@ impl AbiHost {
     }
 
     /// Return the number of bytes currently available in the audio ring buffer.
-    pub fn get_audio_avail(&self) -> i32 {
+    /// Drain the global RX channel into the ABI's local buffer.
+    fn drain_audio_rx_channel(&mut self) {
+        while let Ok(chunk) = crate::audio::AUDIO_RX_CHANNEL.try_receive() {
+            for &byte in chunk.iter() {
+                if self.audio_buf.is_full() {
+                    self.audio_buf.pop_front();
+                }
+                let _ = self.audio_buf.push_back(byte);
+            }
+        }
+    }
+
+    /// Return the number of bytes currently available in the audio ring buffer.
+    pub fn get_audio_avail(&mut self) -> i32 {
+        self.drain_audio_rx_channel();
         self.audio_buf.len() as i32
+
     }
 
     /// Copy up to `max_len` bytes from the audio buffer into `out`.
@@ -215,6 +231,7 @@ impl AbiHost {
     /// Returns the number of bytes actually copied, or [`status::ERR_BOUNDS`]
     /// if `max_len` exceeds [`MAX_AUDIO_READ`].
     pub fn read_audio(&mut self, out: &mut [u8]) -> i32 {
+        self.drain_audio_rx_channel();
         if out.len() as u32 > MAX_AUDIO_READ {
             return status::ERR_BOUNDS;
         }
@@ -224,6 +241,22 @@ impl AbiHost {
         }
         n as i32
     }
+
+    /// Write up to `max_len` bytes from `in_buf` to the audio TX channel.
+    pub fn write_audio(&mut self, in_buf: &[u8]) -> i32 {
+        if in_buf.len() as u32 > MAX_AUDIO_WRITE {
+            return status::ERR_BOUNDS;
+        }
+        let mut chunk: heapless::Vec<u8, 2048> = heapless::Vec::new();
+        for &byte in in_buf.iter() {
+            let _ = chunk.push(byte);
+        }
+        if !chunk.is_empty() {
+            let _ = crate::audio::AUDIO_TX_CHANNEL.try_send(chunk);
+        }
+        in_buf.len() as i32
+    }
+
 
     // ── Phase 3 — Sensors ─────────────────────────────────────────────────────
 

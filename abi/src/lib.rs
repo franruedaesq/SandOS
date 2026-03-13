@@ -47,6 +47,7 @@ pub const FN_START_AUDIO:        &str = "host_start_audio_capture";
 pub const FN_STOP_AUDIO:         &str = "host_stop_audio_capture";
 pub const FN_GET_AUDIO_AVAIL:    &str = "host_get_audio_avail";
 pub const FN_READ_AUDIO:         &str = "host_read_audio";
+pub const FN_WRITE_AUDIO:        &str = "host_write_audio";
 
 // Phase 3 — Sensor functions
 pub const FN_GET_PITCH_ROLL:     &str = "host_get_pitch_roll";
@@ -248,6 +249,7 @@ pub const MAX_BRIGHTNESS: i32 = 255;
 
 /// Maximum audio chunk size for a single `host_read_audio` call (bytes).
 pub const MAX_AUDIO_READ: u32 = 1024;
+pub const MAX_AUDIO_WRITE: u32 = 1024;
 
 /// Maximum motor speed magnitude accepted by `host_set_motor_speed`.
 ///

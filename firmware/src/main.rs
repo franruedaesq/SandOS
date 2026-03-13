@@ -53,6 +53,7 @@ mod touch;
 mod ulp;
 mod vienna_fetch;
 mod web_server;
+mod audio;
 mod wifi;
 
 // ── Panic handler + exception handler ────────────────────────────────────────
@@ -190,6 +191,41 @@ async fn main(spawner: Spawner) {
     spawner.spawn(battery_task(adc, battery_pin)).unwrap();
     log::info!("Battery ADC task spawned");
 
+    // ── Audio I2S init ──────────────────────────────────────────────────────
+
+    let amp_en = esp_hal::gpio::Output::new(peripherals.GPIO1, esp_hal::gpio::Level::Low);
+
+    core::mem::forget(amp_en);
+
+
+
+    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = esp_hal::dma_buffers!(4096, 4096);
+    let i2s = esp_hal::i2s::master::I2s::new(
+        peripherals.I2S0,
+        esp_hal::i2s::master::Standard::Philips,
+        esp_hal::i2s::master::DataFormat::Data16Channel16,
+        16u32.kHz(),
+        peripherals.DMA_CH0,
+        rx_descriptors,
+        tx_descriptors,
+    ).with_mclk(peripherals.GPIO4).into_async();
+
+    let i2s_rx = i2s.i2s_rx
+        .with_bclk(unsafe { <esp_hal::gpio::GpioPin<5> as esp_hal::peripheral::Peripheral>::clone_unchecked(&peripherals.GPIO5) })
+        .with_ws(unsafe { <esp_hal::gpio::GpioPin<7> as esp_hal::peripheral::Peripheral>::clone_unchecked(&peripherals.GPIO7) })
+        .with_din(peripherals.GPIO8)
+        .build();
+
+    let i2s_tx = i2s.i2s_tx
+        .with_bclk(unsafe { <esp_hal::gpio::GpioPin<5> as esp_hal::peripheral::Peripheral>::clone_unchecked(&peripherals.GPIO5) })
+        .with_ws(unsafe { <esp_hal::gpio::GpioPin<7> as esp_hal::peripheral::Peripheral>::clone_unchecked(&peripherals.GPIO7) })
+        .with_dout(peripherals.GPIO6)
+        .build();
+
+    spawner.spawn(audio::audio_rx_task(i2s_rx, rx_buffer)).unwrap();
+    spawner.spawn(audio::audio_tx_task(i2s_tx, tx_buffer)).unwrap();
+    log::info!("Audio I2S tasks spawned");
+
     // ── Touchscreen I2C init ──────────────────────────────────────────────────
     let i2c = I2c::new(peripherals.I2C1, I2cConfig::default())
         .unwrap()
@@ -208,7 +244,7 @@ async fn main(spawner: Spawner) {
 
     let cs = esp_hal::gpio::Output::new(peripherals.GPIO10, esp_hal::gpio::Level::High);
     let dc = esp_hal::gpio::Output::new(peripherals.GPIO46, esp_hal::gpio::Level::Low);
-    let mut blk = esp_hal::gpio::Output::new(peripherals.GPIO45, esp_hal::gpio::Level::High);
+    let _blk = esp_hal::gpio::Output::new(peripherals.GPIO45, esp_hal::gpio::Level::High);
 
     display::spawn_display_task(
         spawner,
