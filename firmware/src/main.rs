@@ -157,23 +157,22 @@ async fn main(spawner: Spawner) {
     // ── 8. Display + button tasks ────────────────────────────────────────────
     //
     // spawn_display_task spawns two Embassy tasks:
-    //   • display_task  — renders frames via async I2C (CPU yields during flush)
+    //   • display_task  — renders frames over SPI2 to ILI9341
     //   • button_task   — monitors GPIO0 with hardware edge interrupts
-    //
-    // With async I2C the display no longer blocks Core 0, so it is safe to
-    // run the Wi-Fi stack and web server alongside the display.
     display::spawn_display_task(
         spawner,
-        peripherals.I2C0,
-        peripherals.GPIO8,
-        peripherals.GPIO9,
+        peripherals.SPI2,
+        peripherals.GPIO10,
+        peripherals.GPIO46,
+        peripherals.GPIO12,
+        peripherals.GPIO11,
+        peripherals.GPIO13,
+        peripherals.GPIO45,
         boot_btn,
     );
     log::info!("Display + button tasks spawned");
 
-    log::warn!(
-        "DISPLAY BACKEND: current build still uses SSD1306(I2C0) task; ILI9341 SPI migration pending"
-    );
+    log::info!("DISPLAY BACKEND: ILI9341 SPI2 (CS=10 DC=46 SCK=12 MOSI=11 MISO=13 BL=45)");
     // Runtime module health starts as UNKNOWN unless actively verified.
     // The display task upgrades display state to ONLINE once the panel init succeeds.
     hardware_profile::set_display_state(hardware_profile::ModuleState::Unknown);

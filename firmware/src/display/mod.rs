@@ -1,11 +1,6 @@
-//! Phase 2 — OLED Display Driver.
+//! Phase 2 — LCD Display Driver.
 //!
-//! Drives a 0.96" I2C OLED panel (`SSD1306`, 128×64) on the ESP32-S3.
-//! Wiring used by this project:
-//! - `VCC` -> `3V3`
-//! - `GND` -> `GND`
-//! - `SCL` -> `GPIO9`
-//! - `SDA` -> `GPIO8`
+//! Drives a 2.8" SPI TFT panel (`ILI9341`, 240×320) on the ESP32-S3.
 //!
 //! ## Architecture
 //!
@@ -19,8 +14,7 @@
 //! DisplayDriver::draw_eye()  ← embedded-graphics renders to framebuffer
 //!      │
 //!      ▼
-//! Async I2C transfer         ← DMA/interrupt-driven; CPU yields while
-//!                               the frame is pushed to the OLED controller
+//! SPI transfer               ← frame is pushed to the LCD controller
 //! ```
 //!
 //! ## UI Modes
@@ -54,14 +48,13 @@ use embedded_graphics::{
     Pixel,
 };
 use esp_hal::{
-    gpio::{GpioPin, Input},
-    i2c::master::{BusTimeout, Config as I2cConfig, I2c},
-    peripherals::I2C0,
+    gpio::{GpioPin, Input, Level, Output},
+    peripherals::SPI2,
+    spi::master::{Config as SpiConfig, Spi},
     time::RateExtU32,
-    Async,
+    Blocking,
 };
 
-const SSD1306_ADDR: u8 = 0x3C;
 pub const DISPLAY_WIDTH: u32 = 128;
 pub const DISPLAY_HEIGHT: u32 = 64;
 const DISPLAY_BUF_SIZE: usize = (DISPLAY_WIDTH as usize) * (DISPLAY_HEIGHT as usize / 8);
@@ -69,8 +62,9 @@ const DISPLAY_QUEUE_DEPTH: usize = 8;
 const EXPRESSION_OVERRIDE_TIMEOUT: Duration = Duration::from_secs(8);
 // OLED stability baseline (validated on device): do not change casually.
 const FRAME_PERIOD: Duration = Duration::from_millis(50);
-const FLUSH_TIMEOUT: Duration = Duration::from_millis(400);
-const OLED_PAGE_WRITE_CHUNK_SIZE: usize = 16;
+const LCD_PHYS_WIDTH: u16 = 240;
+const LCD_PHYS_HEIGHT: u16 = 320;
+const LCD_DATA_CHUNK: usize = 512;
 const DIAG_SKIP_FLUSH: bool = false;
 
 // ── Tiny xorshift32 PRNG (no-std, no-alloc) ──────────────────────────────────
@@ -201,15 +195,21 @@ impl Default for DisplayDriver {
 
 pub fn spawn_display_task(
     spawner: Spawner,
-    i2c0: I2C0,
-    sda: GpioPin<8>,
-    scl: GpioPin<9>,
+    spi2: SPI2,
+    cs: GpioPin<10>,
+    dc: GpioPin<46>,
+    sck: GpioPin<12>,
+    mosi: GpioPin<11>,
+    miso: GpioPin<13>,
+    bl: GpioPin<45>,
     boot_btn: Input<'static>,
 ) {
     // Spawn the dedicated button interrupt task first so it can catch presses
     // that occur during the display splash screen.
     spawner.spawn(button_task(boot_btn)).unwrap();
-    spawner.spawn(display_task(i2c0, sda, scl)).unwrap();
+    spawner
+        .spawn(display_task(spi2, cs, dc, sck, mosi, miso, bl))
+        .unwrap();
 }
 
 /// Best-effort boot/status text push from other subsystems.
@@ -270,22 +270,34 @@ async fn button_task(mut boot_btn: Input<'static>) {
 }
 
 #[embassy_executor::task]
-async fn display_task(i2c0: I2C0, sda: GpioPin<8>, scl: GpioPin<9>) {
-    // OLED stability baseline (validated on device): do not change casually.
-    let mut cfg = I2cConfig::default();
-    cfg.frequency = 200.kHz();
-    cfg.timeout = BusTimeout::BusCycles(100_000);
+async fn display_task(
+    spi2: SPI2,
+    cs: GpioPin<10>,
+    dc: GpioPin<46>,
+    sck: GpioPin<12>,
+    mosi: GpioPin<11>,
+    miso: GpioPin<13>,
+    bl: GpioPin<45>,
+) {
+    let mut cfg = SpiConfig::default();
+    cfg.frequency = 40.MHz();
 
-    let i2c = match I2c::new(i2c0, cfg) {
-        Ok(bus) => bus.with_sda(sda).with_scl(scl).into_async(),
+    let spi = match Spi::new(spi2, cfg) {
+        Ok(bus) => bus.with_sck(sck).with_mosi(mosi).with_miso(miso),
         Err(err) => {
-            log::error!("[display] I2C init failed: {:?}", err);
+            log::error!("[display] SPI2 init failed: {:?}", err);
             crate::hardware_profile::set_display_state(crate::hardware_profile::ModuleState::Fault);
             return;
         }
     };
-    let mut oled = OledDisplay::new(i2c);
-    oled.init().await;
+
+    let mut oled = OledDisplay::new(
+        spi,
+        Output::new(cs, Level::High),
+        Output::new(dc, Level::High),
+        Output::new(bl, Level::Low),
+    );
+    oled.init();
     crate::hardware_profile::set_display_state(crate::hardware_profile::ModuleState::Online);
 
     let mut state = FaceState::default();
@@ -293,8 +305,8 @@ async fn display_task(i2c0: I2C0, sda: GpioPin<8>, scl: GpioPin<9>) {
     oled.clear(BinaryColor::Off);
     let title_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let _ = Text::new("SandOS", Point::new(34, 20), title_style).draw(&mut oled);
-    let _ = Text::new("OLED OK", Point::new(34, 36), title_style).draw(&mut oled);
-    match oled.flush().await {
+    let _ = Text::new("LCD SPI OK", Point::new(26, 36), title_style).draw(&mut oled);
+    match oled.flush() {
         Ok(()) => {}
         Err(()) => log::error!("[display] splash flush FAILED (continuing)"),
     }
@@ -331,7 +343,7 @@ async fn display_task(i2c0: I2C0, sda: GpioPin<8>, scl: GpioPin<9>) {
                 DisplayCommand::SetText(text) => state.text = text,
                 DisplayCommand::SetBrightness(value) => {
                     state.brightness = value;
-                    oled.set_contrast(value).await;
+                    oled.set_backlight(value);
                 }
             }
         }
@@ -370,16 +382,13 @@ async fn display_task(i2c0: I2C0, sda: GpioPin<8>, scl: GpioPin<9>) {
         // 4. Render and push the frame.
         render_frame(&mut oled, &mut state);
 
-        // 4b. Flush framebuffer to SSD1306 via async I2C.
-        //     The CPU yields to other tasks during each I2C transfer, so
-        //     Wi-Fi, the web server and the button task all continue to run.
+        // 4b. Flush framebuffer to the ILI9341 via SPI.
         if !DIAG_SKIP_FLUSH {
             let flush_start = Instant::now();
-            let mut flush_ok =
-                matches!(with_timeout(FLUSH_TIMEOUT, oled.flush()).await, Ok(Ok(())));
+            let mut flush_ok = matches!(oled.flush(), Ok(()));
             // Immediate retry on transient bus error.
             if !flush_ok {
-                flush_ok = matches!(with_timeout(FLUSH_TIMEOUT, oled.flush()).await, Ok(Ok(())));
+                flush_ok = matches!(oled.flush(), Ok(()));
             }
             let last_flush_us = (Instant::now() - flush_start).as_micros() as u64;
             if flush_ok {
@@ -393,8 +402,8 @@ async fn display_task(i2c0: I2C0, sda: GpioPin<8>, scl: GpioPin<9>) {
                 // Track how long we've been failing continuously.
                 let fail_start = *flush_fail_since.get_or_insert(Instant::now());
                 if Instant::now() - fail_start >= Duration::from_millis(500) {
-                    log::warn!("[display] flush failing >500ms — re-initialising OLED");
-                    oled.init().await;
+                    log::warn!("[display] flush failing >500ms — re-initialising LCD");
+                    oled.init();
                     // Reset animation timers so the face restarts cleanly.
                     let now_ms = Instant::now().as_millis() as u64;
                     state.next_blink_ms = now_ms + state.rng.range(1500, 3500) as u64;
@@ -2096,149 +2105,96 @@ fn render_mini_face(oled: &mut OledDisplay, state: &FaceState) {
     draw_mouth(oled, state.expression, 95, 38 + bob_y, 0, now_ms);
 }
 
-// ── SSD1306 low-level driver ──────────────────────────────────────────────────
+// ── ILI9341 low-level driver (SPI) ───────────────────────────────────────────
 
 struct OledDisplay {
-    i2c: I2c<'static, Async>,
+    spi: Spi<'static, Blocking>,
+    cs: Output<'static>,
+    dc: Output<'static>,
+    bl: Output<'static>,
     buffer: [u8; DISPLAY_BUF_SIZE],
+    rgb565: [u8; DISPLAY_BUF_SIZE * 2],
 }
 
 impl OledDisplay {
-    fn new(i2c: I2c<'static, Async>) -> Self {
+    fn new(
+        spi: Spi<'static, Blocking>,
+        cs: Output<'static>,
+        dc: Output<'static>,
+        bl: Output<'static>,
+    ) -> Self {
         Self {
-            i2c,
+            spi,
+            cs,
+            dc,
+            bl,
             buffer: [0; DISPLAY_BUF_SIZE],
+            rgb565: [0; DISPLAY_BUF_SIZE * 2],
         }
     }
 
-    /// SSD1306 init + GDDRAM clear.
-    ///
-    /// Works correctly even after a soft-reset (Ctrl+R) where the SSD1306
-    /// retains stale GDDRAM content and an unpredictable internal pointer.
-    async fn init(&mut self) {
-        // Single transaction: display-off, full config, address window reset.
-        // The SSD1306 processes chained commands via control byte 0x00.
-        // Uses page addressing mode (the default) which works on both
-        // SSD1306 and SH1106 controllers.  Column/page are set per-page
-        // in flush_page() instead of relying on horizontal auto-increment.
-        let init_cmds: [u8; 25] = [
-            0x00, // Control byte: Co=0, D/C#=0 → command stream
-            0xAE, // Display OFF
-            0xD5, 0x80, // Clock divide ratio / oscillator freq
-            0xA8, 0x3F, // Multiplex ratio = 64
-            0xD3, 0x00, // Display offset = 0
-            0x40, // Start line = 0
-            0x8D, 0x14, // Charge pump ON
-            0x20, 0x02, // Page addressing mode (compatible with SH1106)
-            0xA1, // Segment re-map (col 127 = SEG0)
-            0xC8, // COM scan direction remapped
-            0xDA, 0x12, // COM pins hardware config
-            0x81, 0xCF, // Contrast
-            0xD9, 0xF1, // Pre-charge period
-            0xDB, 0x40, // VCOMH deselect level
-            0xA4, // Resume from RAM content
-            0xA6, // Normal display (not inverted)
-        ];
-        match self.i2c.write(SSD1306_ADDR, &init_cmds).await {
-            Ok(()) => {}
-            Err(e) => log::error!("[display] SSD1306 init cmds FAILED: {:?}", e),
-        }
-
-        // Brief async delay (~1 ms) for the SSD1306 to process the init batch.
-        Timer::after(Duration::from_millis(1)).await;
-
-        // Clear GDDRAM (writes 1024 zero bytes).  The address window was
-        // just reset above so the pointer starts at page 0, column 0.
-        self.buffer.fill(0x00);
-        match self.flush().await {
-            Ok(()) => {}
-            Err(()) => log::error!("[display] GDDRAM clear FAILED"),
-        }
-
-        // Display ON.
-        match self.i2c.write(SSD1306_ADDR, &[0x00, 0xAF]).await {
-            Ok(()) => {}
-            Err(e) => log::error!("[display] display ON cmd FAILED: {:?}", e),
-        }
+    fn write_cmd(&mut self, cmd: u8) -> Result<(), ()> {
+        self.cs.set_low();
+        self.dc.set_low();
+        let r = self.spi.write(&[cmd]).map_err(|_| ());
+        self.cs.set_high();
+        r
     }
 
-    async fn set_contrast(&mut self, value: u8) {
-        let _ = self.i2c.write(SSD1306_ADDR, &[0x00, 0x81, value]).await;
+    fn write_data(&mut self, data: &[u8]) -> Result<(), ()> {
+        self.cs.set_low();
+        self.dc.set_high();
+        let r = self.spi.write(data).map_err(|_| ());
+        self.cs.set_high();
+        r
     }
 
-    #[allow(dead_code)]
-    async fn cmd(&mut self, cmd: u8) {
-        let _ = self.i2c.write(SSD1306_ADDR, &[0x00, cmd]).await;
+    fn init(&mut self) {
+        let _ = self.write_cmd(0x01); // SWRESET
+        let _ = self.write_cmd(0x11); // SLPOUT
+        let _ = self.write_cmd(0x3A);
+        let _ = self.write_data(&[0x55]); // RGB565
+        let _ = self.write_cmd(0x36);
+        let _ = self.write_data(&[0x48]); // MX + BGR
+        let _ = self.write_cmd(0x29); // DISPON
+        self.set_backlight(255);
     }
 
-    /// Push the entire 1024-byte framebuffer to the display.
-    ///
-    /// The CPU yields to other Embassy tasks during each I2C transfer so
-    /// Wi-Fi, the web server and the button task all continue to run.
-    async fn flush(&mut self) -> Result<(), ()> {
-        let mut all_ok = true;
-        for page in 0..8 {
-            if !self.flush_page(page).await {
-                all_ok = false;
-            }
-        }
-        if all_ok {
-            Ok(())
+    fn set_backlight(&mut self, value: u8) {
+        if value == 0 {
+            self.bl.set_low();
         } else {
-            Err(())
+            self.bl.set_high();
         }
     }
 
-    /// Write one page (128 bytes, i.e. 8 rows) to the display.
-    ///
-    /// Sets the page address and column explicitly before each write,
-    /// which works on both SSD1306 (any addressing mode) and SH1106.
-    /// Retries once on failure to handle transient bus glitches.
-    ///
-    /// `page` must be in `0..8`.  Returns `true` on success.
-    async fn flush_page(&mut self, page: usize) -> bool {
-        for _attempt in 0..2 {
-            if self.flush_page_inner(page).await {
-                return true;
-            }
-        }
-        false
-    }
+    fn flush(&mut self) -> Result<(), ()> {
+        let x0 = ((LCD_PHYS_WIDTH - DISPLAY_WIDTH as u16) / 2) as u16;
+        let y0 = ((LCD_PHYS_HEIGHT - DISPLAY_HEIGHT as u16) / 2) as u16;
+        let x1 = x0 + DISPLAY_WIDTH as u16 - 1;
+        let y1 = y0 + DISPLAY_HEIGHT as u16 - 1;
 
-    async fn flush_page_inner(&mut self, page: usize) -> bool {
-        // Set page address + column 0.
-        // 0xB0|page = page address; 0x00 = lower column nibble;
-        // 0x10 = upper column nibble → column 0.
-        let page_cmd = 0xB0 | (page as u8);
-        if self
-            .i2c
-            .write(SSD1306_ADDR, &[0x00, page_cmd, 0x00, 0x10])
-            .await
-            .is_err()
-        {
-            return false;
-        }
+        let _ = self.write_cmd(0x2A);
+        let _ = self.write_data(&[(x0 >> 8) as u8, x0 as u8, (x1 >> 8) as u8, x1 as u8]);
+        let _ = self.write_cmd(0x2B);
+        let _ = self.write_data(&[(y0 >> 8) as u8, y0 as u8, (y1 >> 8) as u8, y1 as u8]);
+        let _ = self.write_cmd(0x2C);
 
-        // Write 128 data bytes for this page in small chunks.
-        let start = page * 128;
-        let end = (start + 128).min(self.buffer.len());
-        let chunk = &self.buffer[start..end];
-        let mut packet = [0u8; 1 + OLED_PAGE_WRITE_CHUNK_SIZE];
-        packet[0] = 0x40;
-
-        for data_chunk in chunk.chunks(OLED_PAGE_WRITE_CHUNK_SIZE) {
-            packet[1..1 + data_chunk.len()].copy_from_slice(data_chunk);
-            if self
-                .i2c
-                .write(SSD1306_ADDR, &packet[..1 + data_chunk.len()])
-                .await
-                .is_err()
-            {
-                return false;
+        for i in 0..DISPLAY_BUF_SIZE {
+            let src = self.buffer[i];
+            for bit in 0..8 {
+                let on = ((src >> bit) & 1) != 0;
+                let pix = if on { 0xFFFF } else { 0x0000 };
+                let out_idx = (i * 8 + bit) * 2;
+                self.rgb565[out_idx] = (pix >> 8) as u8;
+                self.rgb565[out_idx + 1] = pix as u8;
             }
         }
 
-        true
+        for chunk in self.rgb565.chunks(LCD_DATA_CHUNK) {
+            self.write_data(chunk)?;
+        }
+        Ok(())
     }
 }
 
