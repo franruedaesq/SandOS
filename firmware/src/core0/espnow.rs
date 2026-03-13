@@ -216,6 +216,16 @@ fn handle_frame(
         return; // OTA commands are not forwarded to the Wasm engine.
     }
 
+    // Phase 2: Distributed architecture. Intercept SET_MOTOR_SPEED broadcast
+    // and directly feed it into the internal message bus without touching Wasm.
+    if cmd_id == cmd::SET_MOTOR_SPEED && payload_slice.len() == 4 {
+        let left = i16::from_le_bytes([payload_slice[0], payload_slice[1]]);
+        let right = i16::from_le_bytes([payload_slice[2], payload_slice[3]]);
+        let intent = abi::MovementIntent::new(left, right);
+        crate::message_bus::publish_intent(intent);
+        return;
+    }
+
     let mut payload: heapless::Vec<u8, 64> = heapless::Vec::new();
     let copy_len = payload_slice.len().min(64);
     payload.extend_from_slice(&payload_slice[..copy_len]).ok();
