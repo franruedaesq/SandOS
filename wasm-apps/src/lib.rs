@@ -167,6 +167,8 @@ mod eye {
     pub const SURPRISED: i32 = 4;
     pub const THINKING:  i32 = 5;
     pub const BLINK:     i32 = 6;
+    pub const LISTENING: i32 = 9;
+    pub const PROCESSING: i32 = 10;
 }
 
 // ── Guest state ───────────────────────────────────────────────────────────────
