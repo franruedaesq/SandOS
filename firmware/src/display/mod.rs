@@ -280,7 +280,7 @@ async fn display_task(
     // Keep this screen visible in a loop to show live diagnostics
     for _ in 0..50 {
         let battery_mv = crate::sensors::load_battery_mv();
-        let touch_addr = crate::sensors::load_touch_addr();
+        let touch_coords = crate::sensors::load_touch_coords();
 
         let _ = oled.clear(Rgb565::BLACK);
         let title_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
@@ -288,11 +288,11 @@ async fn display_task(
         let _ = Text::new("- LCD Display: OK (SPI)", Point::new(10, 40), title_style).draw(&mut oled);
 
         let mut touch_str = heapless::String::<32>::new();
-        if touch_addr != 0 {
+        if let Some((x, y)) = touch_coords {
             use core::fmt::Write;
-            let _ = write!(touch_str, "- Touch: OK (0x{:02X})", touch_addr);
+            let _ = write!(touch_str, "- Touch: OK (X:{} Y:{})", x, y);
         } else {
-            let _ = touch_str.push_str("- Touch: Probing...");
+            let _ = touch_str.push_str("- Touch: No Touch");
         }
         let _ = Text::new(&touch_str, Point::new(10, 60), title_style).draw(&mut oled);
 
