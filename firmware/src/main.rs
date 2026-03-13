@@ -25,8 +25,11 @@ use core::ptr::addr_of_mut;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::{
+    analog::adc::{Adc, AdcConfig, Attenuation, AdcPin},
     cpu_control::{CpuControl, Stack},
-    gpio::Io,
+    gpio::{Io, GpioPin},
+    i2c::master::{Config as I2cConfig, I2c},
+    peripherals::ADC1,
     rmt::{TxChannelConfig, TxChannelCreator},
     time::RateExtU32,
     timer::timg::TimerGroup,
@@ -84,6 +87,31 @@ static WIFI_INIT: StaticCell<EspWifiController<'static>> = StaticCell::new();
 // ── Main (Core 0) ─────────────────────────────────────────────────────────────
 
 /// Embassy entry point — runs on **Core 0**.
+#[embassy_executor::task]
+async fn battery_task(mut adc: Adc<'static, ADC1>, mut pin: AdcPin<GpioPin<9>, ADC1>) {
+    loop {
+        if let Ok(value) = adc.read_oneshot(&mut pin) {
+            // Rough conversion for proof of concept (12-bit ADC, ~3.3V ref with 11dB)
+            let mv = (value as u32 * 3300 / 4095) as u16;
+            crate::sensors::store_battery_mv(mv);
+        }
+        Timer::after(Duration::from_millis(1000)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn touch_task(mut i2c: I2c<'static, esp_hal::Async>) {
+    loop {
+        for addr in 0x01..=0x7F {
+            if i2c.write(addr, &[]).await.is_ok() {
+                crate::sensors::store_touch_addr(addr);
+                break;
+            }
+        }
+        Timer::after(Duration::from_millis(2000)).await;
+    }
+}
+
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
     esp_println::println!("\n\n=== SandOS Starting ===");
@@ -117,14 +145,14 @@ async fn main(spawner: Spawner) {
 
     let io = Io::new(peripherals.IO_MUX);
 
-    // ── RGB LED init (GPIO 48 via RMT) ────────────────────────────────────────
+    // ── RGB LED init (GPIO 42 via RMT) ────────────────────────────────────────
     let rmt = esp_hal::rmt::Rmt::new(peripherals.RMT, 80_u32.MHz())
         .expect("Failed to initialize RMT");
 
-    let tx_channel_48 = rmt
+    let tx_channel_42 = rmt
         .channel1
         .configure(
-            peripherals.GPIO48,
+            peripherals.GPIO42,
             TxChannelConfig {
                 clk_divider: 4,
                 idle_output_level: false,
@@ -132,16 +160,16 @@ async fn main(spawner: Spawner) {
                 ..Default::default()
             },
         )
-        .expect("Failed to configure RMT TX channel 1 (GPIO48)");
+        .expect("Failed to configure RMT TX channel 1 (GPIO42)");
 
     unsafe {
         rgb_led::RGB_LED = Some(rgb_led::RgbLedDriver::new());
         if let Some(led) = (*core::ptr::addr_of_mut!(rgb_led::RGB_LED)).as_mut() {
-            led.attach_tx_channel_gpio48(tx_channel_48);
+            led.attach_tx_channel_gpio42(tx_channel_42);
             led.off();
         }
     }
-    log::info!("RGB LED initialized on GPIO48 with RMT");
+    log::info!("RGB LED initialized on GPIO42 with RMT");
 
     // ── 6. Core 1 — start before Wasm VM ────────────────────────────────────
     let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
@@ -153,19 +181,38 @@ async fn main(spawner: Spawner) {
     // ── 7. ULP paramedic ─────────────────────────────────────────────────────
     ulp::start(peripherals.LPWR);
 
+    // ── Battery ADC init ──────────────────────────────────────────────────────
+    let mut adc_config = AdcConfig::new();
+    let battery_pin = adc_config.enable_pin(peripherals.GPIO9, Attenuation::_11dB);
+    let adc = Adc::new(peripherals.ADC1, adc_config);
+    spawner.spawn(battery_task(adc, battery_pin)).unwrap();
+    log::info!("Battery ADC task spawned");
+
+    // ── Touchscreen I2C init ──────────────────────────────────────────────────
+    let i2c = I2c::new(peripherals.I2C1, I2cConfig::default())
+        .unwrap()
+        .with_sda(peripherals.GPIO16)
+        .with_scl(peripherals.GPIO15)
+        .into_async();
+    spawner.spawn(touch_task(i2c)).unwrap();
+    log::info!("Touch I2C task spawned");
+
     // ── 8. Display + button tasks ────────────────────────────────────────────
-    //
-    // spawn_display_task spawns two Embassy tasks:
-    //   • display_task  — renders frames via async I2C (CPU yields during flush)
-    //   • button_task   — monitors GPIO0 with hardware edge interrupts
-    //
-    // With async I2C the display no longer blocks Core 0, so it is safe to
-    // run the Wi-Fi stack and web server alongside the display.
+    let spi = esp_hal::spi::master::Spi::new(peripherals.SPI2, esp_hal::spi::master::Config::default()).unwrap()
+        .with_sck(peripherals.GPIO12)
+        .with_mosi(peripherals.GPIO11)
+        .with_miso(peripherals.GPIO13)
+        .into_async();
+
+    let cs = esp_hal::gpio::Output::new(peripherals.GPIO10, esp_hal::gpio::Level::High);
+    let dc = esp_hal::gpio::Output::new(peripherals.GPIO46, esp_hal::gpio::Level::Low);
+    let mut blk = esp_hal::gpio::Output::new(peripherals.GPIO45, esp_hal::gpio::Level::High);
+
     display::spawn_display_task(
         spawner,
-        peripherals.I2C0,
-        peripherals.GPIO8,
-        peripherals.GPIO9,
+        spi,
+        dc,
+        cs,
         boot_btn,
     );
     log::info!("Display + button tasks spawned");
