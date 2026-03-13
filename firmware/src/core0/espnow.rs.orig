@@ -68,16 +68,6 @@ pub fn is_radio_link_alive(now_ms: u64) -> bool {
 /// Interval between keep-alive beacons (milliseconds).
 const BEACON_INTERVAL_MS: u64 = 1_000;
 
-/// A raw payload to be transmitted over ESP-NOW.
-pub type EspNowTxPayload = heapless::Vec<u8, { ESPNOW_MAX_PAYLOAD as usize }>;
-
-/// Capacity of the ESP-NOW TX queue.
-const ESPNOW_TX_QUEUE_DEPTH: usize = 8;
-
-/// Shared channel: Router (Core 0) → ESP-NOW TX.
-pub static ESPNOW_TX_CHANNEL: embassy_sync::channel::Channel<CriticalSectionRawMutex, EspNowTxPayload, ESPNOW_TX_QUEUE_DEPTH> =
-    embassy_sync::channel::Channel::new();
-
 /// Maximum number of queued telemetry packets to drain per loop iteration.
 ///
 /// Limiting the drain count prevents the telemetry path from starving the
@@ -136,13 +126,6 @@ pub async fn espnow_rx_task(
                 }
                 Err(_) => break,
             }
-        }
-
-        // ── Drain outgoing commands from router ──────────────────────────────
-        for _ in 0..8 {
-            if let Ok(payload) = ESPNOW_TX_CHANNEL.try_receive() {
-                esp_now.send_async(&BROADCAST_ADDRESS, &payload).await.ok();
-            } else { break; }
         }
 
         // ── RX: wait for incoming packet or beacon deadline ───────────────────

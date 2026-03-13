@@ -148,10 +148,14 @@ fn route_intent(intent: abi::MovementIntent) {
                 right_bytes[0],
                 right_bytes[1],
             ];
-            // TODO: push `_payload` to the ESP-NOW TX queue once that
-            // channel exists.  For now the serialisation logic is in place
-            // and the motors on this board are left untouched (they are
-            // driven by the remote Worker).
+            #[cfg(feature = "espnow")]
+            {
+                let mut payload = crate::core0::espnow::EspNowTxPayload::new();
+                for byte in _payload.iter() {
+                    let _ = payload.push(*byte);
+                }
+                let _ = crate::core0::espnow::ESPNOW_TX_CHANNEL.try_send(payload);
+            }
         }
     }
 }

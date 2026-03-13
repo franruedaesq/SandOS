@@ -92,6 +92,7 @@ pub async fn brain_task(
     spawner: Spawner,
     io: Io,
     _wifi_init: &'static esp_wifi::EspWifiController<'static>,
+    #[cfg(feature = "espnow")] esp_now_token: esp_wifi::esp_now::EspNowWithWifiCreateToken,
 ) {
     log::info!("[brain] task starting");
 
@@ -106,7 +107,18 @@ pub async fn brain_task(
     // Build the ABI host context (LED pin, display handle, RGB LED, …).
     let abi_host = AbiHost::new(io, display, rgb_led);
 
-    // ESP-NOW disabled for WiFi debugging — will re-enable later.
+    // Start the ESP-NOW task if enabled.
+    #[cfg(feature = "espnow")]
+    {
+        log::info!("[brain] spawning espnow_rx_task");
+        spawner
+            .spawn(espnow::espnow_rx_task(
+                _wifi_init,
+                esp_now_token,
+                CMD_CHANNEL.sender(),
+            ))
+            .unwrap();
+    }
 
     // Start the Wasm engine task (also handles OTA hot-swap signals).
     log::info!("[brain] spawning wasm_run_task");
