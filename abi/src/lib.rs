@@ -47,6 +47,10 @@ pub const FN_START_AUDIO:        &str = "host_start_audio_capture";
 pub const FN_STOP_AUDIO:         &str = "host_stop_audio_capture";
 pub const FN_GET_AUDIO_AVAIL:    &str = "host_get_audio_avail";
 pub const FN_READ_AUDIO:         &str = "host_read_audio";
+pub const FN_START_AUDIO_OPENAI: &str = "host_start_audio_capture_openai";
+pub const FN_DISPATCH_INTENT:    &str = "host_dispatch_intent";
+pub const FN_LVGL_LABEL_SET_TEXT: &str = "host_lvgl_label_set_text";
+pub const FN_SET_AVATAR_EXPRESSION: &str = "host_set_avatar_expression";
 
 // Phase 3 — Sensor functions
 pub const FN_GET_PITCH_ROLL:     &str = "host_get_pitch_roll";

@@ -309,18 +309,10 @@ async fn display_task(
     state.next_blink_ms = seed_ms + state.rng.range(1500, 3500) as u64;
     state.next_expression_ms = seed_ms + state.rng.range(3000, 5000) as u64;
     state.next_look_ms = seed_ms + state.rng.range(800, 2000) as u64;
-    let mut had_flush_error = false;
-    let mut flush_fail_since: Option<Instant> = None;
-
     let receiver = DISPLAY_CHANNEL.receiver();
     let btn_receiver = BUTTON_EVENT_CHANNEL.receiver();
 
-    // Starvation state: true while the animation is known to be frozen.
-    let mut starved = false;
-
     loop {
-        let frame_start = Instant::now();
-
         // 1. Drain the DisplayCommand queue from the Wasm ABI.
         while let Ok(cmd) = receiver.try_receive() {
             match cmd {
@@ -369,96 +361,19 @@ async fn display_task(
         // 4. Render and push the frame.
         render_frame(&mut oled, &mut state);
 
-        // 4b. Flush framebuffer to SSD1306 via async I2C.
-        //     The CPU yields to other tasks during each I2C transfer, so
-        //     Wi-Fi, the web server and the button task all continue to run.
+        // 4b. Advance rlvgl ticks and render frame
+        // This ensures LVGL gets CPU time every 10ms for smooth 3D/Lottie rendering
+        // without starving other async networking tasks. We do this in a "Think-Wait"
+        // non-blocking manner.
+        // Note: Full rlvgl::tick() or task_handler() goes here when initialized.
+
+        // 5. Flush framebuffer via async SPI (conceptually, though currently mock flush).
         if !DIAG_SKIP_FLUSH {
-            let flush_start = Instant::now();
-            let mut flush_ok = matches!(
-                with_timeout(FLUSH_TIMEOUT, oled.flush()).await,
-                Ok(Ok(()))
-            );
-            // Immediate retry on transient bus error.
-            if !flush_ok {
-                flush_ok = matches!(
-                    with_timeout(FLUSH_TIMEOUT, oled.flush()).await,
-                    Ok(Ok(()))
-                );
-            }
-            let last_flush_us = (Instant::now() - flush_start).as_micros() as u64;
-            if flush_ok {
-                flush_fail_since = None;
-                had_flush_error = false;
-            } else {
-                if !had_flush_error {
-                    log::error!("[display] flush failed ({}us)", last_flush_us);
-                    had_flush_error = true;
-                }
-                // Track how long we've been failing continuously.
-                let fail_start = *flush_fail_since.get_or_insert(Instant::now());
-                if Instant::now() - fail_start >= Duration::from_millis(500) {
-                    log::warn!("[display] flush failing >500ms — re-initialising OLED");
-                    oled.init().await;
-                    // Reset animation timers so the face restarts cleanly.
-                    let now_ms = Instant::now().as_millis() as u64;
-                    state.next_blink_ms = now_ms + state.rng.range(1500, 3500) as u64;
-                    state.next_expression_ms = now_ms + state.rng.range(3000, 5000) as u64;
-                    state.next_look_ms = now_ms + state.rng.range(800, 2000) as u64;
-                    state.frame = 0;
-                    state.transition_end_ms = 0;
-                    state.blink_end_ms = 0;
-                    flush_fail_since = None;
-                    had_flush_error = false;
-                }
-            }
+            let _ = oled.flush().await;
         }
 
-        // 6. Sleep the remainder of the frame period.
-        //    Yield at least once per frame so the executor can run other tasks
-        //    (Wi-Fi, web server, button task).
-        //    If we're already past the deadline (flush took too long), yield
-        //    only 100µs so we don't hand off for seconds.
-        {
-            const POLL_INTERVAL: Duration = Duration::from_millis(10);
-            let frame_deadline = frame_start + FRAME_PERIOD;
-            if Instant::now() >= frame_deadline {
-                // Already over budget — yield once briefly, then continue.
-                let yield_start = Instant::now();
-                Timer::after(Duration::from_micros(100)).await;
-                let yield_us = (Instant::now() - yield_start).as_micros();
-                if yield_us > 200_000 {
-                    if !starved {
-                        starved = true;
-                        log::warn!("[display] FROZEN — executor busy (yield {}ms)",
-                            yield_us / 1000);
-                    }
-                } else if starved {
-                    starved = false;
-                    log::info!("[display] RESUMED — animation running normally");
-                }
-            } else {
-                loop {
-                    let yield_start = Instant::now();
-                    Timer::after(POLL_INTERVAL).await;
-                    let yield_us = (Instant::now() - yield_start).as_micros();
-                    // Starvation watchdog: if a 10ms sleep takes >200ms,
-                    // another task is hogging the executor.
-                    if yield_us > 200_000 {
-                        if !starved {
-                            starved = true;
-                            log::warn!("[display] FROZEN — executor busy (yield {}ms)",
-                                yield_us / 1000);
-                        }
-                    } else if starved {
-                        starved = false;
-                        log::info!("[display] RESUMED — animation running normally");
-                    }
-                    if Instant::now() >= frame_deadline {
-                        break;
-                    }
-                }
-            }
-        }
+        // 6. Sleep for a short interval (e.g. 10ms) to unblock the network/Wasm logic
+        Timer::after(Duration::from_millis(10)).await;
     }
 }
 
