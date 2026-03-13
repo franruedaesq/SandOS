@@ -13,8 +13,8 @@ use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Size},
-    mono_font::{ascii::FONT_6X10, MonoTextStyle},
-    pixelcolor::{BinaryColor, Rgb565, RgbColor},
+    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    pixelcolor::{Rgb565, RgbColor},
     prelude::{Drawable, Point},
     text::Text,
     Pixel,
@@ -160,6 +160,8 @@ async fn display_task(
     let receiver = DISPLAY_CHANNEL.receiver();
     let btn_receiver = BUTTON_EVENT_CHANNEL.receiver();
 
+    let mut first_frame = true;
+
     loop {
         let frame_start = Instant::now();
 
@@ -178,7 +180,8 @@ async fn display_task(
             }
         }
 
-        render_frame(&mut oled);
+        render_frame(&mut oled, first_frame);
+        first_frame = false;
 
         let _ = with_timeout(FLUSH_TIMEOUT, oled.flush()).await;
 
@@ -191,24 +194,32 @@ async fn display_task(
     }
 }
 
-fn render_frame(oled: &mut OledDisplay) {
-    let _ = oled.clear(Rgb565::BLACK);
+fn render_frame(oled: &mut OledDisplay, first_frame: bool) {
+    if first_frame {
+        let _ = oled.clear(Rgb565::BLACK);
+    }
 
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::GREEN);
+    let style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(Rgb565::GREEN)
+        .background_color(Rgb565::BLACK)
+        .build();
 
-    let _ = Text::new("--- SandOS Hardware Diag ---", Point::new(10, 20), style).draw(oled);
-    let _ = Text::new("ESP32-S3 Core: OK", Point::new(10, 40), style).draw(oled);
-    let _ = Text::new("Display (ILI9341): OK", Point::new(10, 60), style).draw(oled);
-    let _ = Text::new("Wasm VM: OK", Point::new(10, 80), style).draw(oled);
-    let _ = Text::new("Touchscreen I2C: OK", Point::new(10, 100), style).draw(oled);
-    let _ = Text::new("Audio I2S: OK", Point::new(10, 120), style).draw(oled);
-    let _ = Text::new("MicroSD SDIO: OK", Point::new(10, 140), style).draw(oled);
-    let _ = Text::new("Battery ADC: OK", Point::new(10, 160), style).draw(oled);
-    let _ = Text::new("UART Serial: OK", Point::new(10, 180), style).draw(oled);
-    let _ = Text::new("RGB LED: OK", Point::new(10, 200), style).draw(oled);
+    if first_frame {
+        let _ = Text::new("--- SandOS Hardware Diag ---", Point::new(10, 20), style).draw(oled);
+        let _ = Text::new("ESP32-S3 Core: OK           ", Point::new(10, 40), style).draw(oled);
+        let _ = Text::new("Display (ILI9341): OK       ", Point::new(10, 60), style).draw(oled);
+        let _ = Text::new("Wasm VM: OK                 ", Point::new(10, 80), style).draw(oled);
+        let _ = Text::new("Touchscreen I2C: OK         ", Point::new(10, 100), style).draw(oled);
+        let _ = Text::new("Audio I2S: OK               ", Point::new(10, 120), style).draw(oled);
+        let _ = Text::new("MicroSD SDIO: OK            ", Point::new(10, 140), style).draw(oled);
+        let _ = Text::new("Battery ADC: OK             ", Point::new(10, 160), style).draw(oled);
+        let _ = Text::new("UART Serial: OK             ", Point::new(10, 180), style).draw(oled);
+        let _ = Text::new("RGB LED: OK                 ", Point::new(10, 200), style).draw(oled);
+    }
 
-    let mut wifi_str = heapless::String::<32>::new();
-    let _ = write!(wifi_str, "WiFi: {}", crate::wifi::wifi_status());
+    let mut wifi_str = heapless::String::<64>::new();
+    let _ = write!(wifi_str, "WiFi: {:<20}", crate::wifi::wifi_status());
     let _ = Text::new(&wifi_str, Point::new(10, 220), style).draw(oled);
 }
 
@@ -223,7 +234,7 @@ struct OledDisplay<'a> {
 impl<'a> OledDisplay<'a> {
     fn new(di: DiInterface<'a>) -> Self {
         let display = Builder::new(mipidsi::models::ILI9341Rgb565, di)
-            .orientation(mipidsi::options::Orientation::default())
+            .orientation(mipidsi::options::Orientation::default().flip_horizontal())
             .init(&mut embassy_time::Delay)
             .unwrap();
 
