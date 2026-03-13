@@ -366,8 +366,8 @@ async fn display_task(
                 // DISPLAY_WIDTH = 240, DISPLAY_HEIGHT = 320. The draw loops use X: 0..240, Y: 0..320, but the rendering bounds in display/mod.rs are hardcoded like 128 and 64!
                 // Let's map X to 0-128 and Y to 0-64 simply by scaling.
                 // x is roughly 0..240 (or 240..0 if flipped? We'll see). Let's just assume simple scaling:
-                let vx = x as i32;
-                let vy = y as i32;
+                let vx = (x as u32 * 128 / 240) as i32;
+                let vy = (y as u32 * 64 / 320) as i32;
 
                 match state.ui_mode {
                     UiMode::Face => {
@@ -377,9 +377,9 @@ async fn display_task(
                         log::info!("[display] touch face -> TopMenu");
                     }
                     UiMode::TopMenu | UiMode::SubMenu(_) | UiMode::WebMenu => {
-                        // Menu is on the left (x < 120). Check if touch is in the menu area.
-                        if vx < 120 {
-                            let slot = (vy / 40) as usize;
+                        // Menu is on the left (x < 63). Check if touch is in the menu area.
+                        if vx < 64 {
+                            let slot = (vy / 16) as usize;
                             if let UiMode::TopMenu = state.ui_mode {
                                 let items = get_menu_items(&state.ui_mode);
                                 // Determine current scroll offset
@@ -625,10 +625,11 @@ enum MenuItemAction {
 // ── UI state machine ──────────────────────────────────────────────────────────
 
 const TOP_MENU: &[MenuItem] = &[
-    MenuItem { label: "Help",  action: MenuItemAction::Back },
-    MenuItem { label: "Talk",  action: MenuItemAction::OpenWebMenu },
-    MenuItem { label: "Info",  action: MenuItemAction::EnterSystemMonitor },
-    MenuItem { label: "Clock", action: MenuItemAction::EnterClockView },
+    MenuItem { label: "Tools",     action: MenuItemAction::OpenSub(MenuCategory::Tools) },
+    MenuItem { label: "Info",      action: MenuItemAction::OpenSub(MenuCategory::Info) },
+    MenuItem { label: "Transport", action: MenuItemAction::OpenSub(MenuCategory::Transport) },
+    MenuItem { label: "Web",       action: MenuItemAction::OpenWebMenu },
+    MenuItem { label: "Settings",  action: MenuItemAction::OpenSub(MenuCategory::Settings) },
 ];
 
 const TOOLS_MENU: &[MenuItem] = &[
@@ -680,7 +681,6 @@ fn get_menu_selected(state: &FaceState) -> u8 {
 /// Helper to cleanly return to Face mode, resetting all transient state.
 fn return_to_face(state: &mut FaceState) {
     state.ui_mode = UiMode::Face;
-    state.force_clear = true;
     state.text.clear();
     state.expression = EyeExpression::Neutral;
     state.expression_override = false;
@@ -966,11 +966,6 @@ struct FaceState {
     was_touched: bool,
     // ── Rich animation state ──
     rng: Rng,
-    force_clear: bool,
-    prev_expression: EyeExpression,
-    prev_bob_y: i32,
-    prev_blinking: bool,
-    prev_eye_look_x: i32,
     /// Millisecond timestamp when the next blink should start.
     next_blink_ms: u64,
     /// Millisecond timestamp when the current blink ends (0 = not blinking).
@@ -1013,11 +1008,6 @@ impl Default for FaceState {
             last_short_press_time: Instant::from_ticks(0),
             was_touched: false,
             rng: Rng(0xDEAD_BEEF),
-            force_clear: true,
-            prev_expression: EyeExpression::Neutral,
-            prev_bob_y: 0,
-            prev_blinking: false,
-            prev_eye_look_x: 0,
             next_blink_ms: 2500,
             blink_end_ms: 0,
             next_expression_ms: 4000,
@@ -1149,57 +1139,35 @@ fn render_full_face(oled: &mut TftDisplay, state: &mut FaceState) {
     let in_transition = now_ms < state.transition_end_ms;
     let blinking = now_ms < state.blink_end_ms || in_transition;
 
-    if state.force_clear {
-        let _ = oled.clear(Rgb565::WHITE);
-        state.force_clear = false;
-    } else {
-        let eye_cy_prev = 140 + state.prev_bob_y;
-        let le_cx_prev = 60 + state.prev_eye_look_x;
-        let re_cx_prev = 180 + state.prev_eye_look_x;
-        let mouth_cy_prev = 220 + state.prev_bob_y;
-
-        // Erase old face
-        draw_eyes(oled, state.prev_expression, le_cx_prev, re_cx_prev, eye_cy_prev, state.prev_blinking, 2, Rgb565::WHITE, Rgb565::WHITE);
-        draw_mouth(oled, state.prev_expression, 120, mouth_cy_prev, 2, now_ms, Rgb565::WHITE, Rgb565::WHITE);
-
-        let blush_color = Rgb565::WHITE;
-        let cheek_r = 12;
-        let _ = Circle::new(Point::new(le_cx_prev - 32, eye_cy_prev + 16), (cheek_r * 2) as u32)
-            .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
-        let _ = Circle::new(Point::new(re_cx_prev + 8, eye_cy_prev + 16), (cheek_r * 2) as u32)
-            .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
-    }
-
-    // Update prev state
-    state.prev_expression = state.expression;
-    state.prev_bob_y = bob_y;
-    state.prev_blinking = blinking;
-    state.prev_eye_look_x = state.eye_look_x;
+    oled.clear(Rgb565::BLACK);
 
     // ── Eyes ──
-    let eye_cy = 140 + bob_y;
-    let le_cx = 60 + state.eye_look_x; // left-eye centre X
-    let re_cx = 180 + state.eye_look_x; // right-eye centre X
-    draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 2, Rgb565::BLACK, Rgb565::WHITE);
+    // Centred on 128×64: eyes at y≈24, spread wide for kawaii proportions
+    let eye_cy = 22 + bob_y;
+    let le_cx = 38 + state.eye_look_x; // left-eye centre X
+    let re_cx = 90 + state.eye_look_x; // right-eye centre X
+    draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 1);
+
 
     // ── Cheeks (Blush) ──
-    let blush_color = Rgb565::new(31, 45, 23); // matching pink for white bg
-    let _ = Circle::new(Point::new(le_cx - 32, eye_cy + 16), (cheek_r * 2) as u32)
+    let blush_color = Rgb565::new(31, 32, 16); // light pink
+    let cheek_r = 6;
+    let _ = Circle::new(Point::new(le_cx - 16, eye_cy + 8), (cheek_r * 2) as u32)
         .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
-    let _ = Circle::new(Point::new(re_cx + 8, eye_cy + 16), (cheek_r * 2) as u32)
+    let _ = Circle::new(Point::new(re_cx + 4, eye_cy + 8), (cheek_r * 2) as u32)
         .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
 
     // ── Mouth ──
-    let mouth_cy = 220 + bob_y;
-    draw_mouth(oled, state.expression, 120, mouth_cy, 2, now_ms, Rgb565::BLACK, Rgb565::WHITE);
+    let mouth_cy = 46 + bob_y;
+    draw_mouth(oled, state.expression, 64, mouth_cy, 1, now_ms);
 
     // ── Status text overlay ──
     if !state.text.is_empty() {
-        let text_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
-        let _ = Rectangle::new(Point::new(0, 300), Size::new(DISPLAY_WIDTH, 10))
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+        let text_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+        let _ = Rectangle::new(Point::new(0, 54), Size::new(DISPLAY_WIDTH, 10))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(oled);
-        let _ = Text::new(&state.text, Point::new(0, 310), text_style).draw(oled);
+        let _ = Text::new(&state.text, Point::new(0, 63), text_style).draw(oled);
     }
 }
 
@@ -1212,12 +1180,10 @@ fn draw_eyes(
     eye_cy: i32,
     blinking: bool,
     scale: i32,
-    color_on: Rgb565,
-    color_off: Rgb565,
 ) {
-    let fill_on = PrimitiveStyle::with_fill(color_on);
-    let fill_off = PrimitiveStyle::with_fill(color_off);
-    let stroke2 = PrimitiveStyle::with_stroke(color_on, if scale > 0 { 2 } else { 1 });
+    let fill_on = PrimitiveStyle::with_fill(Rgb565::WHITE);
+    let fill_off = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let stroke2 = PrimitiveStyle::with_stroke(Rgb565::WHITE, if scale > 0 { 2 } else { 1 });
 
     // Eye radius scales: full=12, mini=6
     let r = if scale > 0 { 12i32 } else { 6i32 };
@@ -1349,8 +1315,8 @@ fn draw_eyes(
         }
         EyeExpression::Heart => {
             // Heart eyes: pixel-art hearts
-            draw_heart(oled, le_cx, eye_cy, r, color_on);
-            draw_heart(oled, re_cx, eye_cy, r, color_on);
+            draw_heart(oled, le_cx, eye_cy, r);
+            draw_heart(oled, re_cx, eye_cy, r);
         }
         EyeExpression::Sleepy => {
             // Sleepy: U-shaped closed eyes (like the image row 2 col 2)
@@ -1374,8 +1340,8 @@ fn draw_eyes(
 }
 
 /// Draw a filled pixel-art heart centred at (cx, cy) with radius `r`.
-fn draw_heart(oled: &mut TftDisplay, cx: i32, cy: i32, r: i32, color_on: Rgb565) {
-    let fill_on = PrimitiveStyle::with_fill(color_on);
+fn draw_heart(oled: &mut TftDisplay, cx: i32, cy: i32, r: i32) {
+    let fill_on = PrimitiveStyle::with_fill(Rgb565::WHITE);
     // Heart = two overlapping circles on top + triangle pointing down
     let hr = r * 2 / 3; // radius of each lobe
     // Left lobe
@@ -1394,7 +1360,7 @@ fn draw_heart(oled: &mut TftDisplay, cx: i32, cy: i32, r: i32, color_on: Rgb565)
             let _ = Line::new(
                 Point::new(cx - half_w, cy + dy),
                 Point::new(cx + half_w, cy + dy),
-            ).into_styled(PrimitiveStyle::with_stroke(color_on, 1)).draw(oled);
+            ).into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1)).draw(oled);
         }
     }
 }
@@ -1409,13 +1375,11 @@ fn draw_mouth(
     cy: i32,
     scale: i32,
     _now_ms: u64,
-    color_on: Rgb565,
-    color_off: Rgb565,
 ) {
-    let fill_on = PrimitiveStyle::with_fill(color_on);
-    let fill_off = PrimitiveStyle::with_fill(color_off);
-    let stroke = PrimitiveStyle::with_stroke(color_on, 1);
-    let stroke2 = PrimitiveStyle::with_stroke(color_on, if scale > 0 { 2 } else { 1 });
+    let fill_on = PrimitiveStyle::with_fill(Rgb565::WHITE);
+    let fill_off = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let stroke = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
+    let stroke2 = PrimitiveStyle::with_stroke(Rgb565::WHITE, if scale > 0 { 2 } else { 1 });
     // Mouth dimensions scale with mode
     let mr = if scale > 0 { 10i32 } else { 6i32 }; // mouth radius for curves
 
@@ -1504,11 +1468,11 @@ fn render_menu_mode(oled: &mut TftDisplay, state: &mut FaceState) {
     let now_ms = Instant::now().as_millis() as u64;
     tick_animation(state, now_ms);
 
-    oled.clear(Rgb565::WHITE);
+    oled.clear(Rgb565::BLACK);
 
-    // Vertical divider at x=120.
-    let divider_style = PrimitiveStyle::with_stroke(Rgb565::BLACK, 1);
-    let _ = Line::new(Point::new(120, 0), Point::new(120, 320))
+    // Vertical divider at x=63.
+    let divider_style = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
+    let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
         .into_styled(divider_style)
         .draw(oled);
 
@@ -1518,8 +1482,8 @@ fn render_menu_mode(oled: &mut TftDisplay, state: &mut FaceState) {
 
 /// Draw the left 63-px menu panel.
 fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
-    let normal_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
-    let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let normal_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
 
     if let UiMode::WebMenu = state.ui_mode {
         render_web_menu_panel(oled, state);
@@ -1532,7 +1496,7 @@ fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
     let total = items.len();
     let max_visible: usize = 4;
 
-    // Scrolling window
+    // Scrolling window: show 4 items at a time (4 × 16 = 64px fits).
     let scroll_start = if sel >= max_visible {
         sel - (max_visible - 1)
     } else {
@@ -1545,23 +1509,23 @@ fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
             break;
         }
         let label = items[i].label;
-        let y_top = (slot as i32) * 40;
+        let y_top = (slot as i32) * 16;
         if i == sel {
-            let _ = Rectangle::new(Point::new(0, y_top), Size::new(119, 40))
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            let _ = Rectangle::new(Point::new(0, y_top), Size::new(63, 16))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
                 .draw(oled);
-            let _ = Text::new(label, Point::new(8, y_top + 24), inverted_style).draw(oled);
+            let _ = Text::new(label, Point::new(4, y_top + 12), inverted_style).draw(oled);
         } else {
-            let _ = Text::new(label, Point::new(8, y_top + 24), normal_style).draw(oled);
+            let _ = Text::new(label, Point::new(4, y_top + 12), normal_style).draw(oled);
         }
     }
 
     // Scroll indicators
     if scroll_start > 0 {
-        let _ = Text::new("\x1e", Point::new(104, 20), normal_style).draw(oled);
+        let _ = Text::new("\x1e", Point::new(56, 8), normal_style).draw(oled);
     }
     if scroll_start + max_visible < total {
-        let _ = Text::new("\x1f", Point::new(104, 300), normal_style).draw(oled);
+        let _ = Text::new("\x1f", Point::new(56, 62), normal_style).draw(oled);
     }
 }
 
@@ -2071,49 +2035,28 @@ fn render_vienna_detail(oled: &mut TftDisplay, state: &FaceState) {
 }
 
 /// Draw the mini animated face on the right 64-px panel (x=64..127).
-fn render_mini_face(oled: &mut TftDisplay, state: &mut FaceState) {
+fn render_mini_face(oled: &mut TftDisplay, state: &FaceState) {
     let now_ms = Instant::now().as_millis() as u64;
     let blinking = now_ms < state.blink_end_ms || now_ms < state.transition_end_ms;
 
-    let bob_y = breathing_offset(now_ms);
+    let bob_y = breathing_offset(now_ms) / 2; // subtler in mini
 
-    let eye_cy_prev = 160 + state.prev_bob_y;
-    let le_cx_prev = 150 + state.prev_eye_look_x;
-    let re_cx_prev = 210 + state.prev_eye_look_x;
-    let mouth_cy_prev = 200 + state.prev_bob_y;
+    // Eye positions centred in the right 64px panel
+    let le_cx = 80 + state.eye_look_x / 2;
+    let re_cx = 110 + state.eye_look_x / 2;
+    let eye_cy = 22 + bob_y;
 
-    // Erase old mini face
-    draw_eyes(oled, state.prev_expression, le_cx_prev, re_cx_prev, eye_cy_prev, state.prev_blinking, 1, Rgb565::WHITE, Rgb565::WHITE);
-    draw_mouth(oled, state.prev_expression, 180, mouth_cy_prev, 1, now_ms, Rgb565::WHITE, Rgb565::WHITE);
+    draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 0);
 
-    let blush_color = Rgb565::WHITE;
-    let cheek_r = 6;
-    let _ = Circle::new(Point::new(le_cx_prev - 16, eye_cy_prev + 8), (cheek_r * 2) as u32)
-        .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
-    let _ = Circle::new(Point::new(re_cx_prev + 4, eye_cy_prev + 8), (cheek_r * 2) as u32)
-        .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
-
-    // Update prev state
-    state.prev_expression = state.expression;
-    state.prev_bob_y = bob_y;
-    state.prev_blinking = blinking;
-    state.prev_eye_look_x = state.eye_look_x;
-
-    let eye_cy = 160 + bob_y;
-    let le_cx = 150 + state.eye_look_x;
-    let re_cx = 210 + state.eye_look_x;
-
-    draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 1, Rgb565::BLACK, Rgb565::WHITE);
 
     // ── Cheeks (Blush) ──
-    let blush_color = Rgb565::new(31, 45, 23); // matching pink for white bg
-    let _ = Circle::new(Point::new(le_cx - 16, eye_cy + 8), (cheek_r * 2) as u32)
+    let blush_color = Rgb565::new(31, 32, 16); // light pink
+    let cheek_r = 3;
+    let _ = Circle::new(Point::new(le_cx - 8, eye_cy + 4), (cheek_r * 2) as u32)
         .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
-    let _ = Circle::new(Point::new(re_cx + 4, eye_cy + 8), (cheek_r * 2) as u32)
+    let _ = Circle::new(Point::new(re_cx + 2, eye_cy + 4), (cheek_r * 2) as u32)
         .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
 
     // Mini mouth
-    let mouth_cy = 200 + bob_y;
-    draw_mouth(oled, state.expression, 180, mouth_cy, 1, now_ms, Rgb565::BLACK, Rgb565::WHITE);
+    draw_mouth(oled, state.expression, 95, 38 + bob_y, 0, now_ms);
 }
-
