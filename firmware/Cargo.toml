@@ -65,6 +65,8 @@ embedded-hal-bus = "0.2"
 
 # ── RGB LED (WS2812 NeoPixel) ─────────────────────────────────────────────────
 smart-leds = "0.3"
+ft6336u-driver = "1.0.0"
+
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 static_cell = { version = "2", features = ["nightly"] }
