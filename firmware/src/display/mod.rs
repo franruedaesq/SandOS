@@ -37,6 +37,7 @@ use abi::{status, EyeExpression};
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embedded_hal::spi::SpiBus;
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Size},
@@ -2357,8 +2358,14 @@ impl OledDisplay {
             }
         }
 
-        for chunk in self.rgb565.chunks(LCD_DATA_CHUNK) {
-            self.write_data(chunk)?;
+        let mut offset = 0usize;
+        while offset < self.rgb565.len() {
+            let end = (offset + LCD_DATA_CHUNK).min(self.rgb565.len());
+            let mut chunk = [0u8; LCD_DATA_CHUNK];
+            let len = end - offset;
+            chunk[..len].copy_from_slice(&self.rgb565[offset..end]);
+            self.write_data(&chunk[..len])?;
+            offset = end;
         }
         Ok(())
     }

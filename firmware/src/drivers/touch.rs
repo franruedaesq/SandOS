@@ -5,7 +5,6 @@ use esp_hal::{
     i2c::master::{BusTimeout, Config as I2cConfig, I2c},
     peripherals::I2C1,
     time::RateExtU32,
-    Async,
 };
 
 use crate::hardware_profile::{set_touch_state, ModuleState};
