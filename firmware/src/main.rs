@@ -173,18 +173,16 @@ async fn main(spawner: Spawner) {
     log::info!("Display + button tasks spawned");
 
     log::info!("DISPLAY BACKEND: ILI9341 SPI2 (CS=10 DC=46 SCK=12 MOSI=11 MISO=13 BL=45)");
-    // Runtime module health starts as UNKNOWN unless actively verified.
-    // The display task upgrades display state to ONLINE once the panel init succeeds.
-    hardware_profile::set_display_state(hardware_profile::ModuleState::Unknown);
-    hardware_profile::set_touch_state(hardware_profile::ModuleState::Unknown);
-    hardware_profile::set_audio_state(hardware_profile::ModuleState::Unknown);
-    hardware_profile::set_sd_state(hardware_profile::ModuleState::Unknown);
-    hardware_profile::set_battery_state(hardware_profile::ModuleState::Unknown);
-    hardware_profile::set_rgb_state(hardware_profile::ModuleState::Online);
-    hardware_profile::set_uart_state(hardware_profile::ModuleState::Online);
+    // Runtime module health defaults are centralized in the board profile.
+    hardware_profile::init_module_states();
     // ── Hardware profile boot diagnostics (target board pin map) ─────────────
     log::info!("Board profile: {}", hardware_profile::CHIP_NAME);
-    log::info!("External flash: {}MB QSPI", hardware_profile::FLASH_SIZE_MB);
+    log::info!(
+        "Memory: ROM={}KB SRAM={}KB Flash={}MB QSPI",
+        hardware_profile::ROM_SIZE_KB,
+        hardware_profile::SRAM_SIZE_KB,
+        hardware_profile::FLASH_SIZE_MB
+    );
     log::info!(
         "LCD ILI9341 SPI pins: CS={} DC={} SCK={} MOSI={} MISO={} BL={}",
         hardware_profile::LCD_CS,
@@ -225,6 +223,20 @@ async fn main(spawner: Spawner) {
         hardware_profile::UART0_RX,
         hardware_profile::UART0_TX,
         hardware_profile::BATTERY_ADC
+    );
+    log::info!(
+        "Buttons/USB: BOOT={} RESET={} USB_UART_RX={} USB_UART_TX={}",
+        hardware_profile::BOOT_BUTTON,
+        hardware_profile::RESET_SIGNAL,
+        hardware_profile::USB_UART_RX,
+        hardware_profile::USB_UART_TX
+    );
+    log::info!(
+        "Expansion GPIOs: [{}, {}, {}, {}]",
+        hardware_profile::EXP_GPIO2,
+        hardware_profile::EXP_GPIO3,
+        hardware_profile::EXP_GPIO14,
+        hardware_profile::EXP_GPIO21
     );
     let diag_line = hardware_profile::boot_status_line();
     display::set_status_text(diag_line.as_str());

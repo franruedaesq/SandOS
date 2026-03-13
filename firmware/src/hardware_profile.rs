@@ -13,6 +13,8 @@ use esp_hal::{
 };
 
 pub const CHIP_NAME: &str = "ESP32-S3 (dual-core LX7 @240MHz)";
+pub const ROM_SIZE_KB: u32 = 384;
+pub const SRAM_SIZE_KB: u32 = 512;
 pub const FLASH_SIZE_MB: u32 = 16;
 
 // LCD (ILI9341V, SPI)
@@ -50,6 +52,18 @@ pub const RGB_LED: u8 = 42;
 pub const UART0_RX: u8 = 43;
 pub const UART0_TX: u8 = 44;
 pub const BATTERY_ADC: u8 = 9;
+pub const BOOT_BUTTON: u8 = 0;
+pub const RESET_SIGNAL: &str = "EN";
+
+// Expansion socket
+pub const EXP_GPIO2: u8 = 2;
+pub const EXP_GPIO3: u8 = 3;
+pub const EXP_GPIO14: u8 = 14;
+pub const EXP_GPIO21: u8 = 21;
+
+// USB-C / UART bridge
+pub const USB_UART_RX: u8 = UART0_RX;
+pub const USB_UART_TX: u8 = UART0_TX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -114,6 +128,23 @@ pub fn set_rgb_state(state: ModuleState) {
 
 pub fn set_uart_state(state: ModuleState) {
     UART_STATE.store(state as u8, Ordering::Relaxed);
+}
+
+pub fn init_module_states() {
+    // Display starts UNKNOWN and turns ONLINE once the init sequence succeeds.
+    set_display_state(ModuleState::Unknown);
+
+    // Touch has an active probe task and starts as CONFIGURED until first probe result.
+    set_touch_state(ModuleState::Configured);
+
+    // Audio/SD/Battery drivers are not probed yet, but their pins are routed and ready.
+    set_audio_state(ModuleState::Configured);
+    set_sd_state(ModuleState::Configured);
+    set_battery_state(ModuleState::Configured);
+
+    // RGB + UART are initialized during early boot.
+    set_rgb_state(ModuleState::Online);
+    set_uart_state(ModuleState::Online);
 }
 
 pub struct ModuleSnapshot {
