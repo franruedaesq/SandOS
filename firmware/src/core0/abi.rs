@@ -54,15 +54,15 @@
 //!   push audio snapshots into the fallback inference channel when the radio
 //!   link is detected as silent.
 use abi::{
-    status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent,
-    OdometryTelemetry, OtaState, OtaStatus, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
+    status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent, OdometryTelemetry, OtaState,
+    OtaStatus, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
     MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_STATUS_SIZE,
 };
 use esp_hal::gpio::Io;
 
 use crate::display::DisplayDriver;
 use crate::rgb_led::RgbLedDriver;
-use crate::{inference, message_bus, motors, router, sensors, telemetry};
+use crate::{drivers::audio, inference, message_bus, motors, router, sensors, telemetry};
 
 // ── Host state ────────────────────────────────────────────────────────────────
 
@@ -83,6 +83,9 @@ pub struct AbiHost {
 
     /// Whether the I2S microphone is currently streaming.
     pub audio_active: bool,
+
+    /// Total number of RX overrun events observed while capture was active.
+    pub audio_overruns: u32,
 
     /// Simple ring buffer for incoming I2S audio data (8 KiB).
     pub audio_buf: heapless::Deque<u8, 8192>,
@@ -116,6 +119,7 @@ impl AbiHost {
             boot_time_ms: 0,
             display,
             audio_active: false,
+            audio_overruns: 0,
             audio_buf: heapless::Deque::new(),
             ota_state: OtaState::Idle,
             ota_expected_size: 0,
@@ -196,17 +200,22 @@ impl AbiHost {
     pub fn start_audio_capture(&mut self) -> i32 {
         self.audio_active = true;
         self.audio_buf.clear();
+        audio::start_capture();
+        self.refresh_audio_stats();
         status::OK
     }
 
     /// Stop microphone streaming.
     pub fn stop_audio_capture(&mut self) -> i32 {
         self.audio_active = false;
+        audio::stop_capture();
+        self.refresh_audio_stats();
         status::OK
     }
 
     /// Return the number of bytes currently available in the audio ring buffer.
-    pub fn get_audio_avail(&self) -> i32 {
+    pub fn get_audio_avail(&mut self) -> i32 {
+        self.drain_audio_frames();
         self.audio_buf.len() as i32
     }
 
@@ -218,11 +227,41 @@ impl AbiHost {
         if out.len() as u32 > MAX_AUDIO_READ {
             return status::ERR_BOUNDS;
         }
+
+        self.drain_audio_frames();
+
         let n = out.len().min(self.audio_buf.len());
         for byte in out.iter_mut().take(n) {
             *byte = self.audio_buf.pop_front().unwrap_or(0);
         }
+
+        self.refresh_audio_stats();
         n as i32
+    }
+
+    /// Drain pending DMA frames from the microphone channel into `audio_buf`.
+    fn drain_audio_frames(&mut self) {
+        let mut drained_any = false;
+        while let Ok(frame) = audio::AUDIO_CAPTURE_CHANNEL.try_receive() {
+            drained_any = true;
+            for sample in frame {
+                if self.audio_buf.is_full() {
+                    self.audio_buf.pop_front();
+                    self.audio_overruns = self.audio_overruns.saturating_add(1);
+                }
+                self.audio_buf.push_back(sample).ok();
+            }
+        }
+        if drained_any && !self.audio_buf.is_empty() {
+            self.push_audio_for_inference();
+        }
+        self.refresh_audio_stats();
+    }
+
+    /// Refresh local overrun counters from the RX producer-side stats.
+    fn refresh_audio_stats(&mut self) {
+        let (driver_overruns, _dropped_bytes) = audio::capture_stats();
+        self.audio_overruns = self.audio_overruns.max(driver_overruns);
     }
 
     // ── Phase 3 — Sensors ─────────────────────────────────────────────────────
@@ -432,10 +471,10 @@ impl AbiHost {
             return status::ERR_BOUNDS;
         }
         let snapshot = OtaStatus {
-            state:          self.ota_state,
+            state: self.ota_state,
             bytes_received: self.ota_bytes_received,
-            total_size:     self.ota_expected_size,
-            swap_count:     self.hot_swap_count,
+            total_size: self.ota_expected_size,
+            swap_count: self.hot_swap_count,
         };
         snapshot.to_bytes(out);
         status::OK
