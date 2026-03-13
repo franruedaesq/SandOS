@@ -40,11 +40,12 @@
 extern crate alloc;
 
 use abi::{
-    validate_ptr_len, ImuReading, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
-    HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
-    FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS,
-    FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT,
-    INFERENCE_RESULT_SIZE, OTA_STATUS_SIZE, status,
+    validate_ptr_len, ImuReading, TouchEventData, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    MAX_TOUCH_DEQUEUE, TOUCH_EVENT_SIZE, HOST_MODULE, FN_DEBUG_LOG, FN_DEQUEUE_TOUCH_EVENT,
+    FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE, FN_GET_OTA_STATUS,
+    FN_GET_PITCH_ROLL, FN_GET_TOUCH_QUEUE_LEN, FN_GET_UPTIME_MS, FN_READ_AUDIO,
+    FN_SET_BRIGHTNESS, FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED,
+    FN_WRITE_TEXT, INFERENCE_RESULT_SIZE, OTA_STATUS_SIZE, status,
 };
 use alloc::vec;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Receiver};
@@ -441,6 +442,56 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                         .copy_from_slice(&tmp);
                 }
                 status
+            },
+        )
+        .unwrap();
+
+    // ── Phase 10 — Touch input ────────────────────────────────────────────────
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_GET_TOUCH_QUEUE_LEN,
+            |caller: Caller<'_, *mut AbiHost>| -> i32 {
+                let host = unsafe { &mut **caller.data() };
+                host.get_touch_queue_len()
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_DEQUEUE_TOUCH_EVENT,
+            |mut caller: Caller<'_, *mut AbiHost>, out_ptr: i32, max_events: i32| -> i32 {
+                if max_events < 0 || max_events as u32 > MAX_TOUCH_DEQUEUE {
+                    return status::ERR_BOUNDS;
+                }
+                let byte_len = (max_events as u32).saturating_mul(TOUCH_EVENT_SIZE);
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(out_ptr as u32, byte_len, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+
+                let host = unsafe { &mut **caller.data() };
+                let mut tmp = [TouchEventData::default(); MAX_TOUCH_DEQUEUE as usize];
+                let n = host.dequeue_touch_events(&mut tmp[..max_events as usize]);
+                if n < 0 {
+                    return n;
+                }
+
+                let data = mem.data_mut(&mut caller);
+                for (i, ev) in tmp.iter().take(n as usize).enumerate() {
+                    let start = out_ptr as usize + i * TOUCH_EVENT_SIZE as usize;
+                    let end = start + TOUCH_EVENT_SIZE as usize;
+                    let _ = ev.to_bytes(&mut data[start..end]);
+                }
+
+                n
             },
         )
         .unwrap();

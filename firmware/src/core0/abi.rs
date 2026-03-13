@@ -55,8 +55,8 @@
 //!   link is detected as silent.
 use abi::{
     status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent, OdometryTelemetry, OtaState,
-    OtaStatus, TelemetryPacket, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
-    MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_STATUS_SIZE,
+    OtaStatus, TelemetryPacket, TouchEventData, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ,
+    MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES, MAX_TOUCH_DEQUEUE, OTA_STATUS_SIZE,
 };
 use esp_hal::gpio::Io;
 
@@ -90,6 +90,9 @@ pub struct AbiHost {
     /// Simple ring buffer for incoming I2S audio data (8 KiB).
     pub audio_buf: heapless::Deque<u8, 8192>,
 
+    /// Host-owned touch event queue consumed by Wasm ABI polling.
+    pub touch_events: heapless::Deque<TouchEventData, 32>,
+
     // Phase 8 — OTA Hot-Swap Engine
     /// Current state of the OTA state machine.
     pub ota_state: OtaState,
@@ -121,6 +124,7 @@ impl AbiHost {
             audio_active: false,
             audio_overruns: 0,
             audio_buf: heapless::Deque::new(),
+            touch_events: heapless::Deque::new(),
             ota_state: OtaState::Idle,
             ota_expected_size: 0,
             ota_bytes_received: 0,
@@ -452,6 +456,45 @@ impl AbiHost {
         }
         // Non-blocking: silently discard if the queue is full.
         router::AUDIO_INFERENCE_CHANNEL.try_send(snapshot).ok();
+    }
+
+    /// Drain touch events captured by the FT6336 driver into the host-owned queue.
+    fn drain_touch_events(&mut self) {
+        while let Ok(ev) = crate::drivers::touch::host_receiver().try_receive() {
+            let phase = match ev.phase {
+                crate::drivers::touch::TouchPhase::Down => 0,
+                crate::drivers::touch::TouchPhase::Move => 1,
+                crate::drivers::touch::TouchPhase::Up => 2,
+            };
+            if self.touch_events.is_full() {
+                self.touch_events.pop_front();
+            }
+            let _ = self.touch_events.push_back(TouchEventData {
+                phase,
+                id: ev.id as u32,
+                x: ev.x as u32,
+                y: ev.y as u32,
+            });
+        }
+    }
+
+    /// Return the number of queued touch events available to the Wasm guest.
+    pub fn get_touch_queue_len(&mut self) -> i32 {
+        self.drain_touch_events();
+        self.touch_events.len() as i32
+    }
+
+    /// Dequeue up to `out.len()` touch events into `out` and return count.
+    pub fn dequeue_touch_events(&mut self, out: &mut [TouchEventData]) -> i32 {
+        if out.len() as u32 > MAX_TOUCH_DEQUEUE {
+            return status::ERR_BOUNDS;
+        }
+        self.drain_touch_events();
+        let n = out.len().min(self.touch_events.len());
+        for slot in out.iter_mut().take(n) {
+            *slot = self.touch_events.pop_front().unwrap_or_default();
+        }
+        n as i32
     }
 
     // ── Phase 8 ──────────────────────────────────────────────────────────────
