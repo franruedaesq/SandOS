@@ -24,9 +24,10 @@ pub static AUDIO_TX_CHANNEL: Channel<CriticalSectionRawMutex, AudioChunk, 4> = C
 // ── Background Audio Tasks ──────────────────────────────────────────────────
 
 #[embassy_executor::task]
-pub async fn audio_rx_task(i2s_rx: I2sRx<'static, Async>, mut rx_buffer: &'static mut [u8]) {
+pub async fn audio_rx_task(i2s_rx: I2sRx<'static, Async>, rx_buffer: &'static mut [u8]) {
     let mut transfer = i2s_rx.read_dma_circular_async(rx_buffer).unwrap();
     let mut chunk = AudioChunk::new();
+    let mut snapshot = crate::router::AudioSnapshot::new();
 
     loop {
         let avail = transfer.available().await.unwrap_or(0);
@@ -36,11 +37,19 @@ pub async fn audio_rx_task(i2s_rx: I2sRx<'static, Async>, mut rx_buffer: &'stati
             let popped = transfer.pop(&mut rcv[..read_len]).await.unwrap_or(0);
 
             for &byte in &rcv[..popped] {
+                // Send to Wasm ABI channel
                 if chunk.push(byte).is_err() {
-                    // Chunk is full, send it and start a new one
                     let _ = AUDIO_RX_CHANNEL.try_send(chunk.clone());
                     chunk.clear();
                     let _ = chunk.push(byte);
+                }
+
+                // Send to Fallback Inference / OpenAI channel
+                let sample = byte as i8;
+                if snapshot.push(sample).is_err() {
+                    let _ = crate::router::AUDIO_INFERENCE_CHANNEL.try_send(snapshot.clone());
+                    snapshot.clear();
+                    let _ = snapshot.push(sample);
                 }
             }
         } else {
@@ -50,7 +59,7 @@ pub async fn audio_rx_task(i2s_rx: I2sRx<'static, Async>, mut rx_buffer: &'stati
 }
 
 #[embassy_executor::task]
-pub async fn audio_tx_task(i2s_tx: I2sTx<'static, Async>, mut tx_buffer: &'static mut [u8]) {
+pub async fn audio_tx_task(i2s_tx: I2sTx<'static, Async>, tx_buffer: &'static mut [u8]) {
     let mut transfer = i2s_tx.write_dma_circular_async(tx_buffer).unwrap();
 
     loop {
