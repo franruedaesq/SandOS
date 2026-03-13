@@ -2,7 +2,7 @@ use abi::EyeExpression;
 use embedded_graphics::{
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
+    primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
     text::Text,
     mono_font::{ascii::FONT_10X20, MonoTextStyle},
 };
@@ -17,11 +17,13 @@ pub enum UiState {
 pub struct UiManager {
     pub state: UiState,
     pub expression: EyeExpression,
+    pub prev_expression: EyeExpression,
     pub frame_count: u32,
     pub menu_offset: i32,
     pub slide_target: i32,
     pub idle_bounce: i32,
     pub is_blinking: bool,
+    pub prev_is_blinking: bool,
     pub last_interaction_frame: u32,
 
     // R-Kun properties
@@ -31,11 +33,10 @@ pub struct UiManager {
     // Animations
     pub button_pop: [i32; 4],
 
-    // Particles
-    pub drifters: [(i32, i32); 5],
-
     // Status
     pub text: String<64>,
+    pub prev_text: String<64>,
+    pub force_redraw: bool,
 }
 
 impl UiManager {
@@ -43,23 +44,20 @@ impl UiManager {
         Self {
             state: UiState::Idle,
             expression: EyeExpression::Neutral,
+            prev_expression: EyeExpression::Neutral,
             frame_count: 0,
             menu_offset: -120, // offscreen
             slide_target: 0,
             idle_bounce: 0,
             is_blinking: false,
+            prev_is_blinking: false,
             last_interaction_frame: 0,
             r_kun_x: 120,
             r_kun_y: 160,
             button_pop: [0; 4],
-            drifters: [
-                (20, 300),
-                (80, 250),
-                (150, 310),
-                (200, 200),
-                (100, 350),
-            ],
             text: String::new(),
+            prev_text: String::new(),
+            force_redraw: true,
         }
     }
 }
@@ -72,34 +70,18 @@ impl UiManager {
     pub fn update(&mut self) {
         self.frame_count = self.frame_count.wrapping_add(1);
 
-        // Idle Bounce: 5% vertical squish, slow 3s loop.
-        // Assume 100fps -> 300 frames per loop
-        let phase = self.frame_count % 300;
+        // Remove slow idle bounce to prevent full face flicker
+        self.idle_bounce = 0;
 
-        // Sine wave approximation for bounce
-        // We'll use a simple triangle wave to approximate it here
-        let half_phase = if phase > 150 { 300 - phase } else { phase };
-        // half_phase goes from 0 to 150 and back to 0. Let's scale it to an offset of 0..8 pixels.
-        self.idle_bounce = (half_phase as i32) * 8 / 150;
-
-        // Random blink (every 4-8s)
-        // Assume 100fps -> 400 to 800 frames. Use pseudo-random.
-        // Let's make it blink for 10 frames every 500 frames.
-        if self.frame_count % 500 < 10 {
+        // Fast random blink
+        // Let's make it blink for 5 frames every 300 frames.
+        if self.frame_count % 300 < 5 {
             self.is_blinking = true;
         } else {
             self.is_blinking = false;
         }
 
-        // Drifter particles
-        for i in 0..self.drifters.len() {
-            self.drifters[i].1 -= 1;
-            if self.drifters[i].1 < -20 {
-                self.drifters[i].1 = 340;
-                // Pseudo random X
-                self.drifters[i].0 = (self.frame_count.wrapping_add(i as u32 * 37) % 240) as i32;
-            }
-        }
+
 
         // State machine
         if self.state == UiState::Menu {
@@ -176,38 +158,34 @@ impl UiManager {
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        // 1. Draw Background (Sakura Pink to Cloud White gradient-ish)
-        // A simple flat or two-tone background to keep performance up.
-        let bg_color = Rgb565::new(31, 50, 31); // Pastel pinkish approx.
-        display.clear(bg_color)?;
+        let needs_redraw = self.force_redraw
+            || self.expression != self.prev_expression
+            || self.is_blinking != self.prev_is_blinking
+            || self.text != self.prev_text
+            || self.state == UiState::Menu; // if menu is open, it might be animating
 
-        // 2. Draw Drifters
-        let drifter_style = PrimitiveStyleBuilder::new()
-            .fill_color(Rgb565::new(31, 55, 31)) // Slightly brighter pink
-            .build();
+        if needs_redraw {
+            // 1. Clear background to Minimalist White
+            display.clear(Rgb565::WHITE)?;
 
-        for d in &self.drifters {
-            Circle::new(Point::new(d.0, d.1), 10)
-                .into_styled(drifter_style)
-                .draw(display)?;
-        }
+            // 3. Draw R-Kun (now just kawaii face)
+            self.draw_r_kun(display)?;
 
-        // 3. Draw R-Kun
-        self.draw_r_kun(display)?;
+            // 4. Draw Menu
+            if self.menu_offset > -100 {
+                self.draw_menu(display)?;
+            }
 
-        // 4. Draw Menu
-        if self.menu_offset > -100 {
-            self.draw_menu(display)?;
-        }
+            // Text status/OpenAI thoughts
+            if !self.text.is_empty() {
+                 let style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
+                 Text::new(self.text.as_str(), Point::new(15, 300), style).draw(display)?;
+            }
 
-        // Text status/OpenAI thoughts
-        if !self.text.is_empty() {
-             let style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
-             // Draw text box
-             Rectangle::new(Point::new(10, 280), Size::new(220, 30))
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
-                .draw(display)?;
-             Text::new(self.text.as_str(), Point::new(15, 300), style).draw(display)?;
+            self.prev_expression = self.expression;
+            self.prev_is_blinking = self.is_blinking;
+            self.prev_text = self.text.clone();
+            self.force_redraw = false;
         }
 
         Ok(())
@@ -217,63 +195,104 @@ impl UiManager {
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        // Body: Rounded rectangle or Ellipse
-        let body_w = 120;
-        let body_h = 100 - self.idle_bounce; // Squash
-        let body_x = self.r_kun_x - body_w / 2;
-        let body_y = self.r_kun_y - body_h / 2 + self.idle_bounce; // Stay on the floor
+        // Face center
+        let center_x = self.r_kun_x;
+        let center_y = self.r_kun_y - 10; // slightly up
 
-        let body_style = PrimitiveStyleBuilder::new()
-            .fill_color(Rgb565::WHITE)
-            .stroke_color(Rgb565::new(28, 56, 28)) // soft border
-            .stroke_width(2)
-            .build();
+        // Minimalist Eyes
+        let eye_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+        let blush_style = PrimitiveStyle::with_fill(Rgb565::new(63, 40, 40)); // softer pinkish red for white bg
 
-        // Use Ellipse for a squishy marshmallow look
-        Ellipse::new(Point::new(body_x, body_y), Size::new(body_w as u32, body_h as u32))
-            .into_styled(body_style)
-            .draw(display)?;
+        let mut left_eye_char = "";
+        let mut right_eye_char = "";
+        let mut mouth_char = "w";
+        let mut draw_ellipse_eyes = false;
+        let mut eye_w = 14;
+        let mut eye_h = 16;
 
-        // Eyes
-        let eye_color = PrimitiveStyle::with_fill(Rgb565::BLACK);
-        let eye_w = 10;
-        let eye_h = if self.is_blinking { 2 } else { 16 };
-        let eye_y = body_y + body_h / 2 - 10;
+        if self.is_blinking {
+            left_eye_char = "-";
+            right_eye_char = "-";
+            mouth_char = "w";
+        } else {
+            match self.expression {
+                EyeExpression::Neutral => {
+                    draw_ellipse_eyes = true;
+                    mouth_char = "w";
+                },
+                EyeExpression::Happy => {
+                    left_eye_char = ">";
+                    right_eye_char = "<";
+                    mouth_char = "w";
+                },
+                EyeExpression::Sad => {
+                    left_eye_char = "T";
+                    right_eye_char = "T";
+                    mouth_char = "m";
+                },
+                EyeExpression::Angry => {
+                    left_eye_char = "\\";
+                    right_eye_char = "/";
+                    mouth_char = "m";
+                },
+                EyeExpression::Surprised => {
+                    draw_ellipse_eyes = true;
+                    eye_w = 12;
+                    eye_h = 18;
+                    mouth_char = "o";
+                },
+                EyeExpression::Thinking => {
+                    draw_ellipse_eyes = true;
+                    eye_h = 10;
+                    mouth_char = "-";
+                },
+                EyeExpression::Blink => {
+                    left_eye_char = "-";
+                    right_eye_char = "-";
+                    mouth_char = "w";
+                },
+                EyeExpression::Heart => {
+                    // simple fallback for heart if we can't draw hearts easily, or use text "v"
+                    left_eye_char = "v";
+                    right_eye_char = "v";
+                    mouth_char = "w";
+                },
+                EyeExpression::Sleepy => {
+                    left_eye_char = "-";
+                    right_eye_char = "-";
+                    mouth_char = ".";
+                },
+            }
+        }
 
-        // Left eye
-        Ellipse::new(Point::new(body_x + 30, eye_y), Size::new(eye_w, eye_h))
-            .into_styled(eye_color)
-            .draw(display)?;
+        let eye_offset_x = 35;
+        let font_style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
 
-        // Right eye
-        Ellipse::new(Point::new(body_x + body_w - 40, eye_y), Size::new(eye_w, eye_h))
-            .into_styled(eye_color)
-            .draw(display)?;
+        if draw_ellipse_eyes {
+            // Left eye
+            Ellipse::new(Point::new(center_x - eye_offset_x - (eye_w/2), center_y - (eye_h/2)), Size::new(eye_w as u32, eye_h as u32))
+                .into_styled(eye_style)
+                .draw(display)?;
+            // Right eye
+            Ellipse::new(Point::new(center_x + eye_offset_x - (eye_w/2), center_y - (eye_h/2)), Size::new(eye_w as u32, eye_h as u32))
+                .into_styled(eye_style)
+                .draw(display)?;
+        } else {
+            // Draw text based eyes
+            Text::new(left_eye_char, Point::new(center_x - eye_offset_x - 5, center_y + 5), font_style).draw(display)?;
+            Text::new(right_eye_char, Point::new(center_x + eye_offset_x - 5, center_y + 5), font_style).draw(display)?;
+        }
 
         // Blush
-        let blush_style = PrimitiveStyle::with_fill(Rgb565::new(31, 40, 31)); // Reddish
-        Ellipse::new(Point::new(body_x + 20, eye_y + 15), Size::new(16, 8))
+        Ellipse::new(Point::new(center_x - eye_offset_x - 12, center_y + 12), Size::new(14, 6))
             .into_styled(blush_style)
             .draw(display)?;
-        Ellipse::new(Point::new(body_x + body_w - 36, eye_y + 15), Size::new(16, 8))
+        Ellipse::new(Point::new(center_x + eye_offset_x - 2, center_y + 12), Size::new(14, 6))
             .into_styled(blush_style)
             .draw(display)?;
 
-        // Expression specific drawing
-        match self.expression {
-            EyeExpression::Thinking => {
-                // Draw sparkles or a question mark
-                 let style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
-                 Text::new("?", Point::new(body_x + 90, body_y - 10), style).draw(display)?;
-            },
-            // Note: Since `Listening` is not in `EyeExpression`, we fall back or use another expression
-            EyeExpression::Surprised => {
-                // R-Kun surprised
-                 let style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
-                 Text::new("!", Point::new(body_x + 90, body_y - 10), style).draw(display)?;
-            },
-            _ => {}
-        }
+        // Mouth
+        Text::new(mouth_char, Point::new(center_x - 5, center_y + 15), font_style).draw(display)?;
 
         Ok(())
     }
