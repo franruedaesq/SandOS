@@ -53,228 +53,302 @@ const HTML_DASHBOARD: &str = r#"<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SandOS Dashboard</title>
+    <title>SandOS Kawaii Face UI</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@500;700;800&display=swap');
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'Inter', 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
-            color: #fff;
+            font-family: 'Nunito', 'Segoe UI', sans-serif;
+            background: radial-gradient(circle at top, #ffd5ec 0%, #e8d6ff 45%, #cbe9ff 100%);
             min-height: 100vh;
-            padding: 24px;
-        }
-        .container { max-width: 860px; margin: 0 auto; }
-        header { text-align: center; margin-bottom: 32px; }
-        header h1 {
-            font-size: 2.8em;
-            font-weight: 700;
-            background: linear-gradient(90deg, #a78bfa, #60a5fa);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 6px;
-        }
-        header p { opacity: 0.6; font-size: 1em; letter-spacing: 1px; }
-        .chip-badge {
-            display: inline-block;
-            background: rgba(167,139,250,0.15);
-            border: 1px solid rgba(167,139,250,0.3);
-            border-radius: 999px;
-            padding: 6px 18px;
-            font-size: 0.85em;
-            margin-top: 12px;
-            letter-spacing: 0.5px;
-        }
-        .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 18px;
+            place-items: center;
+            color: #5a456b;
+            overflow: hidden;
+        }
+        .scene {
+            width: min(92vw, 580px);
+            text-align: center;
+        }
+        h1 {
+            font-size: clamp(1.6rem, 4vw, 2.2rem);
+            margin-bottom: 10px;
+            color: #7d4f8e;
+        }
+        .subtitle {
+            font-size: 0.98rem;
+            opacity: 0.8;
             margin-bottom: 24px;
         }
-        .card {
-            background: rgba(255,255,255,0.07);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255,255,255,0.12);
-            border-radius: 18px;
-            padding: 24px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-            transition: transform 0.25s ease, box-shadow 0.25s ease;
+
+        .face-shell {
+            position: relative;
+            width: min(78vw, 360px);
+            aspect-ratio: 1 / 1;
+            margin: 0 auto;
         }
-        .card:hover { transform: translateY(-4px); box-shadow: 0 14px 40px rgba(0,0,0,0.45); }
-        .card-label {
-            font-size: 0.75em;
-            font-weight: 600;
-            letter-spacing: 1.5px;
-            text-transform: uppercase;
-            opacity: 0.55;
-            margin-bottom: 12px;
-        }
-        .card-value {
-            font-size: 2.4em;
-            font-weight: 700;
-            line-height: 1;
-            margin-bottom: 4px;
-        }
-        .card-sub { font-size: 0.85em; opacity: 0.55; }
-        .online  { color: #4ade80; }
-        .offline { color: #f87171; }
-        .bar {
-            height: 8px;
-            background: rgba(255,255,255,0.1);
-            border-radius: 4px;
-            overflow: hidden;
-            margin-top: 12px;
-        }
-        .bar-fill {
+        .face {
+            width: 100%;
             height: 100%;
-            background: linear-gradient(90deg, #a78bfa, #60a5fa);
-            border-radius: 4px;
-            transition: width 0.5s ease;
+            border-radius: 46% 46% 42% 42%;
+            background: linear-gradient(160deg, #fff4fb 0%, #ffe8f6 48%, #ffe3ec 100%);
+            border: 4px solid rgba(255, 255, 255, 0.9);
+            box-shadow: 0 18px 45px rgba(127, 89, 141, 0.25), inset 0 6px 18px rgba(255, 255, 255, 0.9);
+            position: relative;
+            cursor: pointer;
+            user-select: none;
+            animation: bob 3.5s ease-in-out infinite;
         }
-        footer {
-            text-align: center;
-            opacity: 0.35;
-            font-size: 0.8em;
-            margin-top: 8px;
+        .eyes {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 35%;
+            display: flex;
+            justify-content: center;
+            gap: 56px;
         }
-        .pulse { animation: pulse 2s infinite; }
-        @keyframes pulse {
-            0%,100% { opacity: 1; }
-            50%      { opacity: 0.4; }
+        .eye {
+            position: relative;
+            width: 62px;
+            height: 78px;
+            border-radius: 40px;
+            background: #3e3154;
+            overflow: hidden;
+            transform-origin: center 70%;
+            transition: transform 220ms ease;
+        }
+        .eye::before,
+        .eye::after {
+            content: '';
+            position: absolute;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.95);
+        }
+        .eye::before {
+            width: 20px;
+            height: 20px;
+            top: 14px;
+            left: 14px;
+        }
+        .eye::after {
+            width: 10px;
+            height: 10px;
+            top: 38px;
+            left: 28px;
+        }
+
+        .mouth {
+            position: absolute;
+            left: 50%;
+            top: 66%;
+            width: 58px;
+            height: 26px;
+            border: 5px solid #b44f79;
+            border-top: 0;
+            border-radius: 0 0 50px 50px;
+            transform: translateX(-50%);
+            transition: all 250ms ease;
+        }
+        .cheek {
+            position: absolute;
+            top: 59%;
+            width: 52px;
+            height: 24px;
+            border-radius: 999px;
+            background: rgba(255, 132, 175, 0.35);
+            filter: blur(1px);
+            transition: opacity 220ms ease;
+        }
+        .cheek.left { left: 17%; }
+        .cheek.right { right: 17%; }
+
+        .menu {
+            margin-top: 24px;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            opacity: 0;
+            transform: translateY(8px) scale(0.98);
+            pointer-events: none;
+            transition: all 230ms ease;
+        }
+        .menu.show {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+            pointer-events: auto;
+        }
+        .menu button {
+            border: 0;
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.72);
+            color: #7a4d87;
+            font-weight: 800;
+            padding: 12px 10px;
+            box-shadow: 0 8px 20px rgba(125, 84, 143, 0.14);
+            cursor: pointer;
+            transition: all 180ms ease;
+        }
+        .menu button.active,
+        .menu button:hover {
+            background: #fff;
+            color: #d9559a;
+            box-shadow: 0 0 0 2px rgba(255, 166, 214, 0.55), 0 10px 24px rgba(220, 91, 154, 0.25);
+        }
+
+        .status {
+            margin-top: 14px;
+            font-size: 0.9rem;
+            color: #775886;
+            opacity: 0.95;
+        }
+        .sparkle {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 0 18px rgba(255, 255, 255, 0.95);
+            opacity: 0;
+        }
+        .sparkle.left { top: 25%; left: 14%; }
+        .sparkle.right { top: 24%; right: 14%; }
+
+        .face.blink .eye { transform: scaleY(0.08); }
+        .face.wink-left .eye.left { transform: scaleY(0.08); }
+        .face.wink-right .eye.right { transform: scaleY(0.08); }
+
+        .face.smile .mouth {
+            width: 70px;
+            height: 30px;
+            border-color: #b83f76;
+        }
+        .face.smile .sparkle {
+            opacity: 1;
+            animation: twinkle 420ms ease;
+        }
+        .face.surprised .eye {
+            transform: scale(1.14);
+        }
+        .face.surprised .mouth {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            border: 5px solid #b44f79;
+            background: rgba(255, 205, 225, 0.65);
+        }
+        .face.surprised .cheek {
+            background: rgba(255, 120, 160, 0.48);
+        }
+
+        @keyframes bob {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-6px); }
+        }
+        @keyframes twinkle {
+            0% { transform: scale(0.2); opacity: 0; }
+            40% { transform: scale(1.2); opacity: 1; }
+            100% { transform: scale(1); opacity: 0; }
+        }
+
+        @media (max-width: 480px) {
+            .menu { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
     </style>
 </head>
 <body>
-<div class="container">
-    <header>
-        <h1>🪣 SandOS</h1>
-        <p>LIVE SYSTEM DASHBOARD</p>
-        <span class="chip-badge">ESP32-S3 · Xtensa LX7 Dual-Core · 240 MHz</span>
-    </header>
+<main class="scene">
+    <h1>SandOS Kawaii Face</h1>
+    <p class="subtitle">Tap the face to open a cute menu ✨</p>
 
-    <div class="grid">
-        <div class="card">
-            <div class="card-label">WiFi Status</div>
-            <div class="card-value online" id="wifi-status">●</div>
-            <div class="card-sub" id="wifi-ip">--</div>
-        </div>
-
-        <div class="card">
-            <div class="card-label">System Uptime</div>
-            <div class="card-value" id="uptime">--</div>
-            <div class="card-sub">seconds</div>
-        </div>
-
-        <div class="card">
-            <div class="card-label">Free PSRAM</div>
-            <div class="card-value" id="psram-free">--</div>
-            <div class="card-sub" id="psram-sub">KB available</div>
-            <div class="bar"><div class="bar-fill" id="psram-bar" style="width:0%"></div></div>
-        </div>
-
-        <div class="card">
-            <div class="card-label">Wasm Hot-Swaps</div>
-            <div class="card-value" id="hotswaps">--</div>
-            <div class="card-sub">OTA swaps completed</div>
-        </div>
-
-        <div class="card">
-            <div class="card-label">Wasm Engine</div>
-            <div class="card-value online pulse" id="wasm-status">●</div>
-            <div class="card-sub">Running</div>
-        </div>
-
-        <div class="card">
-            <div class="card-label">Heartbeat</div>
-            <div class="card-value online pulse" id="heartbeat">●</div>
-            <div class="card-sub">Core 0 alive</div>
+    <div class="face-shell">
+        <div class="face" id="face" role="button" tabindex="0" aria-label="Open menu">
+            <div class="sparkle left"></div>
+            <div class="sparkle right"></div>
+            <div class="eyes">
+                <div class="eye left"></div>
+                <div class="eye right"></div>
+            </div>
+            <div class="mouth" id="mouth"></div>
+            <div class="cheek left"></div>
+            <div class="cheek right"></div>
         </div>
     </div>
 
-    <div class="card" style="grid-column: 1 / -1;">
-        <div class="card-label">RGB LED Control</div>
-        <div id="led-display" style="width: 100%; height: 60px; border-radius: 12px; background: rgb(0, 0, 0); margin: 12px 0; box-shadow: inset 0 2px 8px rgba(0,0,0,0.5);"></div>
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px;">
-            <button onclick="setLED(255,0,0)" style="padding:10px; background:rgba(255,0,0,0.3); border:1px solid #f87171; color:#f87171; border-radius:8px; cursor:pointer; font-weight:600;">Red</button>
-            <button onclick="setLED(0,255,0)" style="padding:10px; background:rgba(0,255,0,0.3); border:1px solid #4ade80; color:#4ade80; border-radius:8px; cursor:pointer; font-weight:600;">Green</button>
-            <button onclick="setLED(0,0,255)" style="padding:10px; background:rgba(0,0,255,0.3); border:1px solid #60a5fa; color:#60a5fa; border-radius:8px; cursor:pointer; font-weight:600;">Blue</button>
-            <button onclick="setLED(255,255,0)" style="padding:10px; background:rgba(255,255,0,0.3); border:1px solid #fbbf24; color:#fbbf24; border-radius:8px; cursor:pointer; font-weight:600;">Yellow</button>
-            <button onclick="setLED(255,0,255)" style="padding:10px; background:rgba(255,0,255,0.3); border:1px solid #d946ef; color:#d946ef; border-radius:8px; cursor:pointer; font-weight:600;">Magenta</button>
-            <button onclick="setLED(255,255,255)" style="padding:10px; background:rgba(255,255,255,0.3); border:1px solid #e5e7eb; color:#e5e7eb; border-radius:8px; cursor:pointer; font-weight:600;">White</button>
-            <button onclick="setLED(0,255,255)" style="padding:10px; background:rgba(0,255,255,0.3); border:1px solid #22d3ee; color:#22d3ee; border-radius:8px; cursor:pointer; font-weight:600;">Cyan</button>
-            <button onclick="setLED(0,0,0)" style="padding:10px; background:rgba(100,100,100,0.3); border:1px solid #999; color:#999; border-radius:8px; cursor:pointer; font-weight:600;">Off</button>
-        </div>
-        <div style="font-size:0.85em; opacity:0.6;">RGB: <span id="led-values">0, 0, 0</span></div>
-    </div>
+    <section class="menu" id="menu" aria-label="Face options menu">
+        <button data-item="Home">🏠 Home</button>
+        <button data-item="Settings">⚙️ Settings</button>
+        <button data-item="Profile">👤 Profile</button>
+        <button data-item="Gallery">🖼️ Gallery</button>
+        <button data-item="About">⭐ About</button>
+    </section>
 
-    <div style="text-align:center;margin:18px 0 8px;display:flex;justify-content:center;gap:12px;">
-        <button onclick="refresh()" style="padding:12px 32px;background:rgba(167,139,250,0.2);border:1px solid rgba(167,139,250,0.4);color:#a78bfa;border-radius:10px;cursor:pointer;font-size:1em;font-weight:600;">Refresh Now</button>
-        <button onclick="stopServer()" style="padding:12px 32px;background:rgba(248,113,113,0.2);border:1px solid rgba(248,113,113,0.4);color:#f87171;border-radius:10px;cursor:pointer;font-size:1em;font-weight:600;">Stop Server</button>
-    </div>
-    <footer>SandOS v0.1.0 · Embassy + Rust 🦀 · Auto-refresh every 20 s</footer>
-</div>
+    <p class="status" id="status">Waiting for a tap...</p>
+</main>
 
 <script>
-async function setLED(r, g, b) {
-    try {
-        const res = await fetch('/api/led/set', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: `r=${r}&g=${g}&b=${b}`
-        });
-        if (res.ok) {
-            document.getElementById('led-display').style.background = `rgb(${r},${g},${b})`;
-            document.getElementById('led-values').textContent = `${r}, ${g}, ${b}`;
-        }
-    } catch (e) {
-        console.log('LED set failed:', e);
+const face = document.getElementById('face');
+const menu = document.getElementById('menu');
+const status = document.getElementById('status');
+const menuButtons = Array.from(menu.querySelectorAll('button'));
+
+let menuOpen = false;
+let currentExpression = null;
+
+function setExpression(name, duration = 520) {
+    if (currentExpression) face.classList.remove(currentExpression);
+    currentExpression = name;
+    if (name) {
+        face.classList.add(name);
+        setTimeout(() => {
+            face.classList.remove(name);
+            if (currentExpression === name) currentExpression = null;
+        }, duration);
     }
 }
 
-async function refreshLED() {
-    try {
-        const res = await fetch('/api/led/get');
-        const data = await res.json();
-        document.getElementById('led-display').style.background = `rgb(${data.r},${data.g},${data.b})`;
-        document.getElementById('led-values').textContent = `${data.r}, ${data.g}, ${data.b}`;
-    } catch (e) {
-        // LED endpoint may not be available yet
+function toggleMenu() {
+    menuOpen = !menuOpen;
+    menu.classList.toggle('show', menuOpen);
+    status.textContent = menuOpen
+        ? 'Menu opened! Pick an option 💖'
+        : 'Menu hidden. Tap again!';
+    setExpression(menuOpen ? 'smile' : 'blink', menuOpen ? 620 : 280);
+}
+
+face.addEventListener('click', toggleMenu);
+face.addEventListener('touchstart', (e) => { e.preventDefault(); toggleMenu(); }, { passive: false });
+face.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleMenu();
     }
+});
+
+menuButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+        menuButtons.forEach((b) => b.classList.remove('active'));
+        button.classList.add('active');
+        status.textContent = `Selected: ${button.dataset.item}`;
+        setExpression('wink-left', 360);
+    });
+});
+
+function idleLoop() {
+    const moods = [
+        ['blink', 220],
+        ['smile', 600],
+        ['surprised', 650],
+        ['wink-right', 350],
+        ['blink', 260],
+    ];
+    const [name, duration] = moods[Math.floor(Math.random() * moods.length)];
+    setExpression(name, duration);
+    const next = 2200 + Math.random() * 2200;
+    setTimeout(idleLoop, next);
 }
 
-async function refresh() {
-    try {
-        const r = await fetch('/api/stats');
-        const d = await r.json();
-
-        document.getElementById('wifi-status').textContent = '● ONLINE';
-        document.getElementById('wifi-ip').textContent = d.ip || '(DHCP)';
-        document.getElementById('uptime').textContent = d.uptime_secs;
-
-        const freeKB = Math.round(d.psram_free / 1024);
-        const usedKB = Math.round(d.psram_used / 1024);
-        const pct = d.psram_used + d.psram_free > 0
-            ? Math.round(d.psram_used / (d.psram_used + d.psram_free) * 100) : 0;
-        document.getElementById('psram-free').textContent = freeKB;
-        document.getElementById('psram-sub').textContent = `KB free of ${freeKB + usedKB} KB`;
-        document.getElementById('psram-bar').style.width = pct + '%';
-
-        document.getElementById('hotswaps').textContent = d.hot_swaps;
-
-        // Refresh LED status inline (no extra delayed request)
-        refreshLED();
-    } catch (e) {
-        document.getElementById('wifi-status').className = 'card-value offline';
-        document.getElementById('wifi-status').textContent = '○ OFFLINE';
-    }
-}
-async function stopServer() {
-    if (!confirm('Stop the web server? Re-enable from the BOOT button menu on the device.')) return;
-    try { await fetch('/api/server/stop', {method:'POST'}); } catch(e) {}
-    document.body.innerHTML = '<div style="text-align:center;margin-top:40vh;color:#f87171;font-size:1.4em;">Server stopped.<br>Use BOOT button menu to restart.</div>';
-}
-refresh();
-setInterval(refresh, 20000);
+setTimeout(idleLoop, 1200);
 </script>
 </body>
 </html>"#;
