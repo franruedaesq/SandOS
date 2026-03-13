@@ -35,31 +35,33 @@
 pub const HOST_MODULE: &str = "env";
 
 // Phase 1 — Core functions
-pub const FN_TOGGLE_LED:         &str = "host_toggle_led";
-pub const FN_GET_UPTIME_MS:      &str = "host_get_uptime_ms";
-pub const FN_DEBUG_LOG:          &str = "host_debug_log";
+pub const FN_TOGGLE_LED: &str = "host_toggle_led";
+pub const FN_GET_UPTIME_MS: &str = "host_get_uptime_ms";
+pub const FN_DEBUG_LOG: &str = "host_debug_log";
 
 // Phase 2 — Display & Audio functions
-pub const FN_DRAW_EYE:           &str = "host_draw_eye";
-pub const FN_WRITE_TEXT:         &str = "host_write_text";
-pub const FN_SET_BRIGHTNESS:     &str = "host_set_brightness";
-pub const FN_START_AUDIO:        &str = "host_start_audio_capture";
-pub const FN_STOP_AUDIO:         &str = "host_stop_audio_capture";
-pub const FN_GET_AUDIO_AVAIL:    &str = "host_get_audio_avail";
-pub const FN_READ_AUDIO:         &str = "host_read_audio";
+pub const FN_DRAW_EYE: &str = "host_draw_eye";
+pub const FN_WRITE_TEXT: &str = "host_write_text";
+pub const FN_SET_BRIGHTNESS: &str = "host_set_brightness";
+pub const FN_START_AUDIO: &str = "host_start_audio_capture";
+pub const FN_STOP_AUDIO: &str = "host_stop_audio_capture";
+pub const FN_GET_AUDIO_AVAIL: &str = "host_get_audio_avail";
+pub const FN_READ_AUDIO: &str = "host_read_audio";
 
 // Phase 3 — Sensor functions
-pub const FN_GET_PITCH_ROLL:     &str = "host_get_pitch_roll";
+pub const FN_GET_PITCH_ROLL: &str = "host_get_pitch_roll";
 
 // Phase 4 — Motor functions
-pub const FN_SET_MOTOR_SPEED:    &str = "host_set_motor_speed";
+pub const FN_SET_MOTOR_SPEED: &str = "host_set_motor_speed";
 
-// Phase 5 — Routing control
-pub const FN_GET_ROUTING_MODE:        &str = "host_get_routing_mode";
+// Phase 5 — Unified PubSub ABI
+pub const FN_PUBLISH: &str = "host_publish";
+pub const FN_SUBSCRIBE: &str = "host_subscribe";
+pub const FN_GET_ROUTING_MODE: &str = "host_get_routing_mode";
 
 // Phase 6 — Structured telemetry
-pub const FN_EMIT_IMU_TELEMETRY:      &str = "host_emit_imu_telemetry";
-pub const FN_EMIT_ODOM_TELEMETRY:     &str = "host_emit_odom_telemetry";
+pub const FN_EMIT_IMU_TELEMETRY: &str = "host_emit_imu_telemetry";
+pub const FN_EMIT_ODOM_TELEMETRY: &str = "host_emit_odom_telemetry";
 pub const FN_GET_TELEMETRY_QUEUE_LEN: &str = "host_get_telemetry_queue_len";
 
 // Phase 7 — Local AI Subsystem
@@ -106,15 +108,15 @@ pub mod status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum EyeExpression {
-    Neutral   = 0,
-    Happy     = 1,
-    Sad       = 2,
-    Angry     = 3,
+    Neutral = 0,
+    Happy = 1,
+    Sad = 2,
+    Angry = 3,
     Surprised = 4,
-    Thinking  = 5,
-    Blink     = 6,
-    Heart     = 7,
-    Sleepy    = 8,
+    Thinking = 5,
+    Blink = 6,
+    Heart = 7,
+    Sleepy = 8,
 }
 
 impl EyeExpression {
@@ -177,9 +179,9 @@ pub mod cmd {
     /// Toggle the onboard LED (Phase 1).
     pub const TOGGLE_LED: u8 = 0x01;
     /// Load a new Wasm binary from the PC (future OTA).
-    pub const LOAD_WASM:  u8 = 0x02;
+    pub const LOAD_WASM: u8 = 0x02;
     /// Draw a robot expression on the display (Phase 2).
-    pub const DRAW_EYE:   u8 = 0x10;
+    pub const DRAW_EYE: u8 = 0x10;
     /// Display LLM text response on screen (Phase 2).
     pub const WRITE_TEXT: u8 = 0x11;
     /// Flush / clear the display (Phase 2).
@@ -189,15 +191,15 @@ pub mod cmd {
     /// Emergency stop — zero all motors immediately (Phase 4).
     pub const EMERGENCY_STOP: u8 = 0x21;
     /// Emit a structured IMU telemetry packet (Phase 6).
-    pub const EMIT_IMU_TELEMETRY:  u8 = 0x30;
+    pub const EMIT_IMU_TELEMETRY: u8 = 0x30;
     /// Emit a structured Odometry telemetry packet (Phase 6).
     pub const EMIT_ODOM_TELEMETRY: u8 = 0x31;
     /// Query the local inference engine (Phase 7).
     pub const QUERY_LOCAL_INFERENCE: u8 = 0x40;
     /// Start an OTA session — payload `[total_size: u32 LE]` (Phase 8).
-    pub const OTA_BEGIN:    u8 = 0x50;
+    pub const OTA_BEGIN: u8 = 0x50;
     /// One OTA chunk — payload `[offset: u32 LE][data …]` (Phase 8).
-    pub const OTA_CHUNK:    u8 = 0x51;
+    pub const OTA_CHUNK: u8 = 0x51;
     /// Finalise OTA — payload `[expected_crc32: u32 LE]` (Phase 8).
     pub const OTA_FINALIZE: u8 = 0x52;
 }
@@ -233,7 +235,7 @@ impl ImuReading {
     pub fn decode(raw: u64) -> Self {
         Self {
             pitch_millideg: (raw >> 32) as u32 as i32,
-            roll_millideg:  (raw & 0xFFFF_FFFF) as u32 as i32,
+            roll_millideg: (raw & 0xFFFF_FFFF) as u32 as i32,
         }
     }
 }
@@ -254,6 +256,16 @@ pub const MAX_AUDIO_READ: u32 = 1024;
 /// Speeds are in the signed range `[-MAX_MOTOR_SPEED, MAX_MOTOR_SPEED]`
 /// where positive values drive forward and negative values drive backward.
 pub const MAX_MOTOR_SPEED: i32 = 255;
+
+/// Unified SandBus topic definitions for `host_publish` and `host_subscribe`.
+pub mod topic {
+    pub const MOVEMENT_INTENT: u32 = 100;
+    pub const TOGGLE_LED: u32 = 101;
+    pub const DRAW_EYE: u32 = 102;
+    pub const WRITE_TEXT: u32 = 103;
+    pub const EMIT_IMU_TELEMETRY: u32 = 104;
+    pub const EMIT_ODOM_TELEMETRY: u32 = 105;
+}
 
 /// Wasm linear memory page size (64 KiB).
 pub const WASM_PAGE_SIZE: u32 = 65_536;
@@ -305,13 +317,19 @@ impl MovementIntent {
     /// Create a new `MovementIntent` from validated speed values.
     #[inline]
     pub fn new(left: i16, right: i16) -> Self {
-        Self { left_speed: left, right_speed: right }
+        Self {
+            left_speed: left,
+            right_speed: right,
+        }
     }
 
     /// Create a zero-speed (full stop) intent.
     #[inline]
     pub fn zero() -> Self {
-        Self { left_speed: 0, right_speed: 0 }
+        Self {
+            left_speed: 0,
+            right_speed: 0,
+        }
     }
 }
 
@@ -352,13 +370,18 @@ impl<const N: usize> CdrSerializer<N> {
     /// Create a new serializer with an empty buffer.
     #[inline]
     pub const fn new() -> Self {
-        Self { buf: [0u8; N], pos: 0 }
+        Self {
+            buf: [0u8; N],
+            pos: 0,
+        }
     }
 
     /// Write a single `u8` byte.
     #[inline]
     pub fn write_u8(&mut self, v: u8) -> Result<(), ()> {
-        if self.pos + 1 > N { return Err(()); }
+        if self.pos + 1 > N {
+            return Err(());
+        }
         self.buf[self.pos] = v;
         self.pos += 1;
         Ok(())
@@ -367,9 +390,11 @@ impl<const N: usize> CdrSerializer<N> {
     /// Write a `u16` as two little-endian bytes.
     #[inline]
     pub fn write_u16(&mut self, v: u16) -> Result<(), ()> {
-        if self.pos + 2 > N { return Err(()); }
+        if self.pos + 2 > N {
+            return Err(());
+        }
         let b = v.to_le_bytes();
-        self.buf[self.pos]     = b[0];
+        self.buf[self.pos] = b[0];
         self.buf[self.pos + 1] = b[1];
         self.pos += 2;
         Ok(())
@@ -384,7 +409,9 @@ impl<const N: usize> CdrSerializer<N> {
     /// Write a `u32` as four little-endian bytes.
     #[inline]
     pub fn write_u32(&mut self, v: u32) -> Result<(), ()> {
-        if self.pos + 4 > N { return Err(()); }
+        if self.pos + 4 > N {
+            return Err(());
+        }
         let b = v.to_le_bytes();
         self.buf[self.pos..self.pos + 4].copy_from_slice(&b);
         self.pos += 4;
@@ -400,7 +427,9 @@ impl<const N: usize> CdrSerializer<N> {
     /// Write a `u64` as eight little-endian bytes.
     #[inline]
     pub fn write_u64(&mut self, v: u64) -> Result<(), ()> {
-        if self.pos + 8 > N { return Err(()); }
+        if self.pos + 8 > N {
+            return Err(());
+        }
         let b = v.to_le_bytes();
         self.buf[self.pos..self.pos + 8].copy_from_slice(&b);
         self.pos += 8;
@@ -501,15 +530,14 @@ impl ImuTelemetry {
             return None;
         }
         Some(Self {
-            sequence: u32::from_le_bytes([buf[0],  buf[1],  buf[2],  buf[3]]),
+            sequence: u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
             timestamp_us: u64::from_le_bytes([
-                buf[4], buf[5], buf[6],  buf[7],
-                buf[8], buf[9], buf[10], buf[11],
+                buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11],
             ]),
             loop_time_us: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
-            pitch_millideg:       i32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]),
-            roll_millideg:        i32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]),
-            yaw_rate_millideg_s:  i32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]),
+            pitch_millideg: i32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]),
+            roll_millideg: i32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]),
+            yaw_rate_millideg_s: i32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]),
             linear_accel_x_mm_s2: i32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]),
             linear_accel_y_mm_s2: i32::from_le_bytes([buf[32], buf[33], buf[34], buf[35]]),
         })
@@ -573,14 +601,13 @@ impl OdometryTelemetry {
             return None;
         }
         Some(Self {
-            sequence:     u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            sequence: u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
             timestamp_us: u64::from_le_bytes([
-                buf[4], buf[5], buf[6],  buf[7],
-                buf[8], buf[9], buf[10], buf[11],
+                buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11],
             ]),
             loop_time_us: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
-            left_speed:   i16::from_le_bytes([buf[16], buf[17]]),
-            right_speed:  i16::from_le_bytes([buf[18], buf[19]]),
+            left_speed: i16::from_le_bytes([buf[16], buf[17]]),
+            right_speed: i16::from_le_bytes([buf[18], buf[19]]),
         })
     }
 }
@@ -601,7 +628,7 @@ pub enum TelemetryPacket {
 
 impl TelemetryPacket {
     /// Type discriminant byte written before the CDR payload for `Imu` packets.
-    pub const TYPE_IMU:      u8 = cmd::EMIT_IMU_TELEMETRY;
+    pub const TYPE_IMU: u8 = cmd::EMIT_IMU_TELEMETRY;
     /// Type discriminant byte written before the CDR payload for `Odometry` packets.
     pub const TYPE_ODOMETRY: u8 = cmd::EMIT_ODOM_TELEMETRY;
 
@@ -618,13 +645,17 @@ impl TelemetryPacket {
         match self {
             TelemetryPacket::Imu(imu) => {
                 let needed = 1 + ImuTelemetry::SERIALIZED_SIZE;
-                if buf.len() < needed { return 0; }
+                if buf.len() < needed {
+                    return 0;
+                }
                 buf[0] = Self::TYPE_IMU;
                 1 + imu.to_cdr(&mut buf[1..])
             }
             TelemetryPacket::Odometry(odom) => {
                 let needed = 1 + OdometryTelemetry::SERIALIZED_SIZE;
-                if buf.len() < needed { return 0; }
+                if buf.len() < needed {
+                    return 0;
+                }
                 buf[0] = Self::TYPE_ODOMETRY;
                 1 + odom.to_cdr(&mut buf[1..])
             }
@@ -637,10 +668,14 @@ impl TelemetryPacket {
     /// CDR-encoded payload.  Returns `None` for unknown discriminants or
     /// truncated buffers.
     pub fn deserialize(buf: &[u8]) -> Option<Self> {
-        if buf.is_empty() { return None; }
+        if buf.is_empty() {
+            return None;
+        }
         match buf[0] {
-            Self::TYPE_IMU      => ImuTelemetry::from_cdr(&buf[1..]).map(TelemetryPacket::Imu),
-            Self::TYPE_ODOMETRY => OdometryTelemetry::from_cdr(&buf[1..]).map(TelemetryPacket::Odometry),
+            Self::TYPE_IMU => ImuTelemetry::from_cdr(&buf[1..]).map(TelemetryPacket::Imu),
+            Self::TYPE_ODOMETRY => {
+                OdometryTelemetry::from_cdr(&buf[1..]).map(TelemetryPacket::Odometry)
+            }
             _ => None,
         }
     }
@@ -737,7 +772,11 @@ impl InferenceResult {
         let active = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) != 0;
         let top_class = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as u8;
         let confidence_pct = i32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]) as u8;
-        Some(Self { active, top_class, confidence_pct })
+        Some(Self {
+            active,
+            top_class,
+            confidence_pct,
+        })
     }
 
     /// Pack the result into a single `u32` for lock-free atomic storage.
@@ -753,8 +792,8 @@ impl InferenceResult {
     #[inline]
     pub fn unpack(raw: u32) -> Self {
         Self {
-            active:         (raw >> 31) != 0,
-            top_class:      ((raw >> 8) & 0xFF) as u8,
+            active: (raw >> 31) != 0,
+            top_class: ((raw >> 8) & 0xFF) as u8,
             confidence_pct: (raw & 0xFF) as u8,
         }
     }
@@ -794,15 +833,15 @@ pub const OTA_STATUS_SIZE: u32 = 16; // 4 × u32
 pub enum OtaState {
     /// No active OTA session; the running Wasm binary is current.
     #[default]
-    Idle     = 0,
+    Idle = 0,
     /// Binary chunks are being received and written to the PSRAM staging area.
     Receiving = 1,
     /// All chunks received and CRC-32 verified; hot-swap is pending.
-    Ready    = 2,
+    Ready = 2,
     /// Hot-swap in progress: old VM paused, new binary being instantiated.
     Swapping = 3,
     /// Protocol error or CRC-32 mismatch; the session must be restarted.
-    Failed   = 4,
+    Failed = 4,
 }
 
 impl OtaState {
@@ -875,9 +914,9 @@ impl OtaStatus {
         let state = OtaState::from_u8(state_raw)?;
         Some(Self {
             state,
-            bytes_received: u32::from_le_bytes([buf[4],  buf[5],  buf[6],  buf[7]]),
-            total_size:     u32::from_le_bytes([buf[8],  buf[9],  buf[10], buf[11]]),
-            swap_count:     u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
+            bytes_received: u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
+            total_size: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+            swap_count: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
         })
     }
 }
@@ -1045,7 +1084,7 @@ mod tests {
     #[test]
     fn routing_mode_discriminants_are_stable() {
         assert_eq!(RoutingMode::SingleBoard as u8, 0);
-        assert_eq!(RoutingMode::Distributed  as u8, 1);
+        assert_eq!(RoutingMode::Distributed as u8, 1);
     }
 
     #[test]
@@ -1088,7 +1127,10 @@ mod tests {
     fn cdr_serializer_write_u64_le() {
         let mut s = CdrSerializer::<8>::new();
         s.write_u64(0x0102030405060708u64).unwrap();
-        assert_eq!(s.as_bytes(), &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]);
+        assert_eq!(
+            s.as_bytes(),
+            &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
     }
 
     #[test]
@@ -1117,14 +1159,14 @@ mod tests {
     #[test]
     fn imu_telemetry_cdr_roundtrip() {
         let original = ImuTelemetry {
-            sequence:              42,
-            timestamp_us:          1_000_000,
-            loop_time_us:          1_987,
-            pitch_millideg:        15_000,
-            roll_millideg:         -3_500,
-            yaw_rate_millideg_s:   200,
-            linear_accel_x_mm_s2:  9_810,
-            linear_accel_y_mm_s2:  0,
+            sequence: 42,
+            timestamp_us: 1_000_000,
+            loop_time_us: 1_987,
+            pitch_millideg: 15_000,
+            roll_millideg: -3_500,
+            yaw_rate_millideg_s: 200,
+            linear_accel_x_mm_s2: 9_810,
+            linear_accel_y_mm_s2: 0,
         };
         let mut buf = [0u8; ImuTelemetry::SERIALIZED_SIZE];
         let written = original.to_cdr(&mut buf);
@@ -1150,14 +1192,14 @@ mod tests {
     fn imu_telemetry_negative_values_roundtrip() {
         let original = ImuTelemetry {
             pitch_millideg: i32::MIN,
-            roll_millideg:  i32::MAX,
+            roll_millideg: i32::MAX,
             ..Default::default()
         };
         let mut buf = [0u8; ImuTelemetry::SERIALIZED_SIZE];
         original.to_cdr(&mut buf);
         let decoded = ImuTelemetry::from_cdr(&buf).unwrap();
         assert_eq!(decoded.pitch_millideg, i32::MIN);
-        assert_eq!(decoded.roll_millideg,  i32::MAX);
+        assert_eq!(decoded.roll_millideg, i32::MAX);
     }
 
     // ── Phase 6 tests — OdometryTelemetry ────────────────────────────────────
@@ -1170,11 +1212,11 @@ mod tests {
     #[test]
     fn odom_telemetry_cdr_roundtrip() {
         let original = OdometryTelemetry {
-            sequence:     7,
+            sequence: 7,
             timestamp_us: 500_000,
             loop_time_us: 2_001,
-            left_speed:   127,
-            right_speed:  -127,
+            left_speed: 127,
+            right_speed: -127,
         };
         let mut buf = [0u8; OdometryTelemetry::SERIALIZED_SIZE];
         let written = original.to_cdr(&mut buf);
@@ -1219,7 +1261,9 @@ mod tests {
     #[test]
     fn telemetry_packet_odometry_serialize_roundtrip() {
         let odom = OdometryTelemetry {
-            left_speed: 100, right_speed: -80, ..Default::default()
+            left_speed: 100,
+            right_speed: -80,
+            ..Default::default()
         };
         let packet = TelemetryPacket::Odometry(odom);
         let mut buf = [0u8; TelemetryPacket::MAX_SERIALIZED_SIZE];
@@ -1250,7 +1294,10 @@ mod tests {
 
     #[test]
     fn telemetry_packet_max_serialized_size_matches_imu() {
-        assert_eq!(TelemetryPacket::MAX_SERIALIZED_SIZE, 1 + ImuTelemetry::SERIALIZED_SIZE);
+        assert_eq!(
+            TelemetryPacket::MAX_SERIALIZED_SIZE,
+            1 + ImuTelemetry::SERIALIZED_SIZE
+        );
     }
 
     #[test]
@@ -1277,21 +1324,33 @@ mod tests {
 
     #[test]
     fn inference_result_pack_unpack_roundtrip() {
-        let original = InferenceResult { active: true, top_class: 3, confidence_pct: 87 };
+        let original = InferenceResult {
+            active: true,
+            top_class: 3,
+            confidence_pct: 87,
+        };
         let decoded = InferenceResult::unpack(original.pack());
         assert_eq!(decoded, original);
     }
 
     #[test]
     fn inference_result_inactive_pack_unpack_roundtrip() {
-        let original = InferenceResult { active: false, top_class: 0, confidence_pct: 0 };
+        let original = InferenceResult {
+            active: false,
+            top_class: 0,
+            confidence_pct: 0,
+        };
         let decoded = InferenceResult::unpack(original.pack());
         assert_eq!(decoded, original);
     }
 
     #[test]
     fn inference_result_to_bytes_from_bytes_roundtrip() {
-        let original = InferenceResult { active: true, top_class: 2, confidence_pct: 75 };
+        let original = InferenceResult {
+            active: true,
+            top_class: 2,
+            confidence_pct: 75,
+        };
         let mut buf = [0u8; INFERENCE_RESULT_SIZE as usize];
         let written = original.to_bytes(&mut buf);
         assert_eq!(written, INFERENCE_RESULT_SIZE as usize);
@@ -1301,7 +1360,11 @@ mod tests {
 
     #[test]
     fn inference_result_to_bytes_short_buffer_returns_zero() {
-        let r = InferenceResult { active: true, top_class: 1, confidence_pct: 50 };
+        let r = InferenceResult {
+            active: true,
+            top_class: 1,
+            confidence_pct: 50,
+        };
         let mut buf = [0u8; 4]; // too short — needs 12 bytes
         assert_eq!(r.to_bytes(&mut buf), 0);
     }
@@ -1314,13 +1377,21 @@ mod tests {
 
     #[test]
     fn inference_result_active_flag_in_bytes_is_correct() {
-        let active_result = InferenceResult { active: true, top_class: 0, confidence_pct: 0 };
+        let active_result = InferenceResult {
+            active: true,
+            top_class: 0,
+            confidence_pct: 0,
+        };
         let mut buf = [0u8; INFERENCE_RESULT_SIZE as usize];
         active_result.to_bytes(&mut buf);
         // active field is the first i32 LE — must be 1
         assert_eq!(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), 1);
 
-        let inactive_result = InferenceResult { active: false, top_class: 0, confidence_pct: 0 };
+        let inactive_result = InferenceResult {
+            active: false,
+            top_class: 0,
+            confidence_pct: 0,
+        };
         inactive_result.to_bytes(&mut buf);
         assert_eq!(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), 0);
     }
@@ -1377,11 +1448,11 @@ mod tests {
 
     #[test]
     fn ota_state_discriminants_are_stable() {
-        assert_eq!(OtaState::Idle     as u8, 0);
+        assert_eq!(OtaState::Idle as u8, 0);
         assert_eq!(OtaState::Receiving as u8, 1);
-        assert_eq!(OtaState::Ready    as u8, 2);
+        assert_eq!(OtaState::Ready as u8, 2);
         assert_eq!(OtaState::Swapping as u8, 3);
-        assert_eq!(OtaState::Failed   as u8, 4);
+        assert_eq!(OtaState::Failed as u8, 4);
     }
 
     #[test]
@@ -1404,10 +1475,10 @@ mod tests {
     #[test]
     fn ota_status_to_bytes_from_bytes_roundtrip() {
         let original = OtaStatus {
-            state:          OtaState::Receiving,
+            state: OtaState::Receiving,
             bytes_received: 1024,
-            total_size:     4096,
-            swap_count:     3,
+            total_size: 4096,
+            swap_count: 3,
         };
         let mut buf = [0u8; OtaStatus::SERIALIZED_SIZE];
         let written = original.to_bytes(&mut buf);
@@ -1453,11 +1524,7 @@ mod tests {
 
     #[test]
     fn ota_cmd_ids_are_unique_and_non_overlapping() {
-        let ids = [
-            cmd::OTA_BEGIN,
-            cmd::OTA_CHUNK,
-            cmd::OTA_FINALIZE,
-        ];
+        let ids = [cmd::OTA_BEGIN, cmd::OTA_CHUNK, cmd::OTA_FINALIZE];
         let mut seen = std::collections::HashSet::new();
         for id in ids {
             assert!(seen.insert(id), "duplicate OTA command ID: 0x{:02X}", id);
@@ -1476,7 +1543,11 @@ mod tests {
             cmd::QUERY_LOCAL_INFERENCE,
         ];
         for id in ids {
-            assert!(!existing.contains(&id), "OTA cmd 0x{:02X} collides with existing cmd", id);
+            assert!(
+                !existing.contains(&id),
+                "OTA cmd 0x{:02X} collides with existing cmd",
+                id
+            );
         }
     }
 }

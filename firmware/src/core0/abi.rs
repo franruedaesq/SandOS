@@ -287,6 +287,46 @@ impl AbiHost {
         }
     }
 
+    pub fn publish(&self, topic: u32, payload: &[u8]) -> i32 {
+        match topic {
+            abi::topic::MOVEMENT_INTENT => {
+                if payload.len() != 4 {
+                    return status::ERR_INVALID_ARG;
+                }
+                let left = i16::from_le_bytes([payload[0], payload[1]]) as i32;
+                let right = i16::from_le_bytes([payload[2], payload[3]]) as i32;
+                self.set_motor_speed(left, right)
+            }
+            abi::topic::TOGGLE_LED => {
+                self.toggle_led()
+            }
+            abi::topic::DRAW_EYE => {
+                if payload.len() != 4 {
+                    return status::ERR_INVALID_ARG;
+                }
+                let expression = i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                self.draw_eye(expression)
+            }
+            abi::topic::WRITE_TEXT => {
+                self.write_text(payload)
+            }
+            abi::topic::EMIT_IMU_TELEMETRY => {
+                self.emit_imu_telemetry(payload)
+            }
+            abi::topic::EMIT_ODOM_TELEMETRY => {
+                self.emit_odom_telemetry(payload)
+            }
+            _ => status::ERR_UNKNOWN_FN,
+        }
+    }
+
+    pub fn subscribe(&self, _topic: u32) -> i32 {
+        // Subscribing is a no-op for now, as Wasm apps are currently single-threaded
+        // event loops or they respond to global interrupts rather than specific topic
+        // callbacks. We just return OK.
+        status::OK
+    }
+
     // ── Phase 6 — Structured Telemetry ───────────────────────────────────────
 
     /// Emit a CDR-encoded [`ImuTelemetry`] packet from the Wasm sandbox.

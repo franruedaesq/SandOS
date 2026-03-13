@@ -20,7 +20,10 @@ fn draw_eye_neutral_expression() {
     let mut host = MockHost::default();
     let result = host.draw_eye(EyeExpression::Neutral as i32);
     assert_eq!(result, status::OK);
-    assert_eq!(host.display.current_expression, Some(EyeExpression::Neutral));
+    assert_eq!(
+        host.display.current_expression,
+        Some(EyeExpression::Neutral)
+    );
 }
 
 #[test]
@@ -37,8 +40,8 @@ fn draw_eye_all_valid_expressions() {
 #[test]
 fn draw_eye_invalid_expression_returns_error() {
     let mut host = MockHost::default();
-    assert_eq!(host.draw_eye(99),   status::ERR_INVALID_ARG);
-    assert_eq!(host.draw_eye(-1),  status::ERR_INVALID_ARG);
+    assert_eq!(host.draw_eye(99), status::ERR_INVALID_ARG);
+    assert_eq!(host.draw_eye(-1), status::ERR_INVALID_ARG);
     assert_eq!(host.draw_eye(255), status::ERR_INVALID_ARG);
     // Expression must not have changed.
     assert_eq!(host.display.current_expression, None);
@@ -88,19 +91,22 @@ fn write_text_invalid_utf8_returns_error() {
 #[test]
 fn set_brightness_valid_range() {
     let mut host = MockHost::default();
-    assert_eq!(host.set_brightness(0),               status::OK);
+    assert_eq!(host.set_brightness(0), status::OK);
     assert_eq!(host.display.brightness, 0);
-    assert_eq!(host.set_brightness(128),              status::OK);
+    assert_eq!(host.set_brightness(128), status::OK);
     assert_eq!(host.display.brightness, 128);
-    assert_eq!(host.set_brightness(MAX_BRIGHTNESS),   status::OK);
+    assert_eq!(host.set_brightness(MAX_BRIGHTNESS), status::OK);
     assert_eq!(host.display.brightness, MAX_BRIGHTNESS as u8);
 }
 
 #[test]
 fn set_brightness_out_of_range_returns_error() {
     let mut host = MockHost::default();
-    assert_eq!(host.set_brightness(-1),                  status::ERR_INVALID_ARG);
-    assert_eq!(host.set_brightness(MAX_BRIGHTNESS + 1),  status::ERR_INVALID_ARG);
+    assert_eq!(host.set_brightness(-1), status::ERR_INVALID_ARG);
+    assert_eq!(
+        host.set_brightness(MAX_BRIGHTNESS + 1),
+        status::ERR_INVALID_ARG
+    );
 }
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
@@ -183,15 +189,23 @@ fn start_audio_clears_previous_buffer() {
 fn wasm_draw_eye_happy() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_draw_eye" (func $draw (param i32) (result i32)))
+            (import "env" "host_publish" (func $publish (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
             (func (export "run_command") (param i32) (result i32)
+                i32.const 0
                 i32.const 1   ;; Happy
-                call $draw
+                i32.store
+                i32.const 102
+                i32.const 0
+                i32.const 4
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0x10);
     assert_eq!(result, status::OK);
@@ -205,15 +219,23 @@ fn wasm_draw_eye_happy() {
 fn wasm_draw_eye_invalid_expression_returns_error() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_draw_eye" (func $draw (param i32) (result i32)))
+            (import "env" "host_publish" (func $publish (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
             (func (export "run_command") (param i32) (result i32)
+                i32.const 0
                 i32.const 99  ;; Invalid
-                call $draw
+                i32.store
+                i32.const 102
+                i32.const 0
+                i32.const 4
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0);
     assert_eq!(result, status::ERR_INVALID_ARG);
@@ -225,18 +247,21 @@ fn wasm_draw_eye_invalid_expression_returns_error() {
 fn wasm_write_text_via_linear_memory() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_write_text" (func $write (param i32 i32) (result i32)))
+            (import "env" "host_publish" (func $publish (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 200) "Hello, Robot!")
             (func (export "run_command") (param i32) (result i32)
+                i32.const 103
                 i32.const 200
                 i32.const 13
-                call $write
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0x11);
     assert_eq!(result, status::OK);
@@ -247,18 +272,21 @@ fn wasm_write_text_via_linear_memory() {
 fn wasm_write_text_oob_returns_bounds_error() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_write_text" (func $write (param i32 i32) (result i32)))
+            (import "env" "host_publish" (func $publish (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             ;; ptr=65530, len=100 → end=65630 > 65536
             (func (export "run_command") (param i32) (result i32)
+                i32.const 103
                 i32.const 65530
                 i32.const 100
-                call $write
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0x11);
     assert_eq!(result, status::ERR_BOUNDS);
@@ -269,7 +297,8 @@ fn wasm_write_text_oob_returns_bounds_error() {
 fn wasm_set_brightness() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_set_brightness" (func $bright (param i32) (result i32)))
             (func (export "run_command") (param i32) (result i32)
@@ -277,7 +306,8 @@ fn wasm_set_brightness() {
                 call $bright
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0);
     assert_eq!(result, status::OK);
@@ -290,7 +320,8 @@ fn wasm_audio_capture_pipeline() {
 
     // This Wasm module reads audio data without starting a fresh capture,
     // modelling the steady-state read path (capture was started at boot).
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_audio_avail" (func $avail (result i32)))
             (import "env" "host_read_audio"      (func $read  (param i32 i32) (result i32)))
@@ -302,7 +333,8 @@ fn wasm_audio_capture_pipeline() {
                 call $read
             )
         )
-    "#);
+    "#,
+    );
 
     // Simulate: audio capture was started and data has arrived.
     harness.host_mut().start_audio_capture();
@@ -313,21 +345,27 @@ fn wasm_audio_capture_pipeline() {
     let bytes_read = harness.call_i32_i32(&instance, "run_command", 0x20);
     assert_eq!(bytes_read, 8, "should have read all 8 injected bytes");
     assert!(harness.host().audio_active, "audio should still be active");
-    assert_eq!(harness.host().get_audio_avail(), 0, "buffer should be drained");
+    assert_eq!(
+        harness.host().get_audio_avail(),
+        0,
+        "buffer should be drained"
+    );
 }
 
 #[test]
 fn wasm_audio_start_stop_pipeline() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_start_audio_capture" (func $start (result i32)))
             (import "env" "host_stop_audio_capture"  (func $stop  (result i32)))
             (func (export "run_start") (result i32) call $start)
             (func (export "run_stop")  (result i32) call $stop)
         )
-    "#);
+    "#,
+    );
 
     assert!(!harness.host().audio_active);
 
@@ -346,23 +384,30 @@ fn wasm_audio_start_stop_pipeline() {
 fn wasm_llm_response_renders_face_and_text() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_draw_eye"   (func $draw (param i32) (result i32)))
-            (import "env" "host_write_text" (func $write (param i32 i32) (result i32)))
+            (import "env" "host_publish" (func $publish (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             ;; Simulate handle_llm_response(ptr=300, len=9, mood=Happy=1)
             (data (i32.const 300) "I'm happy!")
             (func (export "run_command") (param i32) (result i32)
+                i32.const 0
                 i32.const 1     ;; Happy expression
-                call $draw
+                i32.store
+                i32.const 102
+                i32.const 0
+                i32.const 4
+                call $publish
                 drop
+                i32.const 103
                 i32.const 300   ;; ptr to text
                 i32.const 10    ;; len("I'm happy!")
-                call $write
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0);
     assert_eq!(result, status::OK);
@@ -379,26 +424,37 @@ fn wasm_llm_response_renders_face_and_text() {
 fn wasm_sequential_abi_calls_maintain_independent_state() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_toggle_led"  (func $led   (result i32)))
-            (import "env" "host_draw_eye"    (func $draw  (param i32) (result i32)))
-            (import "env" "host_write_text"  (func $write (param i32 i32) (result i32)))
+            (import "env" "host_publish" (func $publish (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 0) "OK")
             (func (export "run_command") (param i32) (result i32)
                 ;; Call all three ABI functions in a row.
-                call $led
+                i32.const 101
+                i32.const 0
+                i32.const 0
+                call $publish
                 drop
+
+                i32.const 4
                 i32.const 2    ;; Sad
-                call $draw
+                i32.store
+                i32.const 102
+                i32.const 4
+                i32.const 4
+                call $publish
                 drop
+
+                i32.const 103
                 i32.const 0
                 i32.const 2
-                call $write
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0);
     assert_eq!(result, status::OK);

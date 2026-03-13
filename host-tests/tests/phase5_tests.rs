@@ -111,7 +111,10 @@ fn switching_from_distributed_to_single_board_updates_local_speeds() {
     let mut host = MockHost::default();
     host.routing_mode = RoutingMode::Distributed;
     host.set_motor_speed(100, 100);
-    assert_eq!(host.motor_left_speed, 0, "distributed mode must not update local speeds");
+    assert_eq!(
+        host.motor_left_speed, 0,
+        "distributed mode must not update local speeds"
+    );
 
     // Switch back to Single-Board.
     host.routing_mode = RoutingMode::SingleBoard;
@@ -162,7 +165,10 @@ fn dead_mans_switch_zeroes_motors_on_trip() {
 
     assert!(host.dead_mans_active);
     assert_eq!(host.motor_left_speed, 0, "left motor must be zeroed by DMS");
-    assert_eq!(host.motor_right_speed, 0, "right motor must be zeroed by DMS");
+    assert_eq!(
+        host.motor_right_speed, 0,
+        "right motor must be zeroed by DMS"
+    );
 }
 
 #[test]
@@ -199,22 +205,34 @@ fn last_intent_ms_updated_by_set_motor_speed() {
 
 // ── Wasm ABI — message bus integration tests ─────────────────────────────────
 
-/// The Wasm guest calls `host_set_motor_speed`; the host logs a MovementIntent.
+/// The Wasm guest calls `host_publish` with a MOVEMENT_INTENT payload; the host logs a MovementIntent.
 #[test]
 fn wasm_set_motor_speed_publishes_intent() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_set_motor_speed"
-                (func $set_speed (param i32 i32) (result i32)))
+            (import "env" "host_publish"
+                (func $publish (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
             (func (export "run") (result i32)
+                ;; Write [80, 0, -60, 255] which is 80 and -60 in i16 LE to memory at offset 0
+                i32.const 0
                 i32.const 80
+                i32.store16
+                i32.const 2
                 i32.const -60
-                call $set_speed
+                i32.store16
+                ;; Call host_publish(topic=100, ptr=0, len=4)
+                i32.const 100
+                i32.const 0
+                i32.const 4
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::OK);
@@ -223,24 +241,35 @@ fn wasm_set_motor_speed_publishes_intent() {
     assert_eq!(host.intent_log[0], MovementIntent::new(80, -60));
 }
 
-/// In Single-Board mode the Wasm command reaches Core 1's motor bridge.
+/// In Single-Board mode the Wasm command reaches Core 1's motor bridge via host_publish.
 #[test]
 fn wasm_single_board_mode_updates_local_speeds() {
     let mut host = MockHost::default();
     host.routing_mode = RoutingMode::SingleBoard;
     let mut harness = WasmHarness::new(host);
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_set_motor_speed"
-                (func $set_speed (param i32 i32) (result i32)))
+            (import "env" "host_publish"
+                (func $publish (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
             (func (export "run") (result i32)
+                i32.const 0
                 i32.const 150
+                i32.store16
+                i32.const 2
                 i32.const -150
-                call $set_speed
+                i32.store16
+
+                i32.const 100
+                i32.const 0
+                i32.const 4
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
 
     harness.call_unit_i32(&instance, "run");
     let host = harness.host();
@@ -249,29 +278,43 @@ fn wasm_single_board_mode_updates_local_speeds() {
     assert!(host.distributed_intents.is_empty());
 }
 
-/// In Distributed mode the Wasm command is routed to ESP-NOW, not Core 1.
+/// In Distributed mode the Wasm publish is routed to ESP-NOW, not Core 1.
 #[test]
 fn wasm_distributed_mode_routes_to_espnow() {
     let mut host = MockHost::default();
     host.routing_mode = RoutingMode::Distributed;
     let mut harness = WasmHarness::new(host);
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_set_motor_speed"
-                (func $set_speed (param i32 i32) (result i32)))
+            (import "env" "host_publish"
+                (func $publish (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
             (func (export "run") (result i32)
+                i32.const 0
                 i32.const 200
+                i32.store16
+                i32.const 2
                 i32.const 200
-                call $set_speed
+                i32.store16
+
+                i32.const 100
+                i32.const 0
+                i32.const 4
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
 
     harness.call_unit_i32(&instance, "run");
     let host = harness.host();
     // Local speeds must be untouched in distributed mode.
-    assert_eq!(host.motor_left_speed, 0, "local speeds must not change in distributed mode");
+    assert_eq!(
+        host.motor_left_speed, 0,
+        "local speeds must not change in distributed mode"
+    );
     assert_eq!(host.motor_right_speed, 0);
     // The intent must appear in the distributed queue.
     assert_eq!(host.distributed_intents.len(), 1);
@@ -283,23 +326,36 @@ fn wasm_distributed_mode_routes_to_espnow() {
 fn dead_mans_switch_integration_with_wasm_pipeline() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    // 1. Send a valid motor command from Wasm.
-    let motor_instance = harness.load_wat(r#"
+    // 1. Send a valid motor command from Wasm via host_publish.
+    let motor_instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_set_motor_speed"
-                (func $set_speed (param i32 i32) (result i32)))
+            (import "env" "host_publish"
+                (func $publish (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
             (func (export "run") (result i32)
+                i32.const 0
                 i32.const 100
+                i32.store16
+                i32.const 2
                 i32.const 100
-                call $set_speed
+                i32.store16
+
+                i32.const 100
+                i32.const 0
+                i32.const 4
+                call $publish
             )
         )
-    "#);
+    "#,
+    );
     harness.call_unit_i32(&motor_instance, "run");
     assert_eq!(harness.host().motor_left_speed, 100);
 
     // 2. Advance simulated time by more than 50 ms without a new intent.
-    harness.host_mut().check_dead_mans_switch(DEAD_MANS_SWITCH_MS + 1);
+    harness
+        .host_mut()
+        .check_dead_mans_switch(DEAD_MANS_SWITCH_MS + 1);
 
     // 3. Motors must be zeroed and the DMS flag must be set.
     assert!(harness.host().dead_mans_active);

@@ -7,9 +7,7 @@
 //! - ESP-NOW command packet validation
 //! - ULP shared-memory layout constants
 
-use abi::{
-    cmd, status, validate_ptr_len, EspNowCommand, ESPNOW_MAX_PAYLOAD,
-};
+use abi::{cmd, status, validate_ptr_len, EspNowCommand, ESPNOW_MAX_PAYLOAD};
 use host_tests::{mock_host::MockHost, vm_harness::WasmHarness};
 
 // ── Direct MockHost unit tests ────────────────────────────────────────────────
@@ -115,14 +113,16 @@ fn espnow_command_magic_invalid() {
 fn wasm_toggle_led_via_abi() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_toggle_led" (func $toggle (result i32)))
             (func (export "run_command") (param i32) (result i32)
                 call $toggle
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0x01);
     assert_eq!(result, status::OK);
@@ -130,7 +130,10 @@ fn wasm_toggle_led_via_abi() {
 
     let result = harness.call_i32_i32(&instance, "run_command", 0x01);
     assert_eq!(result, status::OK);
-    assert!(!harness.host().led_on, "LED should be OFF after second toggle");
+    assert!(
+        !harness.host().led_on,
+        "LED should be OFF after second toggle"
+    );
 }
 
 /// Toggling the LED 100 times should work without errors.
@@ -138,14 +141,16 @@ fn wasm_toggle_led_via_abi() {
 fn wasm_toggle_led_many_times() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_toggle_led" (func $toggle (result i32)))
             (func (export "run_command") (param i32) (result i32)
                 call $toggle
             )
         )
-    "#);
+    "#,
+    );
 
     for _ in 0..100 {
         let result = harness.call_i32_i32(&instance, "run_command", 0x01);
@@ -162,7 +167,8 @@ fn wasm_toggle_led_many_times() {
 fn wasm_oob_memory_access_is_trapped() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_debug_log" (func $log (param i32 i32) (result i32)))
             (memory (export "memory") 1)
@@ -174,7 +180,8 @@ fn wasm_oob_memory_access_is_trapped() {
                 call $log
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0x03);
     // The Host must return ERR_BOUNDS, not crash.
@@ -188,7 +195,8 @@ fn wasm_get_uptime_ms() {
     host.simulated_uptime_ms = 42_000;
     let mut harness = WasmHarness::new(host);
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_uptime_ms" (func $uptime (result i64)))
             (func (export "run_command") (param i32) (result i32)
@@ -198,7 +206,8 @@ fn wasm_get_uptime_ms() {
                 ;; 1 if equal, 0 if not → return as i32
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_i32_i32(&instance, "run_command", 0);
     assert_eq!(result, 1, "uptime should match simulated value");

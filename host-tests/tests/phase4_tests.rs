@@ -39,7 +39,10 @@ fn set_motor_speed_stores_speeds() {
 #[test]
 fn set_motor_speed_max_values_accepted() {
     let mut host = MockHost::default();
-    assert_eq!(host.set_motor_speed(MAX_MOTOR_SPEED, MAX_MOTOR_SPEED), status::OK);
+    assert_eq!(
+        host.set_motor_speed(MAX_MOTOR_SPEED, MAX_MOTOR_SPEED),
+        status::OK
+    );
     assert_eq!(host.motor_left_speed, MAX_MOTOR_SPEED);
     assert_eq!(host.motor_right_speed, MAX_MOTOR_SPEED);
 }
@@ -47,7 +50,10 @@ fn set_motor_speed_max_values_accepted() {
 #[test]
 fn set_motor_speed_min_values_accepted() {
     let mut host = MockHost::default();
-    assert_eq!(host.set_motor_speed(-MAX_MOTOR_SPEED, -MAX_MOTOR_SPEED), status::OK);
+    assert_eq!(
+        host.set_motor_speed(-MAX_MOTOR_SPEED, -MAX_MOTOR_SPEED),
+        status::OK
+    );
     assert_eq!(host.motor_left_speed, -MAX_MOTOR_SPEED);
     assert_eq!(host.motor_right_speed, -MAX_MOTOR_SPEED);
 }
@@ -100,7 +106,7 @@ fn set_motor_speed_blocked_when_motors_disabled() {
 fn set_motor_speed_accepted_after_motors_re_enabled() {
     let mut host = MockHost::default();
     host.motors_enabled = false;
-    host.set_motor_speed(100, 100);          // rejected
+    host.set_motor_speed(100, 100); // rejected
     host.motors_enabled = true;
     let result = host.set_motor_speed(80, -80); // should be accepted now
     assert_eq!(result, status::OK);
@@ -154,7 +160,8 @@ fn watchdog_feed_count_accumulates_over_multiple_commands() {
 fn wasm_set_motor_speed_valid() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_set_motor_speed"
                 (func $set_speed (param i32 i32) (result i32)))
@@ -164,7 +171,8 @@ fn wasm_set_motor_speed_valid() {
                 call $set_speed
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::OK);
@@ -177,7 +185,8 @@ fn wasm_set_motor_speed_valid() {
 fn wasm_set_motor_speed_boundary_values() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_set_motor_speed"
                 (func $set_speed (param i32 i32) (result i32)))
@@ -187,7 +196,8 @@ fn wasm_set_motor_speed_boundary_values() {
                 call $set_speed
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::OK);
@@ -200,7 +210,8 @@ fn wasm_set_motor_speed_boundary_values() {
 fn wasm_set_motor_speed_left_out_of_range_returns_error() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_set_motor_speed"
                 (func $set_speed (param i32 i32) (result i32)))
@@ -210,12 +221,21 @@ fn wasm_set_motor_speed_left_out_of_range_returns_error() {
                 call $set_speed
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::ERR_INVALID_ARG);
-    assert_eq!(harness.host().motor_left_speed, 0, "left speed must not change on error");
-    assert_eq!(harness.host().motor_right_speed, 0, "right speed must not change on error");
+    assert_eq!(
+        harness.host().motor_left_speed,
+        0,
+        "left speed must not change on error"
+    );
+    assert_eq!(
+        harness.host().motor_right_speed,
+        0,
+        "right speed must not change on error"
+    );
 }
 
 /// `host_set_motor_speed` with an out-of-range right speed returns ERR_INVALID_ARG.
@@ -223,7 +243,8 @@ fn wasm_set_motor_speed_left_out_of_range_returns_error() {
 fn wasm_set_motor_speed_right_out_of_range_returns_error() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_set_motor_speed"
                 (func $set_speed (param i32 i32) (result i32)))
@@ -233,7 +254,8 @@ fn wasm_set_motor_speed_right_out_of_range_returns_error() {
                 call $set_speed
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::ERR_INVALID_ARG);
@@ -246,7 +268,8 @@ fn wasm_set_motor_speed_blocked_by_safe_shutdown() {
     host.motors_enabled = false;
     let mut harness = WasmHarness::new(host);
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_set_motor_speed"
                 (func $set_speed (param i32 i32) (result i32)))
@@ -256,12 +279,21 @@ fn wasm_set_motor_speed_blocked_by_safe_shutdown() {
                 call $set_speed
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::ERR_BUSY);
-    assert_eq!(harness.host().motor_left_speed, 0, "left speed must remain 0 during shutdown");
-    assert_eq!(harness.host().motor_right_speed, 0, "right speed must remain 0 during shutdown");
+    assert_eq!(
+        harness.host().motor_left_speed,
+        0,
+        "left speed must remain 0 during shutdown"
+    );
+    assert_eq!(
+        harness.host().motor_right_speed,
+        0,
+        "right speed must remain 0 during shutdown"
+    );
 }
 
 // ── Sandbox isolation (Chaos Test) ────────────────────────────────────────────
@@ -279,29 +311,39 @@ fn wasm_set_motor_speed_blocked_by_safe_shutdown() {
 fn wasm_trap_does_not_crash_host() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (func (export "crash") (result i32)
                 unreachable
             )
         )
-    "#);
+    "#,
+    );
 
     // The trap must be caught by `wasmi` and returned as an Err.
     let result = harness.try_call_unit_i32(&instance, "crash");
-    assert!(result.is_err(), "a Wasm unreachable must produce a trap error");
+    assert!(
+        result.is_err(),
+        "a Wasm unreachable must produce a trap error"
+    );
 
     // The harness (and by extension the Host OS) must still be usable.
     // Verify by issuing a valid ABI call after the trap.
-    let toggle_instance = harness.load_wat(r#"
+    let toggle_instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_toggle_led" (func $led (result i32)))
             (func (export "run") (result i32) call $led)
         )
-    "#);
+    "#,
+    );
     let led_result = harness.call_unit_i32(&toggle_instance, "run");
     assert_eq!(led_result, status::OK);
-    assert!(harness.host().led_on, "LED should toggle after a preceding Wasm trap");
+    assert!(
+        harness.host().led_on,
+        "LED should toggle after a preceding Wasm trap"
+    );
 }
 
 /// **Chaos Test part 2 — Motor state is preserved across a Wasm trap.**
@@ -313,7 +355,8 @@ fn motor_state_preserved_after_wasm_trap() {
     let mut harness = WasmHarness::new(MockHost::default());
 
     // 1. Issue a valid motor command.
-    let motor_instance = harness.load_wat(r#"
+    let motor_instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_set_motor_speed"
                 (func $set_speed (param i32 i32) (result i32)))
@@ -323,18 +366,21 @@ fn motor_state_preserved_after_wasm_trap() {
                 call $set_speed
             )
         )
-    "#);
+    "#,
+    );
     harness.call_unit_i32(&motor_instance, "run");
     assert_eq!(harness.host().motor_left_speed, 200);
 
     // 2. Load a malicious module that traps immediately.
-    let crash_instance = harness.load_wat(r#"
+    let crash_instance = harness.load_wat(
+        r#"
         (module
             (func (export "crash") (result i32)
                 unreachable
             )
         )
-    "#);
+    "#,
+    );
     let _ = harness.try_call_unit_i32(&crash_instance, "crash");
 
     // 3. Motor speed must still reflect the last *valid* command.
@@ -363,7 +409,8 @@ fn wasm_imu_to_motor_speed_pipeline() {
     // - reads pitch via host_get_pitch_roll
     // - divides by 100 to get a PWM duty in the ±100 range
     // - sets both motors to that duty (symmetric for pure balance)
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_pitch_roll"
                 (func $imu (param i32 i32) (result i32)))
@@ -388,7 +435,8 @@ fn wasm_imu_to_motor_speed_pipeline() {
                 call $motors
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::OK);
@@ -410,7 +458,8 @@ fn wasm_emergency_stop_on_level_imu() {
     };
     let mut harness = WasmHarness::new(host);
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_set_motor_speed"
                 (func $motors (param i32 i32) (result i32)))
@@ -420,7 +469,8 @@ fn wasm_emergency_stop_on_level_imu() {
                 call $motors
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::OK);

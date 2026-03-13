@@ -13,9 +13,7 @@
 //!   returns `ERR_BUSY` instead of blocking or panicking.
 //! - **Packet validation**: Wrong payload sizes return `ERR_BOUNDS`.
 
-use abi::{
-    status, ImuTelemetry, OdometryTelemetry, TelemetryPacket, TELEMETRY_TX_CAPACITY,
-};
+use abi::{status, ImuTelemetry, OdometryTelemetry, TelemetryPacket, TELEMETRY_TX_CAPACITY};
 use host_tests::{mock_host::MockHost, vm_harness::WasmHarness};
 
 // ── Direct mock-host telemetry tests ─────────────────────────────────────────
@@ -31,7 +29,10 @@ fn telemetry_queue_is_empty_by_default() {
 fn emit_imu_telemetry_enqueues_packet() {
     let mut host = MockHost::default();
     let imu = ImuTelemetry {
-        sequence: 1, pitch_millideg: 5_000, roll_millideg: -2_000, ..Default::default()
+        sequence: 1,
+        pitch_millideg: 5_000,
+        roll_millideg: -2_000,
+        ..Default::default()
     };
     let mut buf = [0u8; ImuTelemetry::SERIALIZED_SIZE];
     imu.to_cdr(&mut buf);
@@ -43,14 +44,14 @@ fn emit_imu_telemetry_enqueues_packet() {
 fn emit_imu_telemetry_preserves_fields() {
     let mut host = MockHost::default();
     let original = ImuTelemetry {
-        sequence:              99,
-        timestamp_us:          123_456,
-        loop_time_us:          1_980,
-        pitch_millideg:        30_000,
-        roll_millideg:         -10_000,
-        yaw_rate_millideg_s:   500,
-        linear_accel_x_mm_s2:  9_800,
-        linear_accel_y_mm_s2:  0,
+        sequence: 99,
+        timestamp_us: 123_456,
+        loop_time_us: 1_980,
+        pitch_millideg: 30_000,
+        roll_millideg: -10_000,
+        yaw_rate_millideg_s: 500,
+        linear_accel_x_mm_s2: 9_800,
+        linear_accel_y_mm_s2: 0,
     };
     let mut buf = [0u8; ImuTelemetry::SERIALIZED_SIZE];
     original.to_cdr(&mut buf);
@@ -74,7 +75,10 @@ fn emit_imu_telemetry_wrong_size_returns_err_bounds() {
 fn emit_odom_telemetry_enqueues_packet() {
     let mut host = MockHost::default();
     let odom = OdometryTelemetry {
-        sequence: 3, left_speed: 100, right_speed: -80, ..Default::default()
+        sequence: 3,
+        left_speed: 100,
+        right_speed: -80,
+        ..Default::default()
     };
     let mut buf = [0u8; OdometryTelemetry::SERIALIZED_SIZE];
     odom.to_cdr(&mut buf);
@@ -86,8 +90,11 @@ fn emit_odom_telemetry_enqueues_packet() {
 fn emit_odom_telemetry_preserves_fields() {
     let mut host = MockHost::default();
     let original = OdometryTelemetry {
-        sequence: 7, timestamp_us: 50_000, loop_time_us: 2_005,
-        left_speed: 200, right_speed: -200,
+        sequence: 7,
+        timestamp_us: 50_000,
+        loop_time_us: 2_005,
+        left_speed: 200,
+        right_speed: -200,
     };
     let mut buf = [0u8; OdometryTelemetry::SERIALIZED_SIZE];
     original.to_cdr(&mut buf);
@@ -139,8 +146,14 @@ fn telemetry_queue_back_pressure_returns_err_busy() {
 #[test]
 fn mixed_telemetry_packets_are_ordered_correctly() {
     let mut host = MockHost::default();
-    let imu = ImuTelemetry { sequence: 1, ..Default::default() };
-    let odom = OdometryTelemetry { sequence: 2, ..Default::default() };
+    let imu = ImuTelemetry {
+        sequence: 1,
+        ..Default::default()
+    };
+    let odom = OdometryTelemetry {
+        sequence: 2,
+        ..Default::default()
+    };
 
     let mut imu_buf = [0u8; ImuTelemetry::SERIALIZED_SIZE];
     imu.to_cdr(&mut imu_buf);
@@ -152,7 +165,10 @@ fn mixed_telemetry_packets_are_ordered_correctly() {
 
     assert_eq!(host.telemetry_queue.len(), 2);
     assert!(matches!(host.telemetry_queue[0], TelemetryPacket::Imu(_)));
-    assert!(matches!(host.telemetry_queue[1], TelemetryPacket::Odometry(_)));
+    assert!(matches!(
+        host.telemetry_queue[1],
+        TelemetryPacket::Odometry(_)
+    ));
 }
 
 // ── Wasm ABI integration tests ────────────────────────────────────────────────
@@ -176,8 +192,8 @@ fn wasm_emit_imu_telemetry_enqueues_packet() {
     //  roll  -3500  = 0xFFFFF274 → LE bytes 74 F2 FF FF
     let wat_src = r#"
         (module
-            (import "env" "host_emit_imu_telemetry"
-                (func $emit (param i32 i32) (result i32)))
+            (import "env" "host_publish"
+                (func $publish (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (func (export "run") (result i32)
                 ;; Bytes [0..4]: sequence = 1 (u32 LE)
@@ -202,8 +218,8 @@ fn wasm_emit_imu_telemetry_enqueues_packet() {
                 (i32.store8 (i32.const 22) (i32.const 0xFF))
                 (i32.store8 (i32.const 23) (i32.const 0xFF))
                 ;; Bytes [24..36]: remaining fields = 0 — already zero
-                ;; Call host_emit_imu_telemetry(ptr=0, len=36)
-                (call $emit (i32.const 0) (i32.const 36))
+                ;; Call host_publish(topic=104, ptr=0, len=36)
+                (call $publish (i32.const 104) (i32.const 0) (i32.const 36))
             )
         )
     "#;
@@ -238,8 +254,8 @@ fn wasm_emit_odom_telemetry_enqueues_packet() {
     // [18..20] right_speed=-80  → B0 FF
     let wat_src = r#"
         (module
-            (import "env" "host_emit_odom_telemetry"
-                (func $emit (param i32 i32) (result i32)))
+            (import "env" "host_publish"
+                (func $publish (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (func (export "run") (result i32)
                 ;; sequence = 2
@@ -259,8 +275,8 @@ fn wasm_emit_odom_telemetry_enqueues_packet() {
                 ;; right_speed = -80 = 0xFFB0 (i16 LE)
                 (i32.store8 (i32.const 18) (i32.const 0xB0))
                 (i32.store8 (i32.const 19) (i32.const 0xFF))
-                ;; Call host_emit_odom_telemetry(ptr=0, len=20)
-                (call $emit (i32.const 0) (i32.const 20))
+                ;; Call host_publish(topic=105, ptr=0, len=20)
+                (call $publish (i32.const 105) (i32.const 0) (i32.const 20))
             )
         )
     "#;
@@ -287,17 +303,19 @@ fn wasm_emit_odom_telemetry_enqueues_packet() {
 fn wasm_emit_imu_telemetry_wrong_size_returns_err_bounds() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_emit_imu_telemetry"
-                (func $emit (param i32 i32) (result i32)))
+            (import "env" "host_publish"
+                (func $publish (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (func (export "run") (result i32)
                 ;; Pass len=10 instead of 36 — should return ERR_BOUNDS
-                (call $emit (i32.const 0) (i32.const 10))
+                (call $publish (i32.const 104) (i32.const 0) (i32.const 10))
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::ERR_BOUNDS);
@@ -310,7 +328,8 @@ fn wasm_get_telemetry_queue_len_reflects_push_count() {
     let mut harness = WasmHarness::new(MockHost::default());
 
     // First, query length before any push — must be 0.
-    let query_instance = harness.load_wat(r#"
+    let query_instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_telemetry_queue_len"
                 (func $qlen (result i32)))
@@ -318,7 +337,8 @@ fn wasm_get_telemetry_queue_len_reflects_push_count() {
                 (call $qlen)
             )
         )
-    "#);
+    "#,
+    );
     let len_before = harness.call_unit_i32(&query_instance, "run");
     assert_eq!(len_before, 0);
 
@@ -344,16 +364,18 @@ fn wasm_emit_imu_telemetry_out_of_bounds_ptr_returns_err_bounds() {
 
     // Memory is 1 page = 65536 bytes.
     // ptr=65510, len=36 → end = 65546 > 65536 → should return ERR_BOUNDS.
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
-            (import "env" "host_emit_imu_telemetry"
-                (func $emit (param i32 i32) (result i32)))
+            (import "env" "host_publish"
+                (func $publish (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (func (export "run") (result i32)
-                (call $emit (i32.const 65510) (i32.const 36))
+                (call $publish (i32.const 104) (i32.const 65510) (i32.const 36))
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::ERR_BOUNDS);

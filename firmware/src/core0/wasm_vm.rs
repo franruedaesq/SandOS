@@ -41,9 +41,10 @@ extern crate alloc;
 
 use abi::{
     validate_ptr_len, ImuReading, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
-    HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
+    HOST_MODULE, FN_DEBUG_LOG, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
     FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS,
-    FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT,
+    FN_START_AUDIO, FN_STOP_AUDIO,
+    FN_PUBLISH, FN_SUBSCRIBE,
     INFERENCE_RESULT_SIZE, OTA_STATUS_SIZE, status,
 };
 use alloc::vec;
@@ -222,13 +223,6 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
     // ── Phase 1 ──────────────────────────────────────────────────────────────
 
     linker
-        .func_wrap(HOST_MODULE, FN_TOGGLE_LED, |caller: Caller<'_, *mut AbiHost>| -> i32 {
-            let host = unsafe { &mut **caller.data() };
-            host.toggle_led()
-        })
-        .unwrap();
-
-    linker
         .func_wrap(
             HOST_MODULE,
             FN_GET_UPTIME_MS,
@@ -260,40 +254,6 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
         .unwrap();
 
     // ── Phase 2 — Display ─────────────────────────────────────────────────────
-
-    linker
-        .func_wrap(
-            HOST_MODULE,
-            FN_DRAW_EYE,
-            |caller: Caller<'_, *mut AbiHost>, expression: i32| -> i32 {
-                let host = unsafe { &mut **caller.data() };
-                host.draw_eye(expression)
-            },
-        )
-        .unwrap();
-
-    linker
-        .func_wrap(
-            HOST_MODULE,
-            FN_WRITE_TEXT,
-            |caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
-                let mem = match get_memory(&caller) {
-                    Some(m) => m,
-                    None => return status::ERR_BOUNDS,
-                };
-                let mem_size = mem.data(&caller).len() as u32;
-                if validate_ptr_len(ptr as u32, len as u32, mem_size).is_err() {
-                    return status::ERR_BOUNDS;
-                }
-                if len as u32 > MAX_TEXT_BYTES {
-                    return status::ERR_BOUNDS;
-                }
-                let bytes = mem.data(&caller)[ptr as usize..(ptr + len) as usize].to_vec();
-                let host = unsafe { &mut **caller.data() };
-                host.write_text(&bytes)
-            },
-        )
-        .unwrap();
 
     linker
         .func_wrap(
@@ -401,18 +361,39 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
         )
         .unwrap();
 
-    // ── Phase 4 — Motors ──────────────────────────────────────────────────────
+    // ── Phase 5 — Unified PubSub ABI ──────────────────────────────────────────
 
     linker
         .func_wrap(
             HOST_MODULE,
-            FN_SET_MOTOR_SPEED,
-            |caller: Caller<'_, *mut AbiHost>, left: i32, right: i32| -> i32 {
-                if left.abs() > MAX_MOTOR_SPEED || right.abs() > MAX_MOTOR_SPEED {
-                    return status::ERR_INVALID_ARG;
+            FN_PUBLISH,
+            |caller: Caller<'_, *mut AbiHost>, topic: i32, ptr: i32, len: i32| -> i32 {
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(ptr as u32, len as u32, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
                 }
+                // We limit payload size
+                if len as u32 > 256 {
+                    return status::ERR_BOUNDS;
+                }
+                let bytes = mem.data(&caller)[ptr as usize..(ptr + len) as usize].to_vec();
                 let host = unsafe { &**caller.data() };
-                host.set_motor_speed(left, right)
+                host.publish(topic as u32, &bytes)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_SUBSCRIBE,
+            |caller: Caller<'_, *mut AbiHost>, topic: i32| -> i32 {
+                let host = unsafe { &**caller.data() };
+                host.subscribe(topic as u32)
             },
         )
         .unwrap();
