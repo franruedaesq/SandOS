@@ -5,6 +5,7 @@
 //! - Display text writing (`host_write_text`)
 //! - Brightness control (`host_set_brightness`)
 //! - Audio capture pipeline (`host_start_audio_capture`, `host_read_audio`)
+//! - Audio playback pipeline (`host_play_audio`)
 //! - Argument bounds validation for all Phase 2 functions
 //! - LLM text → display rendering end-to-end
 

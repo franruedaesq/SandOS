@@ -72,6 +72,10 @@ extern "C" {
     /// Copy up to `max_len` bytes of audio into the buffer at `ptr`.
     /// Returns the number of bytes actually copied.
     fn host_read_audio(ptr: *mut u8, max_len: i32) -> i32;
+
+    /// Play an audio buffer containing `len` bytes from the Wasm memory at `ptr`.
+    /// Returns a status code indicating success or failure.
+    fn host_play_audio(ptr: *const u8, len: i32) -> i32;
 }
 
 // ── ABI Imports (Phase 3 — Sensors) ──────────────────────────────────────────
