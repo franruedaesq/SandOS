@@ -141,10 +141,7 @@ fn ota_receive_chunk_increments_bytes_received() {
 #[test]
 fn ota_receive_chunk_returns_err_busy_when_idle() {
     let mut host = MockHost::default();
-    assert_eq!(
-        host.ota_receive_chunk(0, &[1, 2, 3]),
-        abi::status::ERR_BUSY
-    );
+    assert_eq!(host.ota_receive_chunk(0, &[1, 2, 3]), abi::status::ERR_BUSY);
 }
 
 #[test]
@@ -301,7 +298,7 @@ fn hot_swap_does_not_change_motor_speeds() {
     host.set_motor_speed(100, -50);
 
     // Record motor state before hot-swap.
-    let left_before  = host.motor_left_speed;
+    let left_before = host.motor_left_speed;
     let right_before = host.motor_right_speed;
 
     // Perform the OTA + hot-swap sequence.
@@ -476,7 +473,8 @@ fn ota_full_round_trip_rejected_if_crc_wrong() {
 fn wasm_get_ota_status_idle_by_default() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_ota_status"
                 (func $ota_status (param i32) (result i32)))
@@ -485,7 +483,8 @@ fn wasm_get_ota_status_idle_by_default() {
                 (call $ota_status (i32.const 0))
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, abi::status::OK);
@@ -504,7 +503,8 @@ fn wasm_get_ota_status_reflects_receiving_state() {
     let mut harness = WasmHarness::new(mock);
 
     // WAT: call host_get_ota_status(0), then read state at offset 0 as i32.
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_ota_status"
                 (func $ota_status (param i32) (result i32)))
@@ -525,11 +525,12 @@ fn wasm_get_ota_status_reflects_receiving_state() {
                 (i32.load (i32.const 8))
             )
         )
-    "#);
+    "#,
+    );
 
-    let state          = harness.call_unit_i32(&instance, "get_state");
+    let state = harness.call_unit_i32(&instance, "get_state");
     let bytes_received = harness.call_unit_i32(&instance, "get_bytes_received");
-    let total_size     = harness.call_unit_i32(&instance, "get_total_size");
+    let total_size = harness.call_unit_i32(&instance, "get_total_size");
 
     assert_eq!(state, OtaState::Receiving as i32);
     assert_eq!(bytes_received, 256);
@@ -543,7 +544,8 @@ fn wasm_get_ota_status_oob_ptr_returns_err_bounds() {
 
     // Memory is 1 page = 65536 bytes.
     // out_ptr = 65530, size = 16 → end = 65546 > 65536 → ERR_BOUNDS.
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_ota_status"
                 (func $ota_status (param i32) (result i32)))
@@ -552,7 +554,8 @@ fn wasm_get_ota_status_oob_ptr_returns_err_bounds() {
                 (call $ota_status (i32.const 65530))
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, abi::status::ERR_BOUNDS);
@@ -574,7 +577,8 @@ fn wasm_end_to_end_ota_status_lifecycle() {
     // State is now Idle; swap_count = 1.
 
     let mut harness = WasmHarness::new(mock);
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_ota_status"
                 (func $ota_status (param i32) (result i32)))
@@ -586,7 +590,8 @@ fn wasm_end_to_end_ota_status_lifecycle() {
                 (i32.load (i32.const 12))
             )
         )
-    "#);
+    "#,
+    );
 
     let swap_count = harness.call_unit_i32(&instance, "get_swap_count");
     assert_eq!(swap_count, 1);
@@ -601,7 +606,11 @@ fn build_verified_host(binary: &[u8]) -> MockHost {
     host.ota_begin(binary.len() as u32);
     host.ota_receive_chunk(0, binary);
     let result = host.ota_finalize(crc);
-    assert_eq!(result, abi::status::OK, "build_verified_host: finalize failed");
+    assert_eq!(
+        result,
+        abi::status::OK,
+        "build_verified_host: finalize failed"
+    );
     assert_eq!(host.ota_state, OtaState::Ready);
     host
 }

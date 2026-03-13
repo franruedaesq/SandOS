@@ -82,16 +82,14 @@ extern "C" {
     fn host_get_pitch_roll(pitch_ptr: *mut i32, roll_ptr: *mut i32) -> i32;
 }
 
-// ── ABI Imports (Phase 4 — Motors) ───────────────────────────────────────────
+// ── ABI Imports (Phase 5 — Unified PubSub) ───────────────────────────────────
 
 extern "C" {
-    /// Set the target speed for the left and right drive motors.
-    ///
-    /// Speeds are in the range `[-255, 255]`.  Positive values drive forward,
-    /// negative values drive backward.  Returns `ABI_OK` (0) on success,
-    /// `ERR_INVALID_ARG` (2) if a speed is out of range, or `ERR_BUSY` (3)
-    /// if the ULP safe-shutdown is active.
-    fn host_set_motor_speed(left: i32, right: i32) -> i32;
+    /// Publish a payload to a topic on the OS Message Bus.
+    fn host_publish(topic: i32, ptr: *const u8, len: i32) -> i32;
+
+    /// Subscribe to a topic on the OS Message Bus.
+    fn host_subscribe(topic: i32) -> i32;
 }
 
 // ── ABI Imports (Phase 6 — Structured Telemetry) ─────────────────────────────
@@ -141,12 +139,12 @@ extern "C" {
 
 /// Well-known command IDs matching [`abi::cmd`].
 mod cmd {
-    pub const TOGGLE_LED:         u8 = 0x01;
-    pub const DRAW_EYE:           u8 = 0x10;
-    pub const WRITE_TEXT:         u8 = 0x11;
-    pub const CLEAR_DISPLAY:      u8 = 0x12;
-    pub const SET_MOTOR_SPEED:    u8 = 0x20;
-    pub const EMERGENCY_STOP:     u8 = 0x21;
+    pub const TOGGLE_LED: u8 = 0x01;
+    pub const DRAW_EYE: u8 = 0x10;
+    pub const WRITE_TEXT: u8 = 0x11;
+    pub const CLEAR_DISPLAY: u8 = 0x12;
+    pub const SET_MOTOR_SPEED: u8 = 0x20;
+    pub const EMERGENCY_STOP: u8 = 0x21;
     pub const EMIT_IMU_TELEMETRY: u8 = 0x30;
     pub const EMIT_ODOM_TELEMETRY: u8 = 0x31;
     /// Query the local inference engine (Phase 7).
@@ -156,13 +154,13 @@ mod cmd {
 // ── Eye expression discriminants (must match [`abi::EyeExpression`]) ──────────
 
 mod eye {
-    pub const NEUTRAL:   i32 = 0;
-    pub const HAPPY:     i32 = 1;
-    pub const SAD:       i32 = 2;
-    pub const ANGRY:     i32 = 3;
+    pub const NEUTRAL: i32 = 0;
+    pub const HAPPY: i32 = 1;
+    pub const SAD: i32 = 2;
+    pub const ANGRY: i32 = 3;
     pub const SURPRISED: i32 = 4;
-    pub const THINKING:  i32 = 5;
-    pub const BLINK:     i32 = 6;
+    pub const THINKING: i32 = 5;
+    pub const BLINK: i32 = 6;
 }
 
 // ── Guest state ───────────────────────────────────────────────────────────────
@@ -171,7 +169,7 @@ mod eye {
 static mut TOGGLE_COUNT: u32 = 0;
 
 /// Phase 6: CDR serialized size constants (must match `abi::ImuTelemetry::SERIALIZED_SIZE`).
-const IMU_CDR_SIZE:  usize = 36;
+const IMU_CDR_SIZE: usize = 36;
 /// Phase 6: CDR serialized size for OdometryTelemetry.
 const ODOM_CDR_SIZE: usize = 20;
 
@@ -205,16 +203,16 @@ const TELEMETRY_QUEUE_HIGH_WATER_MARK: i32 = 28;
 #[no_mangle]
 pub extern "C" fn run_command(cmd_id: i32) -> i32 {
     match cmd_id as u8 {
-        cmd::TOGGLE_LED      => toggle_led_handler(),
-        cmd::DRAW_EYE        => draw_eye_handler(eye::HAPPY),
-        cmd::WRITE_TEXT      => write_text_handler(b"Hello, World!"),
-        cmd::CLEAR_DISPLAY   => clear_display_handler(),
-        cmd::SET_MOTOR_SPEED     => balance_handler(),
-        cmd::EMERGENCY_STOP      => emergency_stop_handler(),
-        cmd::EMIT_IMU_TELEMETRY  => emit_imu_telemetry_handler(),
+        cmd::TOGGLE_LED => toggle_led_handler(),
+        cmd::DRAW_EYE => draw_eye_handler(eye::HAPPY),
+        cmd::WRITE_TEXT => write_text_handler(b"Hello, World!"),
+        cmd::CLEAR_DISPLAY => clear_display_handler(),
+        cmd::SET_MOTOR_SPEED => balance_handler(),
+        cmd::EMERGENCY_STOP => emergency_stop_handler(),
+        cmd::EMIT_IMU_TELEMETRY => emit_imu_telemetry_handler(),
         cmd::EMIT_ODOM_TELEMETRY => emit_odom_telemetry_handler(),
         cmd::QUERY_LOCAL_INFERENCE => query_local_inference_handler(),
-        _                        => 1, // Unknown command
+        _ => 1, // Unknown command
     }
 }
 
@@ -299,12 +297,18 @@ pub extern "C" fn balance_handler() -> i32 {
     // Scale pitch (millideg) to a PWM duty cycle in [-255, 255].
     // 255_000 millideg = 255 degrees maps to full speed.
     let duty = (pitch / 1_000).clamp(-255, 255);
-    unsafe { host_set_motor_speed(duty, duty) }
+    let mut payload = [0u8; 4];
+    write_i16_le(&mut payload, 0, duty as i16);
+    write_i16_le(&mut payload, 2, duty as i16);
+    unsafe { host_publish(100, payload.as_ptr(), 4) }
 }
 
 /// Phase 4: Set both motors to zero — immediate stop.
 fn emergency_stop_handler() -> i32 {
-    unsafe { host_set_motor_speed(0, 0) }
+    let mut payload = [0u8; 4];
+    write_i16_le(&mut payload, 0, 0);
+    write_i16_le(&mut payload, 2, 0);
+    unsafe { host_publish(100, payload.as_ptr(), 4) }
 }
 
 // ── Phase 6 handlers ─────────────────────────────────────────────────────────
@@ -344,10 +348,8 @@ fn write_i16_le(buf: &mut [u8], offset: usize, val: i16) {
 #[no_mangle]
 pub extern "C" fn emit_imu_telemetry_handler() -> i32 {
     let mut pitch: i32 = 0;
-    let mut roll:  i32 = 0;
-    let imu_status = unsafe {
-        host_get_pitch_roll(&mut pitch as *mut i32, &mut roll as *mut i32)
-    };
+    let mut roll: i32 = 0;
+    let imu_status = unsafe { host_get_pitch_roll(&mut pitch as *mut i32, &mut roll as *mut i32) };
     if imu_status != 0 {
         return imu_status;
     }
@@ -367,12 +369,12 @@ pub extern "C" fn emit_imu_telemetry_handler() -> i32 {
 
     // Build ImuTelemetry CDR payload (36 bytes) on the stack.
     let mut buf = [0u8; IMU_CDR_SIZE];
-    write_u32_le(&mut buf,  0, seq);                      // sequence
-    write_u64_le(&mut buf,  4, uptime_us);                // timestamp_us
-    write_u32_le(&mut buf, 12, NOMINAL_LOOP_TIME_US);     // loop_time_us
-    write_i32_le(&mut buf, 16, pitch);                    // pitch_millideg
-    write_i32_le(&mut buf, 20, roll);                     // roll_millideg
-    // yaw_rate_millideg_s, linear_accel_x/y remain zero (stubs)
+    write_u32_le(&mut buf, 0, seq); // sequence
+    write_u64_le(&mut buf, 4, uptime_us); // timestamp_us
+    write_u32_le(&mut buf, 12, NOMINAL_LOOP_TIME_US); // loop_time_us
+    write_i32_le(&mut buf, 16, pitch); // pitch_millideg
+    write_i32_le(&mut buf, 20, roll); // roll_millideg
+                                      // yaw_rate_millideg_s, linear_accel_x/y remain zero (stubs)
 
     unsafe { host_emit_imu_telemetry(buf.as_ptr(), IMU_CDR_SIZE as i32) }
 }
@@ -396,12 +398,12 @@ pub extern "C" fn emit_odom_telemetry_handler() -> i32 {
 
     // Build OdometryTelemetry CDR payload (20 bytes) on the stack.
     let mut buf = [0u8; ODOM_CDR_SIZE];
-    write_u32_le(&mut buf,  0, seq);                      // sequence
-    write_u64_le(&mut buf,  4, uptime_us);                // timestamp_us
-    write_u32_le(&mut buf, 12, NOMINAL_LOOP_TIME_US);     // loop_time_us
-    // left_speed and right_speed are 0 (stub; real impl reads motor state)
-    write_i16_le(&mut buf, 16, 0);                        // left_speed
-    write_i16_le(&mut buf, 18, 0);                        // right_speed
+    write_u32_le(&mut buf, 0, seq); // sequence
+    write_u64_le(&mut buf, 4, uptime_us); // timestamp_us
+    write_u32_le(&mut buf, 12, NOMINAL_LOOP_TIME_US); // loop_time_us
+                                                      // left_speed and right_speed are 0 (stub; real impl reads motor state)
+    write_i16_le(&mut buf, 16, 0); // left_speed
+    write_i16_le(&mut buf, 18, 0); // right_speed
 
     unsafe { host_emit_odom_telemetry(buf.as_ptr(), ODOM_CDR_SIZE as i32) }
 }
@@ -430,9 +432,9 @@ pub extern "C" fn query_local_inference_handler() -> i32 {
     }
 
     // Parse the three i32 LE fields.
-    let active         = i32::from_le_bytes([buf[0],  buf[1],  buf[2],  buf[3]]);
-    let top_class      = i32::from_le_bytes([buf[4],  buf[5],  buf[6],  buf[7]]);
-    let confidence     = i32::from_le_bytes([buf[8],  buf[9],  buf[10], buf[11]]);
+    let active = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let top_class = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let confidence = i32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
 
     // If the inference is active and confidence is sufficient, drive the motors
     // autonomously.  This is the fallback behaviour when the radio link is
@@ -448,7 +450,10 @@ pub extern "C" fn query_local_inference_handler() -> i32 {
             4 => (-100, -100), // reverse
             _ => (0, 0),       // stop / unknown
         };
-        unsafe { host_set_motor_speed(left, right) };
+        let mut payload = [0u8; 4];
+        write_i16_le(&mut payload, 0, left as i16);
+        write_i16_le(&mut payload, 2, right as i16);
+        unsafe { host_publish(100, payload.as_ptr(), 4) };
     }
 
     0 // ABI_OK

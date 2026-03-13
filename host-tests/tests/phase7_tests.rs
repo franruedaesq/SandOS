@@ -48,7 +48,11 @@ fn get_local_inference_writes_inactive_result_by_default() {
 #[test]
 fn get_local_inference_returns_set_result() {
     let mut host = MockHost::default();
-    host.inference_result = InferenceResult { active: true, top_class: 3, confidence_pct: 87 };
+    host.inference_result = InferenceResult {
+        active: true,
+        top_class: 3,
+        confidence_pct: 87,
+    };
     let mut out = [0u8; INFERENCE_RESULT_SIZE as usize];
     host.get_local_inference(&mut out);
     let result = InferenceResult::from_bytes(&out).expect("must decode");
@@ -61,7 +65,10 @@ fn get_local_inference_returns_set_result() {
 fn get_local_inference_short_buffer_returns_err_bounds() {
     let host = MockHost::default();
     let mut short = [0u8; 8]; // needs 12 bytes
-    assert_eq!(host.get_local_inference(&mut short), abi::status::ERR_BOUNDS);
+    assert_eq!(
+        host.get_local_inference(&mut short),
+        abi::status::ERR_BOUNDS
+    );
 }
 
 // ── Radio link monitoring tests ───────────────────────────────────────────────
@@ -203,7 +210,11 @@ fn stub_inference_max_samples() {
 
 #[test]
 fn stub_inference_result_pack_unpack_identity() {
-    let original = InferenceResult { active: true, top_class: 5, confidence_pct: 63 };
+    let original = InferenceResult {
+        active: true,
+        top_class: 5,
+        confidence_pct: 63,
+    };
     let packed = original.pack();
     let unpacked = InferenceResult::unpack(packed);
     assert_eq!(unpacked, original);
@@ -223,7 +234,8 @@ fn wasm_get_local_inference_inactive_by_default() {
     //   [0..4]  active (i32 LE)
     //   [4..8]  top_class (i32 LE)
     //   [8..12] confidence_pct (i32 LE)
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_local_inference"
                 (func $infer (param i32) (result i32)))
@@ -233,7 +245,8 @@ fn wasm_get_local_inference_inactive_by_default() {
                 (call $infer (i32.const 0))
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, abi::status::OK);
@@ -242,8 +255,8 @@ fn wasm_get_local_inference_inactive_by_default() {
     let host = harness.host();
     let mut out = [0u8; INFERENCE_RESULT_SIZE as usize];
     out.copy_from_slice(&[0u8; INFERENCE_RESULT_SIZE as usize]); // zero init
-    // We can't directly access Wasm memory from here, but we can verify via
-    // the MockHost that the inference_result is inactive.
+                                                                 // We can't directly access Wasm memory from here, but we can verify via
+                                                                 // the MockHost that the inference_result is inactive.
     assert!(!host.inference_result.active);
 }
 
@@ -252,7 +265,11 @@ fn wasm_get_local_inference_inactive_by_default() {
 #[test]
 fn wasm_get_local_inference_returns_set_result() {
     let mut mock = MockHost::default();
-    mock.inference_result = InferenceResult { active: true, top_class: 2, confidence_pct: 75 };
+    mock.inference_result = InferenceResult {
+        active: true,
+        top_class: 2,
+        confidence_pct: 75,
+    };
     let mut harness = WasmHarness::new(mock);
 
     // WAT module:
@@ -261,7 +278,8 @@ fn wasm_get_local_inference_returns_set_result() {
     //  3. Reads top_class at offset 4  as i32 → store to local.
     //  4. Reads confidence at offset 8 as i32 → store to local.
     //  5. Returns active XOR'd so we can check it quickly (1 = active).
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_local_inference"
                 (func $infer (param i32) (result i32)))
@@ -283,10 +301,11 @@ fn wasm_get_local_inference_returns_set_result() {
                 (i32.load (i32.const 8))
             )
         )
-    "#);
+    "#,
+    );
 
-    let active     = harness.call_unit_i32(&instance, "get_active");
-    let top_class  = harness.call_unit_i32(&instance, "get_top_class");
+    let active = harness.call_unit_i32(&instance, "get_active");
+    let top_class = harness.call_unit_i32(&instance, "get_top_class");
     let confidence = harness.call_unit_i32(&instance, "get_confidence");
 
     assert_eq!(active, 1);
@@ -301,7 +320,8 @@ fn wasm_get_local_inference_oob_ptr_returns_err_bounds() {
 
     // Memory is 1 page = 65536 bytes.
     // out_ptr=65530, size=12 → end=65542 > 65536 → ERR_BOUNDS.
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_local_inference"
                 (func $infer (param i32) (result i32)))
@@ -310,7 +330,8 @@ fn wasm_get_local_inference_oob_ptr_returns_err_bounds() {
                 (call $infer (i32.const 65530))
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, abi::status::ERR_BOUNDS);
@@ -341,7 +362,8 @@ fn wasm_end_to_end_fallback_inference_pipeline() {
 
     // Now run the Wasm guest to query the result.
     let mut harness = WasmHarness::new(mock);
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_local_inference"
                 (func $infer (param i32) (result i32)))
@@ -352,7 +374,8 @@ fn wasm_end_to_end_fallback_inference_pipeline() {
                 (i32.load (i32.const 4))
             )
         )
-    "#);
+    "#,
+    );
 
     let top_class = harness.call_unit_i32(&instance, "get_class");
     assert_eq!(top_class, 4);

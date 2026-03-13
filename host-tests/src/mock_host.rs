@@ -5,10 +5,10 @@
 //! that will run on the chip.
 
 use abi::{
-    status, EyeExpression, ImuReading, ImuTelemetry, InferenceResult, MovementIntent,
-    OdometryTelemetry, OtaState, OtaStatus, RoutingMode, TelemetryPacket,
-    crc32, DEAD_MANS_SWITCH_MS, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS,
-    MAX_MOTOR_SPEED, MAX_TEXT_BYTES, OTA_MAX_BINARY_SIZE, OTA_STATUS_SIZE, TELEMETRY_TX_CAPACITY,
+    crc32, status, EyeExpression, ImuReading, ImuTelemetry, InferenceResult, MovementIntent,
+    OdometryTelemetry, OtaState, OtaStatus, RoutingMode, TelemetryPacket, DEAD_MANS_SWITCH_MS,
+    INFERENCE_RESULT_SIZE, MAX_AUDIO_READ, MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
+    OTA_MAX_BINARY_SIZE, OTA_STATUS_SIZE, TELEMETRY_TX_CAPACITY,
 };
 
 // ── Mock display ──────────────────────────────────────────────────────────────
@@ -358,6 +358,38 @@ impl MockHost {
         status::OK
     }
 
+    // ── Phase 5 — Unified PubSub ──────────────────────────────────────────────
+
+    pub fn publish(&mut self, topic: u32, payload: &[u8]) -> i32 {
+        match topic {
+            abi::topic::MOVEMENT_INTENT => {
+                if payload.len() != 4 {
+                    return status::ERR_INVALID_ARG;
+                }
+                let left = i16::from_le_bytes([payload[0], payload[1]]) as i32;
+                let right = i16::from_le_bytes([payload[2], payload[3]]) as i32;
+                self.set_motor_speed(left, right)
+            }
+            abi::topic::TOGGLE_LED => self.toggle_led(),
+            abi::topic::DRAW_EYE => {
+                if payload.len() != 4 {
+                    return status::ERR_INVALID_ARG;
+                }
+                let expression =
+                    i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                self.draw_eye(expression)
+            }
+            abi::topic::WRITE_TEXT => self.write_text(payload),
+            abi::topic::EMIT_IMU_TELEMETRY => self.emit_imu_telemetry(payload),
+            abi::topic::EMIT_ODOM_TELEMETRY => self.emit_odom_telemetry(payload),
+            _ => status::ERR_UNKNOWN_FN,
+        }
+    }
+
+    pub fn subscribe(&mut self, _topic: u32) -> i32 {
+        status::OK
+    }
+
     // ── Phase 5 — Dead-Man's Switch ───────────────────────────────────────────
 
     // ── Phase 6 — Structured Telemetry ───────────────────────────────────────
@@ -593,10 +625,10 @@ impl MockHost {
             return status::ERR_BOUNDS;
         }
         let snapshot = OtaStatus {
-            state:          self.ota_state,
+            state: self.ota_state,
             bytes_received: self.ota_bytes_received,
-            total_size:     self.ota_expected_size,
-            swap_count:     self.hot_swap_count,
+            total_size: self.ota_expected_size,
+            swap_count: self.hot_swap_count,
         };
         snapshot.to_bytes(out);
         status::OK
@@ -638,5 +670,9 @@ pub fn run_stub_inference(tensor: &[i8]) -> InferenceResult {
     let mean_abs = sum / n;
     let confidence_pct = ((mean_abs * 100) / 127).min(100) as u8;
 
-    InferenceResult { active: true, top_class, confidence_pct }
+    InferenceResult {
+        active: true,
+        top_class,
+        confidence_pct,
+    }
 }

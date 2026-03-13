@@ -84,7 +84,8 @@ fn wasm_get_pitch_roll_writes_to_memory() {
 
     // The Wasm module writes pitch at offset 200 and roll at offset 204,
     // then loads pitch back as the return value so the test can assert on it.
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_pitch_roll"
                 (func $get_imu (param i32 i32) (result i32)))
@@ -98,7 +99,8 @@ fn wasm_get_pitch_roll_writes_to_memory() {
                 i32.load
             )
         )
-    "#);
+    "#,
+    );
 
     let pitch_read = harness.call_unit_i32(&instance, "run");
     assert_eq!(pitch_read, 20_000, "pitch should be 20 000 millideg");
@@ -114,7 +116,8 @@ fn wasm_get_pitch_roll_roll_value_correct() {
     };
     let mut harness = WasmHarness::new(host);
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_pitch_roll"
                 (func $get_imu (param i32 i32) (result i32)))
@@ -129,7 +132,8 @@ fn wasm_get_pitch_roll_roll_value_correct() {
                 i32.load
             )
         )
-    "#);
+    "#,
+    );
 
     let roll_read = harness.call_unit_i32(&instance, "run");
     assert_eq!(roll_read, -7_777, "roll should be -7 777 millideg");
@@ -140,7 +144,8 @@ fn wasm_get_pitch_roll_roll_value_correct() {
 fn wasm_get_pitch_roll_oob_pitch_ptr_returns_bounds_error() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_pitch_roll"
                 (func $get_imu (param i32 i32) (result i32)))
@@ -152,7 +157,8 @@ fn wasm_get_pitch_roll_oob_pitch_ptr_returns_bounds_error() {
                 call $get_imu
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::ERR_BOUNDS);
@@ -163,7 +169,8 @@ fn wasm_get_pitch_roll_oob_pitch_ptr_returns_bounds_error() {
 fn wasm_get_pitch_roll_oob_roll_ptr_returns_bounds_error() {
     let mut harness = WasmHarness::new(MockHost::default());
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_pitch_roll"
                 (func $get_imu (param i32 i32) (result i32)))
@@ -175,7 +182,8 @@ fn wasm_get_pitch_roll_oob_roll_ptr_returns_bounds_error() {
                 call $get_imu
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::ERR_BOUNDS);
@@ -192,7 +200,8 @@ fn wasm_sensor_triggered_led_toggle() {
     };
     let mut harness = WasmHarness::new(host);
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_pitch_roll"
                 (func $get_imu (param i32 i32) (result i32)))
@@ -216,11 +225,15 @@ fn wasm_sensor_triggered_led_toggle() {
                 i32.const 0     ;; return OK
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::OK);
-    assert!(harness.host().led_on, "LED should be toggled when pitch > 10°");
+    assert!(
+        harness.host().led_on,
+        "LED should be toggled when pitch > 10°"
+    );
 }
 
 /// Wasm guest does NOT toggle the LED when pitch is below the threshold.
@@ -228,12 +241,13 @@ fn wasm_sensor_triggered_led_toggle() {
 fn wasm_sensor_no_led_toggle_when_pitch_is_low() {
     let mut host = MockHost::default();
     host.imu_reading = ImuReading {
-        pitch_millideg: 5_000,  // only 5° — below the 10° threshold
+        pitch_millideg: 5_000, // only 5° — below the 10° threshold
         roll_millideg: 0,
     };
     let mut harness = WasmHarness::new(host);
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_pitch_roll"
                 (func $get_imu (param i32 i32) (result i32)))
@@ -256,11 +270,15 @@ fn wasm_sensor_no_led_toggle_when_pitch_is_low() {
                 i32.const 0
             )
         )
-    "#);
+    "#,
+    );
 
     let result = harness.call_unit_i32(&instance, "run");
     assert_eq!(result, status::OK);
-    assert!(!harness.host().led_on, "LED should remain OFF when pitch <= 10°");
+    assert!(
+        !harness.host().led_on,
+        "LED should remain OFF when pitch <= 10°"
+    );
 }
 
 /// `host_get_pitch_roll` called back-to-back returns the same (latest) value.
@@ -273,7 +291,8 @@ fn wasm_get_pitch_roll_multiple_calls_return_same_value() {
     };
     let mut harness = WasmHarness::new(host);
 
-    let instance = harness.load_wat(r#"
+    let instance = harness.load_wat(
+        r#"
         (module
             (import "env" "host_get_pitch_roll"
                 (func $get_imu (param i32 i32) (result i32)))
@@ -294,7 +313,8 @@ fn wasm_get_pitch_roll_multiple_calls_return_same_value() {
                 i32.load
             )
         )
-    "#);
+    "#,
+    );
 
     let pitch = harness.call_unit_i32(&instance, "run");
     assert_eq!(pitch, 3_000);
