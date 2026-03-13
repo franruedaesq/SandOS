@@ -282,8 +282,8 @@ async fn display_task(
         let battery_mv = crate::sensors::load_battery_mv();
         let touch_coords = crate::sensors::load_touch_coords();
 
-        let _ = oled.clear(Rgb565::BLACK);
-        let title_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+        let _ = oled.clear(Rgb565::WHITE);
+        let title_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
         let _ = Text::new("SandOS Hardware Diagnostics", Point::new(10, 20), title_style).draw(&mut oled);
         let _ = Text::new("- LCD Display: OK (SPI)", Point::new(10, 40), title_style).draw(&mut oled);
 
@@ -681,6 +681,7 @@ fn get_menu_selected(state: &FaceState) -> u8 {
 /// Helper to cleanly return to Face mode, resetting all transient state.
 fn return_to_face(state: &mut FaceState) {
     state.ui_mode = UiMode::Face;
+    state.force_clear = true;
     state.text.clear();
     state.expression = EyeExpression::Neutral;
     state.expression_override = false;
@@ -699,6 +700,7 @@ fn return_to_face(state: &mut FaceState) {
 
 /// Execute a menu item action from a long press in TopMenu or SubMenu.
 fn execute_menu_action(action: MenuItemAction, state: &mut FaceState) {
+    state.force_clear = true;
     match action {
         MenuItemAction::OpenSub(cat) => {
             state.ui_mode = UiMode::SubMenu(cat);
@@ -936,6 +938,12 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
 
 struct FaceState {
     expression: EyeExpression,
+    prev_expression: EyeExpression,
+    prev_is_blinking: bool,
+    prev_bob_y: i32,
+    prev_eye_look_x: i32,
+    force_clear: bool,
+    prev_text: heapless::String<64>,
     text: heapless::String<64>,
     brightness: u8,
     frame: u32,
@@ -944,11 +952,16 @@ struct FaceState {
     /// Timestamp of last ABI expression override.
     expression_override_since: Option<Instant>,
     ui_mode: UiMode,
+    prev_ui_mode: UiMode,
     // ── Menu navigation ──
     top_menu_selected: u8,
     sub_menu_selected: u8,
     web_menu_selected: u8,
     vienna_selected: usize,
+    prev_top_menu_selected: u8,
+    prev_sub_menu_selected: u8,
+    prev_web_menu_selected: u8,
+    prev_vienna_selected: usize,
     /// Horizontal scroll pixel offset for the selected Vienna list item (marquee).
     vienna_scroll_x: i32,
     /// Updated on every button event; used for the inactivity timeout.
@@ -986,16 +999,27 @@ impl Default for FaceState {
     fn default() -> Self {
         Self {
             expression: EyeExpression::Neutral,
+            prev_expression: EyeExpression::Neutral,
+            prev_is_blinking: false,
+            prev_bob_y: 0,
+            prev_eye_look_x: 0,
+            force_clear: true,
+            prev_text: heapless::String::new(),
             text: heapless::String::new(),
             brightness: 255,
             frame: 0,
             expression_override: false,
             expression_override_since: None,
             ui_mode: UiMode::Face,
+            prev_ui_mode: UiMode::Face,
             top_menu_selected: 0,
             sub_menu_selected: 0,
             web_menu_selected: 0,
             vienna_selected: 0,
+            prev_top_menu_selected: 0,
+            prev_sub_menu_selected: 0,
+            prev_web_menu_selected: 0,
+            prev_vienna_selected: 0,
             vienna_scroll_x: 0,
             last_button_time: Instant::from_ticks(0),
             flashlight_on: false,
@@ -1070,6 +1094,7 @@ fn render_frame(oled: &mut TftDisplay, state: &mut FaceState) {
         UiMode::PartyMode => render_party_mode(oled, state),
         _ => render_menu_mode(oled, state), // TopMenu, SubMenu, WebMenu
     }
+    state.prev_ui_mode = state.ui_mode;
 }
 
 // ── Full-screen face rendering ────────────────────────────────────────────────
@@ -1130,6 +1155,21 @@ fn breathing_offset(now_ms: u64) -> i32 {
 }
 
 /// Render the full 128×64 kawaii face (frameless — eyes and mouth only).
+fn erase_face(oled: &mut TftDisplay, state: &FaceState, scale: i32) {
+
+    // Draw the eyes and mouth using the background color (WHITE)
+    // To do this simply, we could just draw a large background rectangle over the face area.
+    if scale > 0 {
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(DISPLAY_WIDTH, DISPLAY_HEIGHT))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+    } else {
+        let _ = Rectangle::new(Point::new(64, 0), Size::new(DISPLAY_WIDTH - 64, DISPLAY_HEIGHT))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+    }
+}
+
 fn render_full_face(oled: &mut TftDisplay, state: &mut FaceState) {
     state.frame = state.frame.wrapping_add(1);
     let now_ms = Instant::now().as_millis() as u64;
@@ -1139,7 +1179,27 @@ fn render_full_face(oled: &mut TftDisplay, state: &mut FaceState) {
     let in_transition = now_ms < state.transition_end_ms;
     let blinking = now_ms < state.blink_end_ms || in_transition;
 
-    oled.clear(Rgb565::BLACK);
+    let face_changed = state.expression != state.prev_expression
+        || blinking != state.prev_is_blinking
+        || bob_y != state.prev_bob_y
+        || state.eye_look_x != state.prev_eye_look_x
+        || state.text != state.prev_text;
+
+    if state.force_clear {
+        oled.clear(Rgb565::WHITE);
+        state.force_clear = false;
+    } else if face_changed {
+        erase_face(oled, state, 1);
+    } else {
+        // No need to redraw face if nothing changed
+        return;
+    }
+
+    state.prev_text = state.text.clone();
+    state.prev_expression = state.expression;
+    state.prev_is_blinking = blinking;
+    state.prev_bob_y = bob_y;
+    state.prev_eye_look_x = state.eye_look_x;
 
     // ── Eyes ──
     // Centred on 128×64: eyes at y≈24, spread wide for kawaii proportions
@@ -1163,9 +1223,9 @@ fn render_full_face(oled: &mut TftDisplay, state: &mut FaceState) {
 
     // ── Status text overlay ──
     if !state.text.is_empty() {
-        let text_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+        let text_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
         let _ = Rectangle::new(Point::new(0, 54), Size::new(DISPLAY_WIDTH, 10))
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
         let _ = Text::new(&state.text, Point::new(0, 63), text_style).draw(oled);
     }
@@ -1181,9 +1241,9 @@ fn draw_eyes(
     blinking: bool,
     scale: i32,
 ) {
-    let fill_on = PrimitiveStyle::with_fill(Rgb565::WHITE);
-    let fill_off = PrimitiveStyle::with_fill(Rgb565::BLACK);
-    let stroke2 = PrimitiveStyle::with_stroke(Rgb565::WHITE, if scale > 0 { 2 } else { 1 });
+    let fill_on = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let fill_off = PrimitiveStyle::with_fill(Rgb565::WHITE);
+    let stroke2 = PrimitiveStyle::with_stroke(Rgb565::BLACK, if scale > 0 { 2 } else { 1 });
 
     // Eye radius scales: full=12, mini=6
     let r = if scale > 0 { 12i32 } else { 6i32 };
@@ -1219,6 +1279,11 @@ fn draw_eyes(
                 .into_styled(fill_on).draw(oled);
             let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
                 .into_styled(fill_on).draw(oled);
+            // Highlight (upper-right of each eye)
+            let _ = Circle::new(Point::new(le_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
+                .into_styled(fill_off).draw(oled);
+            let _ = Circle::new(Point::new(re_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
+                .into_styled(fill_off).draw(oled);
             // Erase bottom 60% to create upward arc
             let cut_h = (r * 6 / 5) as u32;
             let _ = Rectangle::new(
@@ -1236,6 +1301,11 @@ fn draw_eyes(
                 .into_styled(fill_on).draw(oled);
             let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
                 .into_styled(fill_on).draw(oled);
+            // Highlight (upper-right of each eye)
+            let _ = Circle::new(Point::new(le_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
+                .into_styled(fill_off).draw(oled);
+            let _ = Circle::new(Point::new(re_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
+                .into_styled(fill_off).draw(oled);
             // Eyelid: erase top portion + angled lid line
             let lid_h = (r * 13 / 10) as u32;
             let _ = Rectangle::new(
@@ -1262,6 +1332,11 @@ fn draw_eyes(
                 .into_styled(fill_on).draw(oled);
             let _ = Circle::new(Point::new(re_cx - r, eye_cy - r), (r * 2) as u32)
                 .into_styled(fill_on).draw(oled);
+            // Highlight (upper-right of each eye)
+            let _ = Circle::new(Point::new(le_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
+                .into_styled(fill_off).draw(oled);
+            let _ = Circle::new(Point::new(re_cx + r / 4, eye_cy - r / 2 - hr / 2), hr as u32)
+                .into_styled(fill_off).draw(oled);
             // Cut top portion for narrowed look
             let cut = (r * 2 / 3) as u32;
             let _ = Rectangle::new(
@@ -1298,9 +1373,9 @@ fn draw_eyes(
                 .into_styled(fill_on).draw(oled);
             // Highlight
             let _ = Circle::new(Point::new(le_cx + big_r / 3, eye_cy - big_r / 2), hr as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_off).draw(oled);
             let _ = Circle::new(Point::new(re_cx + big_r / 3, eye_cy - big_r / 2), hr as u32)
-                .into_styled(fill_on).draw(oled);
+                .into_styled(fill_off).draw(oled);
         }
         EyeExpression::Thinking => {
             // Thinking: left eye normal (with look-up pupil), right eye half-closed
@@ -1341,7 +1416,7 @@ fn draw_eyes(
 
 /// Draw a filled pixel-art heart centred at (cx, cy) with radius `r`.
 fn draw_heart(oled: &mut TftDisplay, cx: i32, cy: i32, r: i32) {
-    let fill_on = PrimitiveStyle::with_fill(Rgb565::WHITE);
+    let fill_on = PrimitiveStyle::with_fill(Rgb565::BLACK);
     // Heart = two overlapping circles on top + triangle pointing down
     let hr = r * 2 / 3; // radius of each lobe
     // Left lobe
@@ -1360,9 +1435,13 @@ fn draw_heart(oled: &mut TftDisplay, cx: i32, cy: i32, r: i32) {
             let _ = Line::new(
                 Point::new(cx - half_w, cy + dy),
                 Point::new(cx + half_w, cy + dy),
-            ).into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1)).draw(oled);
+            ).into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1)).draw(oled);
         }
     }
+    // Highlight (upper-right)
+    let highlight_r = if r > 10 { 4i32 } else { 2i32 };
+    let _ = Circle::new(Point::new(cx + r / 4, cy - r / 2 - highlight_r / 2), highlight_r as u32)
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE)).draw(oled);
 }
 
 // ── Shared mouth drawing ──────────────────────────────────────────────────────
@@ -1376,10 +1455,10 @@ fn draw_mouth(
     scale: i32,
     _now_ms: u64,
 ) {
-    let fill_on = PrimitiveStyle::with_fill(Rgb565::WHITE);
-    let fill_off = PrimitiveStyle::with_fill(Rgb565::BLACK);
-    let stroke = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
-    let stroke2 = PrimitiveStyle::with_stroke(Rgb565::WHITE, if scale > 0 { 2 } else { 1 });
+    let fill_on = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let fill_off = PrimitiveStyle::with_fill(Rgb565::WHITE);
+    let stroke = PrimitiveStyle::with_stroke(Rgb565::BLACK, 1);
+    let stroke2 = PrimitiveStyle::with_stroke(Rgb565::BLACK, if scale > 0 { 2 } else { 1 });
     // Mouth dimensions scale with mode
     let mr = if scale > 0 { 10i32 } else { 6i32 }; // mouth radius for curves
 
@@ -1468,22 +1547,41 @@ fn render_menu_mode(oled: &mut TftDisplay, state: &mut FaceState) {
     let now_ms = Instant::now().as_millis() as u64;
     tick_animation(state, now_ms);
 
-    oled.clear(Rgb565::BLACK);
+    let menu_changed = state.ui_mode != state.prev_ui_mode
+        || state.top_menu_selected != state.prev_top_menu_selected
+        || state.sub_menu_selected != state.prev_sub_menu_selected
+        || state.web_menu_selected != state.prev_web_menu_selected;
 
-    // Vertical divider at x=63.
-    let divider_style = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
-    let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
-        .into_styled(divider_style)
-        .draw(oled);
+    if state.force_clear {
+        oled.clear(Rgb565::WHITE);
+        state.force_clear = false;
+        render_menu_panel(oled, state);
 
-    render_menu_panel(oled, state);
+        let divider_style = PrimitiveStyle::with_stroke(Rgb565::BLACK, 1);
+        let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
+            .into_styled(divider_style)
+            .draw(oled);
+    } else if menu_changed {
+        // Erase menu area and redraw
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(62, DISPLAY_HEIGHT))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+        render_menu_panel(oled, state);
+    }
+
+    state.prev_ui_mode = state.ui_mode;
+    state.prev_top_menu_selected = state.top_menu_selected;
+    state.prev_sub_menu_selected = state.sub_menu_selected;
+    state.prev_web_menu_selected = state.web_menu_selected;
+
+
     render_mini_face(oled, state);
 }
 
 /// Draw the left 63-px menu panel.
 fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
-    let normal_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let normal_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
     if let UiMode::WebMenu = state.ui_mode {
         render_web_menu_panel(oled, state);
@@ -1512,7 +1610,7 @@ fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
         let y_top = (slot as i32) * 16;
         if i == sel {
             let _ = Rectangle::new(Point::new(0, y_top), Size::new(63, 16))
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
                 .draw(oled);
             let _ = Text::new(label, Point::new(4, y_top + 12), inverted_style).draw(oled);
         } else {
@@ -1530,8 +1628,8 @@ fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
 }
 
 fn render_web_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
-    let normal_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let normal_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
     let _ = Text::new("Web", Point::new(2, 10), normal_style).draw(oled);
 
@@ -1539,7 +1637,7 @@ fn render_web_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
         let y_top = 14 + (i as i32) * 16;
         if i == state.web_menu_selected as usize {
             let _ = Rectangle::new(Point::new(0, y_top), Size::new(63, 14))
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
                 .draw(oled);
             let _ = Text::new(label, Point::new(4, y_top + 11), inverted_style).draw(oled);
         } else {
@@ -1576,7 +1674,7 @@ fn render_web_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
     }
 
     let _ = Rectangle::new(Point::new(0, 52), Size::new(63, 12))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
         .draw(oled);
     let _ = Text::new(&status, Point::new(2, 62), normal_style).draw(oled);
 }
@@ -1587,13 +1685,27 @@ fn render_web_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
 fn render_pomodoro(oled: &mut TftDisplay, state: &mut FaceState) {
     use core::fmt::Write;
 
-    oled.clear(Rgb565::BLACK);
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    if state.force_clear {
+        oled.clear(Rgb565::WHITE);
+        state.force_clear = false;
+    } else {
+        // Just erase the specific text areas that change instead of the whole screen
+        let _ = Rectangle::new(Point::new(34, 28), Size::new(60, 20))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+        let _ = Rectangle::new(Point::new(0, 48), Size::new(128, 14))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+        let _ = Rectangle::new(Point::new(0, 56), Size::new(128, 7))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+    }
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
     // Header bar
     let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(oled);
     let _ = Text::new("POMODORO", Point::new(34, 9), inv_style).draw(oled);
 
@@ -1639,28 +1751,36 @@ fn render_pomodoro(oled: &mut TftDisplay, state: &mut FaceState) {
 
     // Progress bar at bottom (y=54..62)
     let _ = Rectangle::new(Point::new(0, 55), Size::new(128, 9))
-        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
         .draw(oled);
     let elapsed_ms = total_ms.saturating_sub(remaining_ms);
     let fill_w = ((elapsed_ms * 126) / total_ms) as u32;
     if fill_w > 0 {
         let _ = Rectangle::new(Point::new(1, 56), Size::new(fill_w, 7))
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(oled);
     }
 }
 
 /// Full-screen system monitor (WiFi, IP, uptime, memory).
-fn render_system_monitor(oled: &mut TftDisplay, _state: &mut FaceState) {
+fn render_system_monitor(oled: &mut TftDisplay, state: &mut FaceState) {
     use core::fmt::Write;
 
-    oled.clear(Rgb565::BLACK);
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    if state.force_clear {
+        oled.clear(Rgb565::WHITE);
+        state.force_clear = false;
+    } else {
+        // Only erase the content rows
+        let _ = Rectangle::new(Point::new(0, 20), Size::new(128, 44))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+    }
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
     // Header bar
     let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(oled);
     let _ = Text::new("SYSTEM", Point::new(40, 9), inv_style).draw(oled);
 
@@ -1701,16 +1821,24 @@ fn render_system_monitor(oled: &mut TftDisplay, _state: &mut FaceState) {
 }
 
 /// Full-screen clock view (NTP time or uptime fallback).
-fn render_clock_view(oled: &mut TftDisplay, _state: &mut FaceState) {
+fn render_clock_view(oled: &mut TftDisplay, state: &mut FaceState) {
     use core::fmt::Write;
 
-    oled.clear(Rgb565::BLACK);
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    if state.force_clear {
+        oled.clear(Rgb565::WHITE);
+        state.force_clear = false;
+    } else {
+        // Only erase the content area
+        let _ = Rectangle::new(Point::new(0, 20), Size::new(128, 44))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+    }
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
     // Header bar
     let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(oled);
     let _ = Text::new("CLOCK", Point::new(44, 9), inv_style).draw(oled);
 
@@ -1770,31 +1898,33 @@ fn render_flashlight(oled: &mut TftDisplay, state: &mut FaceState) {
     let now_ms = Instant::now().as_millis() as u64;
     tick_animation(state, now_ms);
 
-    oled.clear(Rgb565::BLACK);
+    if state.force_clear {
+        oled.clear(Rgb565::WHITE);
+        state.force_clear = false;
 
-    // Vertical divider
-    let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
-        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
-        .draw(oled);
+        let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(oled);
 
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+        let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
-    // Header
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
-        .draw(oled);
-    let _ = Text::new("LIGHT", Point::new(12, 9), inv_style).draw(oled);
+        // Header
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .draw(oled);
+        let _ = Text::new("LIGHT", Point::new(12, 9), inv_style).draw(oled);
 
-    // Status
-    let _ = Text::new("ON", Point::new(22, 32), style).draw(oled);
+        // Status
+        let _ = Text::new("ON", Point::new(22, 32), style).draw(oled);
 
-    // Sun icon (simple circle with rays)
-    let _ = Circle::new(Point::new(24, 36), 10)
-        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
-        .draw(oled);
+        // Sun icon (simple circle with rays)
+        let _ = Circle::new(Point::new(24, 36), 10)
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(oled);
 
-    let _ = Text::new(">exit", Point::new(12, 60), style).draw(oled);
+        let _ = Text::new(">exit", Point::new(12, 60), style).draw(oled);
+    }
 
     render_mini_face(oled, state);
 }
@@ -1805,21 +1935,29 @@ fn render_party_mode(oled: &mut TftDisplay, state: &mut FaceState) {
     let now_ms = Instant::now().as_millis() as u64;
     tick_animation(state, now_ms);
 
-    oled.clear(Rgb565::BLACK);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
-    // Vertical divider
-    let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
-        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
-        .draw(oled);
+    if state.force_clear {
+        oled.clear(Rgb565::WHITE);
+        state.force_clear = false;
 
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+        let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(oled);
 
-    // Header
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
-        .draw(oled);
-    let _ = Text::new("PARTY", Point::new(12, 9), inv_style).draw(oled);
+        // Header
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .draw(oled);
+        let _ = Text::new("PARTY", Point::new(12, 9), inv_style).draw(oled);
+        let _ = Text::new(">exit", Point::new(12, 60), style).draw(oled);
+    } else {
+        // Erase text area
+        let _ = Rectangle::new(Point::new(0, 30), Size::new(62, 30))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+    }
 
     // Animated note symbols based on frame
     let phase = (state.frame / 4) % 3;
@@ -1838,8 +1976,6 @@ fn render_party_mode(oled: &mut TftDisplay, state: &mut FaceState) {
         let _ = Text::new(&hue_str, Point::new(4, 46), style).draw(oled);
     }
 
-    let _ = Text::new(">exit", Point::new(12, 60), style).draw(oled);
-
     render_mini_face(oled, state);
 }
 
@@ -1855,16 +1991,31 @@ fn render_party_mode(oled: &mut TftDisplay, state: &mut FaceState) {
 fn render_vienna_lines(oled: &mut TftDisplay, state: &mut FaceState) {
     use core::fmt::Write;
 
-    oled.clear(Rgb565::BLACK);
+    let vienna_changed = state.vienna_selected != state.prev_vienna_selected;
+    if state.force_clear {
+        oled.clear(Rgb565::WHITE);
+        state.force_clear = false;
+    } else if vienna_changed || state.frame % 2 == 0 {
+        // Erase list and bottom area
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 36))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+        let _ = Rectangle::new(Point::new(0, 48), Size::new(128, 16))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+    } else {
+        return; // Don't redraw if not changed and not marquee frame
+    }
+    state.prev_vienna_selected = state.vienna_selected;
 
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
     let data = crate::vienna_fetch::get_lines();
 
     // Loading / error / empty states
     if data.loading && data.stops.is_empty() {
         let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(oled);
         let _ = Text::new("Wiener Linien", Point::new(22, 9), inv_style).draw(oled);
         let _ = Text::new("Loading...", Point::new(28, 36), style).draw(oled);
@@ -1872,7 +2023,7 @@ fn render_vienna_lines(oled: &mut TftDisplay, state: &mut FaceState) {
     }
     if data.error && data.stops.is_empty() {
         let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(oled);
         let _ = Text::new("Wiener Linien", Point::new(22, 9), inv_style).draw(oled);
         let _ = Text::new("Fetch error", Point::new(24, 36), style).draw(oled);
@@ -1880,7 +2031,7 @@ fn render_vienna_lines(oled: &mut TftDisplay, state: &mut FaceState) {
     }
     if data.stops.is_empty() {
         let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(oled);
         let _ = Text::new("Wiener Linien", Point::new(22, 9), inv_style).draw(oled);
         let _ = Text::new("No data yet", Point::new(24, 36), style).draw(oled);
@@ -1913,7 +2064,7 @@ fn render_vienna_lines(oled: &mut TftDisplay, state: &mut FaceState) {
 
         if is_selected {
             let _ = Rectangle::new(Point::new(0, y_top), Size::new(128, 12))
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
                 .draw(oled);
 
             let text_w = label.len() as i32 * 6;
@@ -1952,7 +2103,7 @@ fn render_vienna_lines(oled: &mut TftDisplay, state: &mut FaceState) {
 
     // Separator line
     let _ = Line::new(Point::new(0, 37), Point::new(127, 37))
-        .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
         .draw(oled);
 
     // Bottom area: show routes for selected stop (up to 2 lines)
@@ -1980,13 +2131,24 @@ fn render_vienna_lines(oled: &mut TftDisplay, state: &mut FaceState) {
 ///   Rows 24+: each route line with wait times and clock times
 ///
 /// Any button press returns to the list view.
-fn render_vienna_detail(oled: &mut TftDisplay, state: &FaceState) {
+fn render_vienna_detail(oled: &mut TftDisplay, state: &mut FaceState) {
     use core::fmt::Write;
 
-    oled.clear(Rgb565::BLACK);
+    let vienna_changed = state.vienna_selected != state.prev_vienna_selected;
+    if state.force_clear {
+        oled.clear(Rgb565::WHITE);
+        state.force_clear = false;
+    } else if vienna_changed {
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(oled);
+    } else {
+        return;
+    }
+    state.prev_vienna_selected = state.vienna_selected;
 
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+    let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
     let data = crate::vienna_fetch::get_lines();
 
     if data.stops.is_empty() {
@@ -1999,7 +2161,7 @@ fn render_vienna_detail(oled: &mut TftDisplay, state: &FaceState) {
 
     // Header bar: station name
     let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 12))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(oled);
     let hdr: &str = &stop.station;
     let hdr_x = ((128i32 - (hdr.len() as i32) * 6) / 2).max(0);
@@ -2035,11 +2197,31 @@ fn render_vienna_detail(oled: &mut TftDisplay, state: &FaceState) {
 }
 
 /// Draw the mini animated face on the right 64-px panel (x=64..127).
-fn render_mini_face(oled: &mut TftDisplay, state: &FaceState) {
+fn render_mini_face(oled: &mut TftDisplay, state: &mut FaceState) {
     let now_ms = Instant::now().as_millis() as u64;
     let blinking = now_ms < state.blink_end_ms || now_ms < state.transition_end_ms;
 
     let bob_y = breathing_offset(now_ms) / 2; // subtler in mini
+
+    let face_changed = state.expression != state.prev_expression
+        || blinking != state.prev_is_blinking
+        || bob_y != state.prev_bob_y
+        || state.eye_look_x != state.prev_eye_look_x;
+
+    let mode_changed = state.ui_mode != state.prev_ui_mode;
+    if mode_changed || face_changed {
+        if !mode_changed {
+            // only erase if we didn't just clear the whole screen
+            erase_face(oled, state, 0);
+        }
+    } else {
+        return;
+    }
+
+    state.prev_expression = state.expression;
+    state.prev_is_blinking = blinking;
+    state.prev_bob_y = bob_y;
+    state.prev_eye_look_x = state.eye_look_x;
 
     // Eye positions centred in the right 64px panel
     let le_cx = 80 + state.eye_look_x / 2;
