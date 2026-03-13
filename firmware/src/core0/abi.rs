@@ -287,7 +287,7 @@ impl AbiHost {
         }
     }
 
-    pub fn publish(&self, topic: u32, payload: &[u8]) -> i32 {
+    pub fn publish(&mut self, topic: u32, payload: &[u8]) -> i32 {
         match topic {
             abi::topic::MOVEMENT_INTENT => {
                 if payload.len() != 4 {

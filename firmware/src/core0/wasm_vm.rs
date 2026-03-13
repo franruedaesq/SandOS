@@ -381,7 +381,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                     return status::ERR_BOUNDS;
                 }
                 let bytes = mem.data(&caller)[ptr as usize..(ptr + len) as usize].to_vec();
-                let host = unsafe { &**caller.data() };
+                let host = unsafe { &mut **caller.data() };
                 host.publish(topic as u32, &bytes)
             },
         )
