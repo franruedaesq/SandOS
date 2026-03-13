@@ -6,7 +6,7 @@ use esp_hal::spi::master::Spi;
 use esp_hal::Blocking;
 use esp_hal::gpio::Output;
 use embedded_hal_bus::spi::ExclusiveDevice;
-use embedded_io::{Read, Seek};
+use embedded_io::Seek;
 
 pub struct DummyTimeSource;
 
@@ -61,7 +61,7 @@ pub async fn read_wasm_file(filename: &str) -> Option<Vec<u8>> {
     if let Some(ref mut manager) = *manager_opt {
         if let Ok(volume) = manager.open_volume(VolumeIdx(0)) {
             if let Ok(root_dir) = volume.open_root_dir() {
-                if let Ok(mut file) = root_dir.open_file_in_dir(filename, embedded_sdmmc::Mode::ReadOnly) {
+                if let Ok(file) = root_dir.open_file_in_dir(filename, embedded_sdmmc::Mode::ReadOnly) {
                     let mut contents = Vec::new();
                     let mut buffer = [0u8; 512];
 
