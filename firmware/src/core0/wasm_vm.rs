@@ -370,6 +370,32 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
         )
         .unwrap();
 
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            abi::FN_PLAY_AUDIO,
+            |caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+                if ptr < 0 || len < 0 {
+                    return status::ERR_INVALID_ARG;
+                }
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(ptr as u32, len as u32, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                if len as u32 > abi::MAX_AUDIO_PLAY {
+                    return status::ERR_BOUNDS;
+                }
+                let slice = &mem.data(&caller)[ptr as usize..(ptr as usize + len as usize)];
+                let host = unsafe { &mut **caller.data() };
+                host.play_audio(slice)
+            },
+        )
+        .unwrap();
+
     // ── Phase 3 — Sensors ─────────────────────────────────────────────────────
 
     linker

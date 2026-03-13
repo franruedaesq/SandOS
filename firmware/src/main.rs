@@ -20,6 +20,7 @@
 #![no_main]
 
 extern crate alloc;
+use alloc::boxed::Box;
 use core::ptr::addr_of_mut;
 
 use embassy_executor::Spawner;
@@ -29,6 +30,8 @@ use esp_hal::{
     cpu_control::{CpuControl, Stack},
     gpio::{Io, GpioPin},
     i2c::master::{Config as I2cConfig, I2c},
+    i2s::master::{DataFormat, I2s, Standard},
+    peripheral::Peripheral,
     peripherals::ADC1,
     rmt::{TxChannelConfig, TxChannelCreator},
     time::RateExtU32,
@@ -52,6 +55,7 @@ mod telemetry;
 mod touch;
 mod ulp;
 mod vienna_fetch;
+mod audio;
 mod web_server;
 mod wifi;
 
@@ -198,6 +202,69 @@ async fn main(spawner: Spawner) {
         .into_async();
     spawner.spawn(touch_task(i2c)).unwrap();
     log::info!("Touch I2C task spawned");
+
+    // ── 8. Audio I2S + DMA init ──────────────────────────────────────────────
+    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = esp_hal::dma_buffers!(4096, 4096);
+
+    let i2s = I2s::new(
+        peripherals.I2S0,
+        Standard::Philips,
+        DataFormat::Data16Channel16,
+        16000.Hz(),
+        peripherals.DMA_CH0,
+        rx_descriptors,
+        tx_descriptors,
+    );
+
+    let i2s = i2s.with_mclk(peripherals.GPIO4).into_async();
+
+    // GPIO bindings need to be split if the same pin is used for RX and TX,
+    // but esp-hal 0.23 requires taking ownership. For I2S bclk/ws, we can
+    // configure them on either rx or tx, and the peripheral shares them internally
+    // if it's the same port.
+    // Wait, let's look at how esp-hal does it. If we use with_bclk on rx, we can't use it on tx.
+    // However, I2S0 shares signals. We can just build rx and tx without re-assigning bclk and ws
+    // to tx if they are already on rx, or vice versa? No, they have separate setters.
+    // Let's create dummy pins or `unsafe` clone if needed?
+    // Wait, the standard pattern in esp-hal 0.23 for I2S is to call with_bclk and with_ws on i2s_tx OR i2s_rx
+    // and the hardware handles it since it's the same peripheral? Actually, esp-hal has `TxCreator` and `RxCreator`.
+    // Let's use `unsafe { peripherals.GPIO5.clone_unchecked() }` to bypass the borrow checker for the shared BCLK/WS pins.
+    let bclk_tx = unsafe { peripherals.GPIO5.clone_unchecked() };
+    let ws_tx = unsafe { peripherals.GPIO7.clone_unchecked() };
+
+    let mut i2s_rx = i2s
+        .i2s_rx
+        .with_bclk(peripherals.GPIO5)
+        .with_ws(peripherals.GPIO7)
+        .with_din(peripherals.GPIO8)
+        .build();
+
+    let mut i2s_tx = i2s
+        .i2s_tx
+        .with_bclk(bclk_tx)
+        .with_ws(ws_tx)
+        .with_dout(peripherals.GPIO6)
+        .build();
+
+    // Enable speaker amplifier
+    let mut speaker_en = esp_hal::gpio::Output::new(peripherals.GPIO1, esp_hal::gpio::Level::High);
+    // Setting to low enables audio output based on user input
+    speaker_en.set_low();
+
+    // We need to pass static mutable references to the DMA buffers to the async tasks
+    // Leak the rx_buffer and tx_buffer to make them 'static.
+    // dma_buffers returns `&mut [u8; N]` types, which are actually references to static memory
+    // created by the macro. We can safely transmute them to static slices.
+    let rx_buffer_static: &'static mut [u8] = unsafe {
+        core::slice::from_raw_parts_mut(rx_buffer.as_mut_ptr(), rx_buffer.len())
+    };
+    let tx_buffer_static: &'static mut [u8] = unsafe {
+        core::slice::from_raw_parts_mut(tx_buffer.as_mut_ptr(), tx_buffer.len())
+    };
+
+    spawner.spawn(audio::audio_rx_task(i2s_rx, rx_buffer_static)).unwrap();
+    spawner.spawn(audio::audio_tx_task(i2s_tx, tx_buffer_static)).unwrap();
+    log::info!("Audio I2S tasks spawned");
 
     // ── 8. Display + button tasks ────────────────────────────────────────────
     let spi = esp_hal::spi::master::Spi::new(peripherals.SPI2, esp_hal::spi::master::Config::default()).unwrap()

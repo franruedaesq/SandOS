@@ -69,6 +69,9 @@ pub struct MockHost {
     /// Audio bytes fed into the mock buffer by the test harness.
     pub audio_buf: std::collections::VecDeque<u8>,
 
+    /// Audio bytes played by the guest.
+    pub audio_tx_buf: std::collections::VecDeque<u8>,
+
     /// Debug log messages received from the guest.
     pub log_messages: Vec<String>,
 
@@ -183,6 +186,7 @@ impl Default for MockHost {
             display: MockDisplay::default(),
             audio_active: false,
             audio_buf: std::collections::VecDeque::new(),
+            audio_tx_buf: std::collections::VecDeque::new(),
             log_messages: Vec::new(),
             simulated_uptime_ms: 0,
             imu_reading: ImuReading::default(),
@@ -289,6 +293,14 @@ impl MockHost {
             *byte = self.audio_buf.pop_front().unwrap_or(0);
         }
         n as i32
+    }
+
+    pub fn play_audio(&mut self, bytes: &[u8]) -> i32 {
+        if bytes.len() as u32 > abi::MAX_AUDIO_PLAY {
+            return status::ERR_BOUNDS;
+        }
+        self.audio_tx_buf.extend(bytes.iter().copied());
+        status::OK
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────────

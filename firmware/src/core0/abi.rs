@@ -215,6 +215,17 @@ impl AbiHost {
     /// Returns the number of bytes actually copied, or [`status::ERR_BOUNDS`]
     /// if `max_len` exceeds [`MAX_AUDIO_READ`].
     pub fn read_audio(&mut self, out: &mut [u8]) -> i32 {
+        // Try to empty AUDIO_RX_CHANNEL into audio_buf
+        while let Ok(chunk) = crate::audio::AUDIO_RX_CHANNEL.try_receive() {
+            for &byte in chunk.iter() {
+                // If the buffer is full, we drop the oldest samples
+                if self.audio_buf.is_full() {
+                    let _ = self.audio_buf.pop_front();
+                }
+                let _ = self.audio_buf.push_back(byte);
+            }
+        }
+
         if out.len() as u32 > MAX_AUDIO_READ {
             return status::ERR_BOUNDS;
         }
@@ -223,6 +234,27 @@ impl AbiHost {
             *byte = self.audio_buf.pop_front().unwrap_or(0);
         }
         n as i32
+    }
+
+    /// Play audio by sending the buffer to the I2S DMA TX channel.
+    ///
+    /// Returns [`status::OK`] if the audio chunk was queued, or
+    /// [`status::ERR_BUSY`] if the transmission queue is full.
+    pub fn play_audio(&mut self, bytes: &[u8]) -> i32 {
+        use abi::MAX_AUDIO_PLAY;
+        if bytes.len() as u32 > MAX_AUDIO_PLAY {
+            return status::ERR_BOUNDS;
+        }
+        let mut chunk = crate::audio::AudioChunk::new();
+        for &byte in bytes {
+            // Push cannot fail since len <= MAX_AUDIO_PLAY
+            let _ = chunk.push(byte);
+        }
+        if crate::audio::AUDIO_TX_CHANNEL.try_send(chunk).is_ok() {
+            status::OK
+        } else {
+            status::ERR_BUSY
+        }
     }
 
     // ── Phase 3 — Sensors ─────────────────────────────────────────────────────

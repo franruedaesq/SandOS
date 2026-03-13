@@ -116,6 +116,27 @@ fn build_linker(engine: &Engine) -> Linker<Rc<RefCell<MockHost>>> {
         }
     ).unwrap();
 
+    linker.func_wrap(HOST_MODULE, abi::FN_PLAY_AUDIO,
+        |caller: Caller<'_, Rc<RefCell<MockHost>>>, ptr: i32, len: i32| -> i32 {
+            if ptr < 0 || len < 0 {
+                return status::ERR_INVALID_ARG;
+            }
+            let mem = match get_memory(&caller) {
+                Some(m) => m,
+                None    => return status::ERR_BOUNDS,
+            };
+            let mem_size = mem.data(&caller).len() as u32;
+            if validate_ptr_len(ptr as u32, len as u32, mem_size).is_err() {
+                return status::ERR_BOUNDS;
+            }
+            if len as u32 > abi::MAX_AUDIO_PLAY {
+                return status::ERR_BOUNDS;
+            }
+            let slice = &mem.data(&caller)[ptr as usize..(ptr as usize + len as usize)];
+            caller.data().borrow_mut().play_audio(slice)
+        }
+    ).unwrap();
+
     linker.func_wrap(HOST_MODULE, FN_GET_UPTIME_MS,
         |caller: Caller<'_, Rc<RefCell<MockHost>>>| -> i64 {
             caller.data().borrow().get_uptime_ms()
