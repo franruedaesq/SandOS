@@ -60,6 +60,8 @@ wasmi = { version = "0.31", default-features = false }
 embedded-graphics = { version = "0.8", default-features = false }
 mipidsi = { version = "0.8", default-features = false }
 display-interface-spi = { version = "0.5", default-features = false }
+display-interface = { version = "0.5", default-features = false }
+embedded-hal-bus = "0.2"
 
 # ── RGB LED (WS2812 NeoPixel) ─────────────────────────────────────────────────
 smart-leds = "0.3"

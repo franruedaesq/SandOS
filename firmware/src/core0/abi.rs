@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Host-Guest ABI — the Host side.
 //!
 //! This module owns all mutable hardware state that the Wasm guest can affect

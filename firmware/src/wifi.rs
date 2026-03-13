@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! WiFi STA connection tasks for SandOS.
 //!
 //! Connects the ESP32-S3 to a WiFi access point using `esp-wifi` and

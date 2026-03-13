@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Fetches real-time departure data from an HTTP endpoint
 //! and stores it in shared state for the display task to render.
 //!
