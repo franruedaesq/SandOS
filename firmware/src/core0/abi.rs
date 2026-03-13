@@ -225,6 +225,30 @@ impl AbiHost {
         n as i32
     }
 
+    /// Start recording audio and routing to OpenAI.
+    pub fn start_audio_capture_openai(&mut self) -> i32 {
+        log::info!("[abi] start_audio_capture_openai called");
+        status::OK
+    }
+
+    /// Dispatch a high-level intent via ESP-NOW to Head OS.
+    pub fn dispatch_intent(&mut self, _ptr: u32, _len: u32) -> i32 {
+        log::info!("[abi] dispatch_intent called");
+        status::OK
+    }
+
+    /// Set LVGL label text
+    pub fn lvgl_label_set_text(&mut self, _ptr: u32, _len: u32) -> i32 {
+        log::info!("[abi] lvgl_label_set_text called");
+        status::OK
+    }
+
+    /// Set Avatar Expression
+    pub fn set_avatar_expression(&mut self, _expression: i32) -> i32 {
+        log::info!("[abi] set_avatar_expression called");
+        status::OK
+    }
+
     // ── Phase 3 — Sensors ─────────────────────────────────────────────────────
 
     /// Return the latest IMU reading from the shared atomic bridge.

@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "abi",
-    "host-tests",
+    "host-tests", "rclaw",
     "wasm-apps",
     # NOTE: "firmware" requires the ESP toolchain + xtensa-esp32s3-none-elf target.
     # Build via: cargo install espup && espup install && . $HOME/export-esp.sh

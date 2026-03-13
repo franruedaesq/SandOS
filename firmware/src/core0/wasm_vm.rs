@@ -44,6 +44,7 @@ use abi::{
     HOST_MODULE, FN_DEBUG_LOG, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
     FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL, FN_GET_UPTIME_MS, FN_READ_AUDIO, FN_SET_BRIGHTNESS,
     FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED, FN_WRITE_TEXT,
+    FN_START_AUDIO_OPENAI, FN_DISPATCH_INTENT, FN_LVGL_LABEL_SET_TEXT, FN_SET_AVATAR_EXPRESSION,
     INFERENCE_RESULT_SIZE, OTA_STATUS_SIZE, status,
 };
 use alloc::vec;
@@ -366,6 +367,50 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 mem.data_mut(&mut caller)[ptr as usize..ptr as usize + copied]
                     .copy_from_slice(&tmp[..copied]);
                 copied as i32
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_START_AUDIO_OPENAI,
+            |caller: Caller<'_, *mut AbiHost>| -> i32 {
+                let host = unsafe { &mut **caller.data() };
+                host.start_audio_capture_openai()
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_DISPATCH_INTENT,
+            |caller: Caller<'_, *mut AbiHost>, ptr: u32, len: u32| -> i32 {
+                let host = unsafe { &mut **caller.data() };
+                host.dispatch_intent(ptr, len)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_LVGL_LABEL_SET_TEXT,
+            |caller: Caller<'_, *mut AbiHost>, ptr: u32, len: u32| -> i32 {
+                let host = unsafe { &mut **caller.data() };
+                host.lvgl_label_set_text(ptr, len)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_SET_AVATAR_EXPRESSION,
+            |caller: Caller<'_, *mut AbiHost>, expression: i32| -> i32 {
+                let host = unsafe { &mut **caller.data() };
+                host.set_avatar_expression(expression)
             },
         )
         .unwrap();

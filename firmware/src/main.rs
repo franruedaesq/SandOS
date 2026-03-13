@@ -34,6 +34,7 @@ use esp_hal::{
 use esp_wifi::EspWifiController;
 use static_cell::StaticCell;
 
+mod audio;
 mod core0;
 mod core1;
 mod display;
@@ -43,9 +44,12 @@ mod message_bus;
 mod motors;
 mod ntp;
 mod rgb_led;
+mod battery;
 mod router;
+mod sd_card;
 mod sensors;
 mod telemetry;
+mod touch;
 mod ulp;
 mod vienna_fetch;
 mod web_server;
@@ -117,14 +121,14 @@ async fn main(spawner: Spawner) {
 
     let io = Io::new(peripherals.IO_MUX);
 
-    // ── RGB LED init (GPIO 48 via RMT) ────────────────────────────────────────
+    // ── RGB LED init (GPIO 42 via RMT) ────────────────────────────────────────
     let rmt = esp_hal::rmt::Rmt::new(peripherals.RMT, 80_u32.MHz())
         .expect("Failed to initialize RMT");
 
-    let tx_channel_48 = rmt
+    let tx_channel_42 = rmt
         .channel1
         .configure(
-            peripherals.GPIO48,
+            peripherals.GPIO42,
             TxChannelConfig {
                 clk_divider: 4,
                 idle_output_level: false,
@@ -132,16 +136,16 @@ async fn main(spawner: Spawner) {
                 ..Default::default()
             },
         )
-        .expect("Failed to configure RMT TX channel 1 (GPIO48)");
+        .expect("Failed to configure RMT TX channel 1 (GPIO42)");
 
     unsafe {
         rgb_led::RGB_LED = Some(rgb_led::RgbLedDriver::new());
         if let Some(led) = (*core::ptr::addr_of_mut!(rgb_led::RGB_LED)).as_mut() {
-            led.attach_tx_channel_gpio48(tx_channel_48);
+            led.attach_tx_channel_gpio48(tx_channel_42);
             led.off();
         }
     }
-    log::info!("RGB LED initialized on GPIO48 with RMT");
+    log::info!("RGB LED initialized on GPIO42 with RMT");
 
     // ── 6. Core 1 — start before Wasm VM ────────────────────────────────────
     let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
@@ -156,16 +160,19 @@ async fn main(spawner: Spawner) {
     // ── 8. Display + button tasks ────────────────────────────────────────────
     //
     // spawn_display_task spawns two Embassy tasks:
-    //   • display_task  — renders frames via async I2C (CPU yields during flush)
+    //   • display_task  — renders frames via SPI
     //   • button_task   — monitors GPIO0 with hardware edge interrupts
     //
-    // With async I2C the display no longer blocks Core 0, so it is safe to
+    // With async SPI the display no longer blocks Core 0, so it is safe to
     // run the Wi-Fi stack and web server alongside the display.
     display::spawn_display_task(
         spawner,
-        peripherals.I2C0,
-        peripherals.GPIO8,
-        peripherals.GPIO9,
+        peripherals.SPI2,
+        peripherals.GPIO11, // MOSI
+        peripherals.GPIO12, // SCK
+        peripherals.GPIO10, // CS
+        peripherals.GPIO46, // DC
+        peripherals.GPIO45, // RST
         boot_btn,
     );
     log::info!("Display + button tasks spawned");
@@ -225,7 +232,59 @@ async fn main(spawner: Spawner) {
     spawner.spawn(ntp::ntp_sync_task(stack)).unwrap();
     log::info!("NTP sync task spawned");
 
-    // ── 14. Core 0 brain task ────────────────────────────────────────────────
+    // ── 14. SD Card Init (SDIO pins mapped to SPI3) ──────────────────────────
+    // IO38: CLK, IO40: CMD (MOSI), IO39: DATA0 (MISO), IO47: DATA3 (CS)
+    let spi3 = esp_hal::spi::master::Spi::new(peripherals.SPI3, esp_hal::spi::master::Config::default())
+        .expect("Failed to initialize SPI3 for SD Card")
+        .with_mosi(peripherals.GPIO40)
+        .with_miso(peripherals.GPIO39)
+        .with_sck(peripherals.GPIO38);
+    let sd_cs = esp_hal::gpio::Output::new(peripherals.GPIO47, esp_hal::gpio::Level::High);
+    sd_card::init_sd_card(spi3, sd_cs);
+    log::info!("SD Card initialized on SPI3 using SDIO pins");
+
+    // ── 15. Capacitive Touch (FT6336G) ───────────────────────────────────────
+    let touch_rst = esp_hal::gpio::Output::new(peripherals.GPIO18, esp_hal::gpio::Level::Low);
+    let touch_int = esp_hal::gpio::Input::new(peripherals.GPIO17, esp_hal::gpio::Pull::Up);
+    touch::spawn_touch_task(
+        spawner,
+        peripherals.I2C0,
+        peripherals.GPIO16, // SDA
+        peripherals.GPIO15, // SCL
+        touch_rst,
+        touch_int,
+    );
+    log::info!("Touch task spawned on I2C0");
+
+    // ── 15b. Battery Sensing ─────────────────────────────────────────────────
+    battery::spawn_battery_task(spawner, peripherals.ADC1, peripherals.GPIO9);
+    log::info!("Battery task spawned on ADC1 IO9");
+
+    // ── 16. Audio (I2S Speaker & Microphone) ─────────────────────────────────
+    let dma_channel = peripherals.DMA_CH0;
+    audio::spawn_audio_tasks(
+        spawner,
+        peripherals.I2S0,
+        peripherals.GPIO4, // MCLK
+        peripherals.GPIO5, // BCLK
+        peripherals.GPIO7, // LRCK/WS
+        peripherals.GPIO6, // DOUT (Speaker)
+        peripherals.GPIO8, // DIN (Mic)
+        peripherals.GPIO1, // Amp EN
+        dma_channel,
+    );
+    log::info!("Audio tasks spawned on I2S0");
+
+    // ── 17. Expansion & UART Serial Port ─────────────────────────────────────
+    // Dedicated 4P UART socket (IO43: RX, IO44: TX) and Expansion Socket (IO2, IO3, IO14, IO21)
+    let _uart_rx = peripherals.GPIO43;
+    let _uart_tx = peripherals.GPIO44;
+    let _exp_io2 = peripherals.GPIO2;
+    let _exp_io3 = peripherals.GPIO3;
+    // IO14 is used for SD Card MOSI, but here is referenced as expansion if not using SD Card
+    let _exp_io21 = peripherals.GPIO21;
+
+    // ── 18. Core 0 brain task ────────────────────────────────────────────────
     //
     // Spawns the ESP-NOW receiver, the Wasm engine, and the OS router tasks.
     spawner
