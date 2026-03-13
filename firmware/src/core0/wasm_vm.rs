@@ -40,12 +40,13 @@
 extern crate alloc;
 
 use abi::{
-    validate_ptr_len, ImuReading, TouchEventData, MAX_AUDIO_READ, MAX_MOTOR_SPEED, MAX_TEXT_BYTES,
-    MAX_TOUCH_DEQUEUE, TOUCH_EVENT_SIZE, HOST_MODULE, FN_DEBUG_LOG, FN_DEQUEUE_TOUCH_EVENT,
-    FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE, FN_GET_OTA_STATUS,
-    FN_GET_PITCH_ROLL, FN_GET_TOUCH_QUEUE_LEN, FN_GET_UPTIME_MS, FN_READ_AUDIO,
-    FN_SET_BRIGHTNESS, FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO, FN_TOGGLE_LED,
-    FN_WRITE_TEXT, INFERENCE_RESULT_SIZE, OTA_STATUS_SIZE, status,
+    validate_ptr_len, ImuReading, TouchEventData, MAX_AUDIO_READ, MAX_AUDIO_WRITE,
+    MAX_MOTOR_SPEED, MAX_TEXT_BYTES, MAX_TOUCH_DEQUEUE, TOUCH_EVENT_SIZE, HOST_MODULE,
+    FN_AUDIO_ENQUEUE_PCM, FN_AUDIO_PLAY_TONE, FN_AUDIO_STOP_PLAYBACK, FN_DEBUG_LOG,
+    FN_DEQUEUE_TOUCH_EVENT, FN_DRAW_EYE, FN_GET_AUDIO_AVAIL, FN_GET_LOCAL_INFERENCE,
+    FN_GET_OTA_STATUS, FN_GET_PITCH_ROLL, FN_GET_TOUCH_QUEUE_LEN, FN_GET_UPTIME_MS,
+    FN_READ_AUDIO, FN_SET_BRIGHTNESS, FN_SET_MOTOR_SPEED, FN_START_AUDIO, FN_STOP_AUDIO,
+    FN_TOGGLE_LED, FN_WRITE_TEXT, INFERENCE_RESULT_SIZE, OTA_STATUS_SIZE, status,
 };
 use alloc::vec;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Receiver};
@@ -347,6 +348,9 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
             HOST_MODULE,
             FN_READ_AUDIO,
             |mut caller: Caller<'_, *mut AbiHost>, ptr: i32, max_len: i32| -> i32 {
+                if ptr < 0 || max_len < 0 {
+                    return status::ERR_BOUNDS;
+                }
                 let mem = match get_memory(&caller) {
                     Some(m) => m,
                     None => return status::ERR_BOUNDS,
@@ -367,6 +371,51 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
                 mem.data_mut(&mut caller)[ptr as usize..ptr as usize + copied]
                     .copy_from_slice(&tmp[..copied]);
                 copied as i32
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_AUDIO_ENQUEUE_PCM,
+            |mut caller: Caller<'_, *mut AbiHost>, ptr: i32, len: i32| -> i32 {
+                let mem = match get_memory(&caller) {
+                    Some(m) => m,
+                    None => return status::ERR_BOUNDS,
+                };
+                let mem_size = mem.data(&caller).len() as u32;
+                if validate_ptr_len(ptr as u32, len as u32, mem_size).is_err() {
+                    return status::ERR_BOUNDS;
+                }
+                if len < 0 || len as u32 > MAX_AUDIO_WRITE {
+                    return status::ERR_BOUNDS;
+                }
+                let bytes = &mem.data(&caller)[ptr as usize..(ptr + len) as usize];
+                let host = unsafe { &mut **caller.data() };
+                host.audio_enqueue_pcm(bytes)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_AUDIO_PLAY_TONE,
+            |caller: Caller<'_, *mut AbiHost>, freq_hz: i32, duration_ms: i32, amplitude_pct: i32| -> i32 {
+                let host = unsafe { &mut **caller.data() };
+                host.audio_play_tone(freq_hz, duration_ms, amplitude_pct)
+            },
+        )
+        .unwrap();
+
+    linker
+        .func_wrap(
+            HOST_MODULE,
+            FN_AUDIO_STOP_PLAYBACK,
+            |caller: Caller<'_, *mut AbiHost>| -> i32 {
+                let host = unsafe { &mut **caller.data() };
+                host.audio_stop_playback()
             },
         )
         .unwrap();

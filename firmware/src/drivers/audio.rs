@@ -12,10 +12,14 @@ const DMA_FRAME_BYTES: usize = 256;
 const DMA_RING_BUFFERS: usize = 2;
 const CAPTURE_QUEUE_DEPTH: usize = 4;
 const PLAYBACK_QUEUE_DEPTH: usize = 8;
+const AUDIO_PROFILE_SAMPLE_RATE_HZ: u32 = 16_000;
+const AUDIO_PROFILE_BITS_PER_SAMPLE: u8 = 16;
+const AUDIO_PROFILE_CHANNELS: u8 = 1;
 const PLAYBACK_SAMPLE_RATE_HZ: u32 = 16_000;
 const PLAYBACK_BITS_PER_SAMPLE: u8 = 16;
 const PLAYBACK_CHANNELS: u8 = 1;
 const RAMP_STEPS: u16 = 16;
+const VAD_ABS_THRESHOLD: i16 = 180;
 
 /// Raw PCM frame consumed by the speaker TX pipeline.
 pub type AudioPlaybackFrame = heapless::Vec<u8, DMA_FRAME_BYTES>;
@@ -45,6 +49,9 @@ static AUDIO_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Playback gate inferred from pending stream and tone requests.
 static AUDIO_PLAYBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
 static AUDIO_PLAYBACK_OVERRUN_FRAMES: AtomicU32 = AtomicU32::new(0);
+static AUDIO_PLAYBACK_UNDERRUN_FRAMES: AtomicU32 = AtomicU32::new(0);
+static AUDIO_VAD_ENABLED: AtomicBool = AtomicBool::new(false);
+static AUDIO_VAD_DROPPED_FRAMES: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy)]
 pub struct ToneRequest {
@@ -118,6 +125,21 @@ pub fn queue_pcm_chunk(pcm: &[u8]) -> usize {
     queued
 }
 
+pub fn playback_stats() -> (u32, u32) {
+    (
+        AUDIO_PLAYBACK_OVERRUN_FRAMES.load(Ordering::Relaxed),
+        AUDIO_PLAYBACK_UNDERRUN_FRAMES.load(Ordering::Relaxed),
+    )
+}
+
+pub fn set_vad_enabled(enabled: bool) {
+    AUDIO_VAD_ENABLED.store(enabled, Ordering::Release);
+}
+
+pub fn vad_stats() -> u32 {
+    AUDIO_VAD_DROPPED_FRAMES.load(Ordering::Relaxed)
+}
+
 pub fn queue_tone(req: ToneRequest) -> Result<(), TrySendError<AudioOutCommand>> {
     AUDIO_PLAYBACK_COMMAND_CHANNEL.try_send(AudioOutCommand::Tone(req))?;
     AUDIO_PLAYBACK_ACTIVE.store(true, Ordering::Release);
@@ -151,6 +173,18 @@ fn synthesize_i2s_frame(seq: &mut u8, out: &mut [u8; DMA_FRAME_BYTES]) {
         *b = *seq;
         *seq = seq.wrapping_add(1);
     }
+}
+
+fn frame_has_voice_activity(frame: &[u8; DMA_FRAME_BYTES]) -> bool {
+    let mut i = 0usize;
+    while i + 1 < frame.len() {
+        let s = i16::from_le_bytes([frame[i], frame[i + 1]]).abs();
+        if s >= VAD_ABS_THRESHOLD {
+            return true;
+        }
+        i += 2;
+    }
+    false
 }
 
 fn ramp_sample(sample: i16, step: u16) -> i16 {
@@ -209,7 +243,10 @@ pub async fn probe_task(audio_en: GpioPin<1>) {
     amp_en.set_low();
     set_audio_state(ModuleState::Online);
     log::info!(
-        "[audio] RX+TX pipeline ready (fmt={}b {}ch {}Hz, DMA ring={}x{}B)",
+        "[audio] RX+TX pipeline ready (capture={}b/{}ch/{}Hz, playback={}b/{}ch/{}Hz, DMA ring={}x{}B)",
+        AUDIO_PROFILE_BITS_PER_SAMPLE,
+        AUDIO_PROFILE_CHANNELS,
+        AUDIO_PROFILE_SAMPLE_RATE_HZ,
         PLAYBACK_BITS_PER_SAMPLE,
         PLAYBACK_CHANNELS,
         PLAYBACK_SAMPLE_RATE_HZ,
@@ -251,15 +288,19 @@ pub async fn probe_task(audio_en: GpioPin<1>) {
             let buf = &mut dma_ring[ring_index];
             synthesize_i2s_frame(&mut seq, buf);
 
-            let mut frame = AudioDmaFrame::new();
-            frame.extend_from_slice(buf).ok();
-            push_dma_frame(frame.clone());
+            if AUDIO_VAD_ENABLED.load(Ordering::Acquire) && !frame_has_voice_activity(buf) {
+                AUDIO_VAD_DROPPED_FRAMES.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let mut frame = AudioDmaFrame::new();
+                frame.extend_from_slice(buf).ok();
+                push_dma_frame(frame.clone());
 
-            if loopback_gain_pct > 0 {
-                let mut lb = AudioPlaybackFrame::new();
-                let _ = lb.extend_from_slice(frame.as_slice());
-                scale_pcm_in_place(&mut lb, loopback_gain_pct);
-                let _ = AUDIO_PLAYBACK_PCM_CHANNEL.try_send(lb);
+                if loopback_gain_pct > 0 {
+                    let mut lb = AudioPlaybackFrame::new();
+                    let _ = lb.extend_from_slice(frame.as_slice());
+                    scale_pcm_in_place(&mut lb, loopback_gain_pct);
+                    let _ = AUDIO_PLAYBACK_PCM_CHANNEL.try_send(lb);
+                }
             }
         }
 
@@ -271,6 +312,8 @@ pub async fn probe_task(audio_en: GpioPin<1>) {
         if let Ok(frame) = AUDIO_PLAYBACK_PCM_CHANNEL.try_receive() {
             tx[..frame.len()].copy_from_slice(frame.as_slice());
             stream_active = true;
+        } else if tone.is_none() {
+            AUDIO_PLAYBACK_UNDERRUN_FRAMES.fetch_add(1, Ordering::Relaxed);
         }
 
         if let Some(req) = tone {
@@ -285,7 +328,7 @@ pub async fn probe_task(audio_en: GpioPin<1>) {
 
         if stream_active && !amp_on {
             amp_on = true;
-            amp_en.set_high();
+            amp_en.set_low();
             ramp_step = 0;
         }
 
@@ -299,7 +342,7 @@ pub async fn probe_task(audio_en: GpioPin<1>) {
                 apply_pop_ramp(tx, ramp_step);
                 ramp_step -= 1;
             } else {
-                amp_en.set_low();
+                amp_en.set_high();
                 amp_on = false;
             }
         }
