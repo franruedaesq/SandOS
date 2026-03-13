@@ -8,8 +8,8 @@ use esp_hal::peripherals::I2S0;
 use esp_hal::time::RateExtU32;
 use esp_hal::Async;
 
-static mut RX_DESC: [DmaDescriptor; 1] = [DmaDescriptor::EMPTY; 1];
-static mut TX_DESC: [DmaDescriptor; 1] = [DmaDescriptor::EMPTY; 1];
+static mut RX_DESC: [DmaDescriptor; 3] = [DmaDescriptor::EMPTY; 3];
+static mut TX_DESC: [DmaDescriptor; 3] = [DmaDescriptor::EMPTY; 3];
 
 pub fn spawn_audio_tasks<CH: DmaChannelFor<esp_hal::i2s::master::AnyI2s> + 'static>(
     spawner: Spawner,
