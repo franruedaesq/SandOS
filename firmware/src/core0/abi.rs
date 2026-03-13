@@ -56,7 +56,8 @@
 use abi::{
     status, EyeExpression, ImuReading, ImuTelemetry, MovementIntent, OdometryTelemetry, OtaState,
     OtaStatus, TelemetryPacket, TouchEventData, INFERENCE_RESULT_SIZE, MAX_AUDIO_READ,
-    MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES, MAX_TOUCH_DEQUEUE, OTA_STATUS_SIZE,
+    MAX_AUDIO_WRITE, MAX_BRIGHTNESS, MAX_MOTOR_SPEED, MAX_TEXT_BYTES, MAX_TOUCH_DEQUEUE,
+    OTA_STATUS_SIZE,
 };
 use esp_hal::gpio::Io;
 
@@ -241,6 +242,49 @@ impl AbiHost {
 
         self.refresh_audio_stats();
         n as i32
+    }
+
+    /// Enable/disable simple VAD gating for microphone uplink data.
+    pub fn set_audio_vad(&mut self, enabled: bool) -> i32 {
+        audio::set_vad_enabled(enabled);
+        status::OK
+    }
+
+    /// Enqueue PCM samples into the non-blocking playback queue.
+    pub fn audio_enqueue_pcm(&mut self, pcm: &[u8]) -> i32 {
+        if pcm.len() as u32 > MAX_AUDIO_WRITE {
+            return status::ERR_BOUNDS;
+        }
+        audio::queue_pcm_chunk(pcm) as i32
+    }
+
+    /// Enqueue a synthesized tone prompt.
+    pub fn audio_play_tone(&mut self, freq_hz: i32, duration_ms: i32, amplitude_pct: i32) -> i32 {
+        if !(50..=6000).contains(&freq_hz) {
+            return status::ERR_INVALID_ARG;
+        }
+        if !(1..=10_000).contains(&duration_ms) {
+            return status::ERR_INVALID_ARG;
+        }
+        if !(0..=100).contains(&amplitude_pct) {
+            return status::ERR_INVALID_ARG;
+        }
+
+        let req = audio::ToneRequest {
+            freq_hz: freq_hz as u16,
+            duration_ms: duration_ms as u32,
+            amplitude_pct: amplitude_pct as u8,
+        };
+        match audio::queue_tone(req) {
+            Ok(()) => status::OK,
+            Err(_) => status::ERR_BUSY,
+        }
+    }
+
+    /// Stop queued tone playback and allow amplifier ramp-down.
+    pub fn audio_stop_playback(&mut self) -> i32 {
+        audio::stop_playback();
+        status::OK
     }
 
     /// Drain pending DMA frames from the microphone channel into `audio_buf`.
