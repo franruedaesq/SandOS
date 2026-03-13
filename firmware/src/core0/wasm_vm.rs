@@ -335,7 +335,7 @@ fn build_linker(engine: &Engine) -> Linker<*mut AbiHost> {
             HOST_MODULE,
             FN_GET_AUDIO_AVAIL,
             |caller: Caller<'_, *mut AbiHost>| -> i32 {
-                let host = unsafe { &**caller.data() };
+                let host = unsafe { &mut **caller.data() };
                 host.get_audio_avail()
             },
         )
