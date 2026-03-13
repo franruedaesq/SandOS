@@ -66,6 +66,10 @@ const LCD_PHYS_WIDTH: u16 = 240;
 const LCD_PHYS_HEIGHT: u16 = 320;
 const LCD_DATA_CHUNK: usize = 512;
 const DIAG_SKIP_FLUSH: bool = false;
+const TOUCH_SWIPE_THRESHOLD: i32 = 20;
+const TOUCH_TAP_SLOP: i32 = 8;
+const TOUCH_LONG_PRESS_MS: u64 = 650;
+const TOUCH_DEBUG_OVERLAY: bool = true;
 
 // ── Tiny xorshift32 PRNG (no-std, no-alloc) ──────────────────────────────────
 
@@ -135,6 +139,7 @@ enum ButtonEvent {
 #[derive(Clone, Copy)]
 enum TouchNavEvent {
     Tap { x: u16, y: u16 },
+    LongPress { x: u16, y: u16 },
     SwipeLeft,
     SwipeRight,
 }
@@ -335,7 +340,7 @@ async fn display_task(
     let btn_receiver = BUTTON_EVENT_CHANNEL.receiver();
     let touch_receiver = crate::drivers::touch::receiver();
 
-    let mut touch_start: [Option<(u16, u16)>; 2] = [None, None];
+    let mut touch_start: [Option<(u16, u16, Instant)>; 2] = [None, None];
 
     // Starvation state: true while the animation is known to be frozen.
     let mut starved = false;
@@ -368,29 +373,41 @@ async fn display_task(
             let id = (touch_event.id as usize) % touch_start.len();
             match touch_event.phase {
                 crate::drivers::touch::TouchPhase::Down => {
-                    touch_start[id] = Some((touch_event.x, touch_event.y));
+                    touch_start[id] = Some((touch_event.x, touch_event.y, Instant::now()));
+                    state.touch_debug_points[id] = Some((touch_event.x, touch_event.y));
                 }
-                crate::drivers::touch::TouchPhase::Move => {}
+                crate::drivers::touch::TouchPhase::Move => {
+                    state.touch_debug_points[id] = Some((touch_event.x, touch_event.y));
+                }
                 crate::drivers::touch::TouchPhase::Up => {
-                    let start = touch_start[id].take().unwrap_or((touch_event.x, touch_event.y));
+                    let start = touch_start[id]
+                        .take()
+                        .unwrap_or((touch_event.x, touch_event.y, Instant::now()));
                     let dx = touch_event.x as i32 - start.0 as i32;
                     let dy = touch_event.y as i32 - start.1 as i32;
+                    let held = (Instant::now() - start.2).as_millis() as u64;
 
-                    if dx.abs() >= 40 && dx.abs() > dy.abs() {
+                    state.touch_debug_points[id] = None;
+                    if dx.abs() >= TOUCH_SWIPE_THRESHOLD && dx.abs() > dy.abs() {
                         let nav = if dx > 0 {
                             TouchNavEvent::SwipeRight
                         } else {
                             TouchNavEvent::SwipeLeft
                         };
                         handle_button_event(ButtonEvent::Touch(nav), &mut state);
-                    } else if dx.abs() <= 20 && dy.abs() <= 20 {
-                        handle_button_event(
-                            ButtonEvent::Touch(TouchNavEvent::Tap {
+                    } else if dx.abs() <= TOUCH_TAP_SLOP && dy.abs() <= TOUCH_TAP_SLOP {
+                        let nav = if held >= TOUCH_LONG_PRESS_MS {
+                            TouchNavEvent::LongPress {
                                 x: touch_event.x,
                                 y: touch_event.y,
-                            }),
-                            &mut state,
-                        );
+                            }
+                        } else {
+                            TouchNavEvent::Tap {
+                                x: touch_event.x,
+                                y: touch_event.y,
+                            }
+                        };
+                        handle_button_event(ButtonEvent::Touch(nav), &mut state);
                     }
                 }
             }
@@ -424,6 +441,9 @@ async fn display_task(
 
         // 4. Render and push the frame.
         render_frame(&mut oled, &mut state);
+        if TOUCH_DEBUG_OVERLAY {
+            draw_touch_debug_overlay(&mut oled, &state);
+        }
 
         // 4b. Flush framebuffer to the ILI9341 via SPI.
         if !DIAG_SKIP_FLUSH {
@@ -871,6 +891,10 @@ fn handle_touch_swipe_right(state: &mut FaceState) {
 fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
     match ev {
         ButtonEvent::Touch(TouchNavEvent::Tap { x, y }) => handle_touch_tap(x, y, state),
+        ButtonEvent::Touch(TouchNavEvent::LongPress { x, y }) => {
+            log::info!("[display] touch long-press @ {},{}", x, y);
+            return_to_face(state);
+        }
         ButtonEvent::Touch(TouchNavEvent::SwipeLeft) => handle_touch_swipe_left(state),
         ButtonEvent::Touch(TouchNavEvent::SwipeRight) => handle_touch_swipe_right(state),
         ButtonEvent::ShortPress => {
@@ -1061,6 +1085,8 @@ struct FaceState {
     next_look_ms: u64,
     /// Transition: when switching expressions, eyes close for 120 ms then reopen.
     transition_end_ms: u64,
+    /// Debug overlay points for up to two contacts.
+    touch_debug_points: [Option<(u16, u16)>; 2],
 }
 
 impl Default for FaceState {
@@ -1095,6 +1121,7 @@ impl Default for FaceState {
             eye_look_x: 0,
             next_look_ms: 1500,
             transition_end_ms: 0,
+            touch_debug_points: [None, None],
         }
     }
 }
@@ -2231,6 +2258,17 @@ fn render_mini_face(oled: &mut OledDisplay, state: &FaceState) {
 
     // Mini mouth
     draw_mouth(oled, state.expression, 95, 38 + bob_y, 0, now_ms);
+}
+
+fn draw_touch_debug_overlay(oled: &mut OledDisplay, state: &FaceState) {
+    let style = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    for point in state.touch_debug_points.iter().flatten() {
+        let px = point.0.min((DISPLAY_WIDTH - 1) as u16) as i32;
+        let py = point.1.min((DISPLAY_HEIGHT - 1) as u16) as i32;
+        let _ = Line::new(Point::new(px - 2, py), Point::new(px + 2, py)).into_styled(style).draw(oled);
+        let _ = Line::new(Point::new(px, py - 2), Point::new(px, py + 2)).into_styled(style).draw(oled);
+        let _ = Circle::new(Point::new(px - 2, py - 2), 5).into_styled(style).draw(oled);
+    }
 }
 
 // ── ILI9341 low-level driver (SPI) ───────────────────────────────────────────

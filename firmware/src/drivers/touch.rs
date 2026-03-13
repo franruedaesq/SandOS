@@ -14,6 +14,14 @@ const FT6336_I2C_ADDR: u8 = 0x38;
 const FT6336_REG_CHIP_ID: u8 = 0xA3;
 const FT6336_REG_TOUCH_DATA: u8 = 0x02;
 const FT6336_TOUCH_PACKET_LEN: usize = 11;
+const FT6336_MAX_TOUCH_POINTS: u8 = 2;
+
+const RAW_TOUCH_WIDTH: u16 = 240;
+const RAW_TOUCH_HEIGHT: u16 = 320;
+const DISPLAY_WIDTH: u16 = 128;
+const DISPLAY_HEIGHT: u16 = 64;
+
+const JITTER_THRESHOLD_PX: i16 = 2;
 
 const EVENT_DOWN: u8 = 0;
 const EVENT_UP: u8 = 1;
@@ -23,6 +31,11 @@ const TOUCH_EVENT_QUEUE_DEPTH: usize = 12;
 
 static TOUCH_EVENT_CHANNEL: Channel<CriticalSectionRawMutex, TouchEvent, TOUCH_EVENT_QUEUE_DEPTH> =
     Channel::new();
+static HOST_TOUCH_EVENT_CHANNEL: Channel<
+    CriticalSectionRawMutex,
+    TouchEvent,
+    TOUCH_EVENT_QUEUE_DEPTH,
+> = Channel::new();
 
 #[derive(Clone, Copy, Debug)]
 pub enum TouchPhase {
@@ -51,6 +64,53 @@ pub fn receiver(
 ) -> embassy_sync::channel::Receiver<'static, CriticalSectionRawMutex, TouchEvent, TOUCH_EVENT_QUEUE_DEPTH>
 {
     TOUCH_EVENT_CHANNEL.receiver()
+}
+
+pub fn host_receiver(
+) -> embassy_sync::channel::Receiver<'static, CriticalSectionRawMutex, TouchEvent, TOUCH_EVENT_QUEUE_DEPTH>
+{
+    HOST_TOUCH_EVENT_CHANNEL.receiver()
+}
+
+#[derive(Clone, Copy)]
+enum TouchOrientation {
+    Portrait,
+}
+
+fn normalize_coords(raw_x: u16, raw_y: u16) -> (u16, u16) {
+    let (ori_x, ori_y) = match TouchOrientation::Portrait {
+        TouchOrientation::Portrait => (raw_x, raw_y),
+    };
+
+    let x = (u32::from(ori_x) * u32::from(DISPLAY_WIDTH.saturating_sub(1)))
+        / u32::from(RAW_TOUCH_WIDTH.saturating_sub(1));
+    let y = (u32::from(ori_y) * u32::from(DISPLAY_HEIGHT.saturating_sub(1)))
+        / u32::from(RAW_TOUCH_HEIGHT.saturating_sub(1));
+    (x as u16, y as u16)
+}
+
+fn filter_contact(contact: Contact, last: Option<TouchEvent>) -> TouchEvent {
+    let (mut x, mut y) = normalize_coords(contact.x, contact.y);
+
+    if matches!(contact.phase, TouchPhase::Move) {
+        if let Some(prev) = last {
+            let dx = x as i16 - prev.x as i16;
+            let dy = y as i16 - prev.y as i16;
+            if dx.abs() <= JITTER_THRESHOLD_PX {
+                x = prev.x;
+            }
+            if dy.abs() <= JITTER_THRESHOLD_PX {
+                y = prev.y;
+            }
+        }
+    }
+
+    TouchEvent {
+        phase: contact.phase,
+        x,
+        y,
+        id: contact.id,
+    }
 }
 
 fn parse_contact(bytes: &[u8]) -> Option<Contact> {
@@ -82,7 +142,8 @@ pub async fn event_task(
     touch_int: GpioPin<17>,
 ) {
     let mut cfg = I2cConfig::default();
-    cfg.frequency = 400.kHz();
+    // Shared with external I2C peripheral header: keep conservative clock for signal integrity.
+    cfg.frequency = 200.kHz();
     cfg.timeout = BusTimeout::BusCycles(80_000);
 
     let mut i2c = match I2c::new(i2c1, cfg) {
@@ -113,11 +174,18 @@ pub async fn event_task(
         return;
     }
 
+    if chip_id[0] == 0x00 || chip_id[0] == 0xFF {
+        log::error!("[touch] FT6336 probe returned invalid chip id=0x{:02X}", chip_id[0]);
+        set_touch_state(ModuleState::Fault);
+        return;
+    }
+
     set_touch_state(ModuleState::Configured);
     log::info!("[touch] FT6336 initialized chip_id=0x{:02X}", chip_id[0]);
 
     let mut seen_valid_read_path = false;
     let mut packet = [0u8; FT6336_TOUCH_PACKET_LEN];
+    let mut last_points: [Option<TouchEvent>; FT6336_MAX_TOUCH_POINTS as usize] = [None, None];
 
     loop {
         int_pin.wait_for_falling_edge().await;
@@ -128,7 +196,7 @@ pub async fn event_task(
         {
             Ok(()) => {
                 let count = packet[0] & 0x0f;
-                if count > 2 {
+                if count > FT6336_MAX_TOUCH_POINTS {
                     continue;
                 }
 
@@ -140,23 +208,29 @@ pub async fn event_task(
 
                 if count >= 1 {
                     if let Some(contact) = parse_contact(&packet[1..7]) {
-                        let _ = TOUCH_EVENT_CHANNEL.sender().try_send(TouchEvent {
-                            phase: contact.phase,
-                            x: contact.x,
-                            y: contact.y,
-                            id: contact.id,
-                        });
+                        let id = (contact.id as usize) % last_points.len();
+                        let event = filter_contact(contact, last_points[id]);
+                        last_points[id] = if matches!(event.phase, TouchPhase::Up) {
+                            None
+                        } else {
+                            Some(event)
+                        };
+                        let _ = TOUCH_EVENT_CHANNEL.sender().try_send(event);
+                        let _ = HOST_TOUCH_EVENT_CHANNEL.sender().try_send(event);
                     }
                 }
 
                 if count >= 2 {
                     if let Some(contact) = parse_contact(&packet[7..]) {
-                        let _ = TOUCH_EVENT_CHANNEL.sender().try_send(TouchEvent {
-                            phase: contact.phase,
-                            x: contact.x,
-                            y: contact.y,
-                            id: contact.id,
-                        });
+                        let id = (contact.id as usize) % last_points.len();
+                        let event = filter_contact(contact, last_points[id]);
+                        last_points[id] = if matches!(event.phase, TouchPhase::Up) {
+                            None
+                        } else {
+                            Some(event)
+                        };
+                        let _ = TOUCH_EVENT_CHANNEL.sender().try_send(event);
+                        let _ = HOST_TOUCH_EVENT_CHANNEL.sender().try_send(event);
                     }
                 }
             }
