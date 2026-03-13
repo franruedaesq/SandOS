@@ -64,16 +64,30 @@ pub fn load_battery_mv() -> u16 {
     BATTERY_MV.load(Ordering::Acquire)
 }
 
-// ── Touchscreen I2C status ────────────────────────────────────────────────────────
+// ── Touchscreen coordinates ───────────────────────────────────────────────────
 
-pub static TOUCH_ADDR: portable_atomic::AtomicU8 = portable_atomic::AtomicU8::new(0);
+pub static TOUCH_COORDS: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
 
 #[inline]
-pub fn store_touch_addr(addr: u8) {
-    TOUCH_ADDR.store(addr, Ordering::Release);
+pub fn store_touch_coords(x: u16, y: u16) {
+    // Top bit indicates valid touch (1 << 31).
+    let packed = (1 << 31) | ((x as u32) << 16) | (y as u32);
+    TOUCH_COORDS.store(packed, Ordering::Release);
 }
 
 #[inline]
-pub fn load_touch_addr() -> u8 {
-    TOUCH_ADDR.load(Ordering::Acquire)
+pub fn clear_touch_coords() {
+    TOUCH_COORDS.store(0, Ordering::Release);
+}
+
+#[inline]
+pub fn load_touch_coords() -> Option<(u16, u16)> {
+    let packed = TOUCH_COORDS.load(Ordering::Acquire);
+    if (packed & (1 << 31)) != 0 {
+        let x = (packed >> 16) as u16 & 0x7FFF;
+        let y = packed as u16;
+        Some((x, y))
+    } else {
+        None
+    }
 }

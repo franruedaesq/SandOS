@@ -49,6 +49,7 @@ mod rgb_led;
 mod router;
 mod sensors;
 mod telemetry;
+mod touch;
 mod ulp;
 mod vienna_fetch;
 mod web_server;
@@ -100,15 +101,16 @@ async fn battery_task(mut adc: Adc<'static, ADC1>, mut pin: AdcPin<GpioPin<9>, A
 }
 
 #[embassy_executor::task]
-async fn touch_task(mut i2c: I2c<'static, esp_hal::Async>) {
+async fn touch_task(i2c: I2c<'static, esp_hal::Async>) {
+    let mut touch = touch::Ft6336::new(i2c);
     loop {
-        for addr in 0x01..=0x7F {
-            if i2c.write(addr, &[]).await.is_ok() {
-                crate::sensors::store_touch_addr(addr);
-                break;
-            }
+        if let Ok(Some((x, y))) = touch.read_touch().await {
+            crate::sensors::store_touch_coords(x, y);
+        } else {
+            // Touch released or error
+            crate::sensors::clear_touch_coords();
         }
-        Timer::after(Duration::from_millis(2000)).await;
+        Timer::after(Duration::from_millis(20)).await;
     }
 }
 
