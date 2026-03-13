@@ -115,7 +115,6 @@ pub fn queue_pcm_chunk(pcm: &[u8]) -> usize {
                 AUDIO_PLAYBACK_OVERRUN_FRAMES.fetch_add(1, Ordering::Relaxed);
                 break;
             }
-            Err(TrySendError::Closed(_)) => break,
         }
     }
 
@@ -161,7 +160,6 @@ fn push_dma_frame(frame: AudioDmaFrame) {
             AUDIO_OVERRUN_FRAMES.fetch_add(1, Ordering::Relaxed);
             AUDIO_DROPPED_BYTES.fetch_add(frame.len(), Ordering::Relaxed);
         }
-        Err(TrySendError::Closed(_)) => {}
     }
 }
 
@@ -225,7 +223,7 @@ fn synthesize_tone_frame(phase: &mut u32, req: ToneRequest, out: &mut [u8; DMA_F
 
 fn scale_pcm_in_place(buf: &mut AudioPlaybackFrame, gain_pct: u8) {
     let gain = gain_pct.min(100) as i32;
-    let bytes = buf.as_mut();
+    let bytes: &mut [u8] = buf.as_mut_slice();
     let mut i = 0usize;
     while i + 1 < bytes.len() {
         let s = i16::from_le_bytes([bytes[i], bytes[i + 1]]);

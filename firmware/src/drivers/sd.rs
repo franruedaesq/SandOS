@@ -1,10 +1,10 @@
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use esp_hal::gpio::{GpioPin, Input, Pull};
 use heapless::String;
 
 use crate::hardware_profile::{set_sd_state, ModuleState};
 
-static STORAGE: Mutex<NoopRawMutex, StorageState> = Mutex::new(StorageState::new());
+static STORAGE: Mutex<CriticalSectionRawMutex, StorageState> = Mutex::new(StorageState::new());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SdProbeState {
@@ -44,8 +44,9 @@ pub async fn append_log_line(line: &str) -> Result<(), ()> {
     let start = guard.len;
     guard.sandos_txt[start..start + bytes.len()].copy_from_slice(bytes);
     guard.len += bytes.len();
-    guard.sandos_txt[guard.len] = b'\n';
-    guard.len += 1;
+    let newline_idx = guard.len;
+    guard.sandos_txt[newline_idx] = b'\n';
+    guard.len = newline_idx + 1;
     Ok(())
 }
 

@@ -91,7 +91,7 @@ fn liion_percent(mv: i32) -> u8 {
 #[inline]
 fn ulp_mv_fallback() -> i32 {
     unsafe {
-        let ptr = (0x5000_0000 + abi::ulp_mem::LAST_SUPPLY_MV) as *const u32;
+        let ptr = (0x5000_0000 + abi::ulp_mem::LAST_VOLTAGE_MV) as *const u32;
         ptr.read_volatile() as i32
     }
 }
@@ -132,8 +132,9 @@ fn classify(filtered_mv: i32, current: BatteryBand) -> BatteryBand {
 
 #[embassy_executor::task]
 pub async fn probe_task(adc1: ADC1, bat_adc: GpioPin<9>) {
-    let mut adc = Adc::new(adc1, AdcConfig::new());
-    let mut channel = adc.enable_pin(bat_adc, Attenuation::_11dB);
+    let mut adc_config = AdcConfig::new();
+    let mut channel = adc_config.enable_pin(bat_adc, Attenuation::_11dB);
+    let mut adc = Adc::new(adc1, adc_config);
 
     let mut median = Median3::new();
     let mut ema_mv: Option<i32> = None;
