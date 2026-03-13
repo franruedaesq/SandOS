@@ -37,6 +37,7 @@ use static_cell::StaticCell;
 mod core0;
 mod core1;
 mod display;
+mod drivers;
 mod hardware_profile;
 mod inference;
 mod led_state;
@@ -299,23 +300,25 @@ async fn main(spawner: Spawner) {
         .unwrap();
     log::info!("Hardware diagnostics logger task spawned");
     spawner
-        .spawn(hardware_profile::touch_probe_task(
+        .spawn(drivers::touch::event_task(
             peripherals.I2C1,
             peripherals.GPIO16,
             peripherals.GPIO15,
+            peripherals.GPIO18,
+            peripherals.GPIO17,
         ))
         .unwrap();
-    log::info!("Touch probe task spawned (FT6336 on I2C1)");
+    log::info!("Touch event task spawned (FT6336 INT on GPIO17)");
     spawner
-        .spawn(hardware_profile::audio_probe_task(peripherals.GPIO1))
+        .spawn(drivers::audio::probe_task(peripherals.GPIO1))
         .unwrap();
     log::info!("Audio probe task spawned (speaker amp enable)");
     spawner
-        .spawn(hardware_profile::battery_probe_task())
+        .spawn(drivers::battery::probe_task())
         .unwrap();
     log::info!("Battery probe task spawned (ULP voltage monitor)");
     spawner
-        .spawn(hardware_profile::sd_probe_task(
+        .spawn(drivers::sd::probe_task(
             peripherals.GPIO38,
             peripherals.GPIO40,
             peripherals.GPIO39,
