@@ -202,6 +202,50 @@ Routing abstraction is implemented, but distributed TX integration in router is 
 
 ---
 
+## Stage 7 — Radio Link Monitoring
+
+### Goal
+
+Track ESP-NOW link vitality and allow fallback behaviors.
+
+### Software touchpoints
+
+- `RADIO_LAST_RX_MS` atomic counter
+- Timeout verification in command validation
+
+### Done criteria
+
+- Inbound ESP-NOW traffic successfully marks last valid timestamp.
+- Link loss > threshold triggers fallback behaviors (inference activation).
+
+---
+
+## Stage 8 — The Dynamic Brain (OTA Engine)
+
+### Goal
+
+Hot-swap the Wasm VM application over-the-air without halting the OS.
+
+### Software touchpoints
+
+- `OtaReceiver` PSRAM buffer engine
+- Wasm execution control signal: `OTA_SWAP_SIGNAL`
+- ABI export: `host_get_ota_status`
+
+### Integration flow
+
+1. Start `OTA_BEGIN` session with file size.
+2. Send sequentially chunked binaries (`OTA_CHUNK`).
+3. CRC-32 verify via `OTA_FINALIZE`.
+4. Run hot-swap via `hot_swap_wasm`.
+
+### Done criteria
+
+- Successfully swaps applications mid-run.
+- Motor/Balance control loops on Core 1 experience 0ms drop in execution.
+
+---
+
 ## Stage checklist (quick quality gate)
 
 Before advancing any stage:
@@ -224,5 +268,7 @@ If you start from zero modules:
 4. Add IMU (sensor bridge)
 5. Add motors (intent + router + safety)
 6. Add network control/observability surfaces
+7. Add Radio Link Monitoring (link vitality tracking)
+8. Add The Dynamic Brain (OTA Hot-Swapping)
 
 That sequence keeps SandOS stable because each step preserves the same architecture contract: **Core 1 deterministic control, Core 0 orchestration, ABI-mediated hardware access**.

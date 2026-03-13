@@ -197,6 +197,66 @@ its real-time loop uninterrupted throughout.
 Wasm calls `host_draw_eye()` + `host_write_text()` → 60 FPS robot face on
 screen. Core 1 never halted.
 
+## Phase 3 — IMU Polling
+
+**Hardware:** ESP32-S3 + IMU (MPU-6050)
+
+- [x] Configure Core 1 to poll the IMU via I2C/SPI
+- [x] Push deterministic sensor data from Core 1 to Core 0 safely
+- [x] Expose `host_get_pitch_roll` to Wasm via ABI
+
+**Success Criterion:** Physical tilt of the board is instantly read by Core 1 and exposed to the Wasm app.
+
+## Phase 4 — Motor Control Pipeline
+
+**Hardware:** ESP32-S3 + Motor Drivers + Motors
+
+- [x] PWM driver integration on Core 1
+- [x] Real-time PID balance loop strictly on Core 1
+- [x] ULP-driven dead-man's switch / voltage cut-off
+
+**Success Criterion:** Closed-loop balancing using PID math on Core 1, with Watchdog resets on Core 0 acting as a fault-tolerance chaos test.
+
+## Phase 5 — The Flexible Nervous System (Unified Message Router)
+
+**Hardware:** ESP32-S3
+
+- [x] OS Message Bus for `MovementIntent` abstraction
+- [x] Routing Engine (`RoutingMode::SingleBoard` / `Distributed`)
+- [x] Dead-Man's Switch (timeout > 50ms)
+
+**Success Criterion:** Intents are routed successfully, with missing commands resulting in safe motor stops.
+
+## Phase 6 — Async Telemetry TX
+
+**Hardware:** ESP32-S3
+
+- [x] Non-blocking `TELEMETRY_TX_CHANNEL`
+- [x] Structured IMU and odometry packet serialization
+- [x] Integration with ESP-NOW RX task for opportunistic drain
+
+**Success Criterion:** High-frequency (100 pps) telemetry stream broadcast over ESP-NOW without starving the Wasm engine loop.
+
+## Phase 7 — Radio Link Monitoring
+
+**Hardware:** ESP32-S3
+
+- [x] RX path records timestamp of valid command packets (`RADIO_LAST_RX_MS`)
+- [x] Link vitality checks (`is_radio_link_alive`)
+
+**Success Criterion:** Allows fallback routing/intelligence to be activated if the ESP-NOW link remains silent past the threshold.
+
+## Phase 8 — The Dynamic Brain (Wasm Hot-Swapping & OTA Engine)
+
+**Hardware:** ESP32-S3
+
+- [x] PSRAM-backed chunked binary receiver (`OtaReceiver`)
+- [x] CRC-32 validation
+- [x] 4-step hot-swap logic: Pause → Flush → Instantiate → Resume
+- [x] Wasm ABI for `host_get_ota_status`
+
+**Success Criterion:** Over-The-Air application swapping occurs dynamically without resetting the OS, interrupting Core 1 motor loops, or causing jitter.
+
 ## WiFi & Web Dashboard
 
 WiFi runs alongside ESP-NOW using `esp-wifi` coexistence mode. Once
