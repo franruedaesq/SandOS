@@ -24,6 +24,8 @@ use embedded_graphics::{
     mono_font::{ascii::FONT_10X20, MonoTextStyle},
 };
 
+pub mod ui;
+
 pub const DISPLAY_WIDTH: u32 = 240;
 pub const DISPLAY_HEIGHT: u32 = 320;
 const DISPLAY_QUEUE_DEPTH: usize = 8;
@@ -162,28 +164,22 @@ async fn display_task(
         DisplaySize240x320,
     ).expect("Failed to initialize ILI9341");
 
-    // Draw something basic to prove the screen works (Phase 2 requirement)
-    display.clear(Rgb565::BLACK).unwrap();
-    let style = MonoTextStyle::new(&FONT_10X20, Rgb565::GREEN);
-    Text::new("SandOS Base", Point::new(20, 30), style).draw(&mut display).unwrap();
-
-    let rect_style = PrimitiveStyle::with_fill(Rgb565::BLUE);
-    Rectangle::new(Point::new(20, 50), Size::new(100, 50))
-        .into_styled(rect_style)
-        .draw(&mut display)
-        .unwrap();
-
     let receiver = DISPLAY_CHANNEL.receiver();
+    let touch_receiver = crate::touch::TOUCH_EVENTS.receiver();
+
+    let mut ui_manager = ui::UiManager::new();
 
     loop {
         // Drain display commands
         while let Ok(cmd) = receiver.try_receive() {
             match cmd {
-                DisplayCommand::SetExpression(_) => {
+                DisplayCommand::SetExpression(expr) => {
                     log::info!("[display] expression updated");
+                    ui_manager.expression = expr;
                 }
-                DisplayCommand::SetText(_) => {
+                DisplayCommand::SetText(text) => {
                     log::info!("[display] text updated");
+                    ui_manager.text = text;
                 }
                 DisplayCommand::SetBrightness(_) => {
                     log::info!("[display] brightness updated");
@@ -191,11 +187,14 @@ async fn display_task(
             }
         }
 
-        // 4b. Advance rlvgl ticks and render frame
-        // This ensures LVGL gets CPU time every 10ms for smooth 3D/Lottie rendering
-        // without starving other async networking tasks. We do this in a "Think-Wait"
-        // non-blocking manner.
-        // Note: Full rlvgl::tick() or task_handler() goes here when initialized.
+        // Drain touch events
+        while let Ok((x, y)) = touch_receiver.try_receive() {
+            ui_manager.handle_touch(x as i32, y as i32);
+        }
+
+        // Advance UI logic and render
+        ui_manager.update();
+        let _ = ui_manager.render(&mut display);
 
         // 5. Flush framebuffer via async SPI (conceptually, though currently mock flush).
         if !DIAG_SKIP_FLUSH {
