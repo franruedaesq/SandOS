@@ -129,6 +129,14 @@ static BUTTON_EVENT_CHANNEL: Channel<CriticalSectionRawMutex, ButtonEvent, 4> = 
 enum ButtonEvent {
     ShortPress,
     LongPress,
+    Touch(TouchNavEvent),
+}
+
+#[derive(Clone, Copy)]
+enum TouchNavEvent {
+    Tap { x: u16, y: u16 },
+    SwipeLeft,
+    SwipeRight,
 }
 
 #[derive(Clone)]
@@ -325,6 +333,9 @@ async fn display_task(
 
     let receiver = DISPLAY_CHANNEL.receiver();
     let btn_receiver = BUTTON_EVENT_CHANNEL.receiver();
+    let touch_receiver = crate::drivers::touch::receiver();
+
+    let mut touch_start: [Option<(u16, u16)>; 2] = [None, None];
 
     // Starvation state: true while the animation is known to be frozen.
     let mut starved = false;
@@ -351,6 +362,38 @@ async fn display_task(
         // 2. Drain button events sent by the async button_task.
         while let Ok(btn_event) = btn_receiver.try_receive() {
             handle_button_event(btn_event, &mut state);
+        }
+
+        while let Ok(touch_event) = touch_receiver.try_receive() {
+            let id = (touch_event.id as usize) % touch_start.len();
+            match touch_event.phase {
+                crate::drivers::touch::TouchPhase::Down => {
+                    touch_start[id] = Some((touch_event.x, touch_event.y));
+                }
+                crate::drivers::touch::TouchPhase::Move => {}
+                crate::drivers::touch::TouchPhase::Up => {
+                    let start = touch_start[id].take().unwrap_or((touch_event.x, touch_event.y));
+                    let dx = touch_event.x as i32 - start.0 as i32;
+                    let dy = touch_event.y as i32 - start.1 as i32;
+
+                    if dx.abs() >= 40 && dx.abs() > dy.abs() {
+                        let nav = if dx > 0 {
+                            TouchNavEvent::SwipeRight
+                        } else {
+                            TouchNavEvent::SwipeLeft
+                        };
+                        handle_button_event(ButtonEvent::Touch(nav), &mut state);
+                    } else if dx.abs() <= 20 && dy.abs() <= 20 {
+                        handle_button_event(
+                            ButtonEvent::Touch(TouchNavEvent::Tap {
+                                x: touch_event.x,
+                                y: touch_event.y,
+                            }),
+                            &mut state,
+                        );
+                    }
+                }
+            }
         }
 
         // 2b. Drive LED effects (flashlight / party mode).
@@ -737,8 +780,99 @@ fn execute_menu_action(action: MenuItemAction, state: &mut FaceState) {
     }
 }
 
+fn handle_touch_tap(x: u16, y: u16, state: &mut FaceState) {
+    state.last_button_time = Instant::now();
+
+    match state.ui_mode {
+        UiMode::Face => {
+            state.ui_mode = UiMode::TopMenu;
+            state.top_menu_selected = 0;
+        }
+        UiMode::TopMenu | UiMode::SubMenu(_) => {
+            if x < 64 {
+                let slot = (y / 16) as usize;
+                let items = get_menu_items(&state.ui_mode);
+                if slot < items.len() {
+                    match state.ui_mode {
+                        UiMode::TopMenu => state.top_menu_selected = slot as u8,
+                        UiMode::SubMenu(_) => state.sub_menu_selected = slot as u8,
+                        _ => {}
+                    }
+
+                    let action = items[slot].action;
+                    execute_menu_action(action, state);
+                }
+            }
+        }
+        UiMode::WebMenu => {
+            if x < 64 {
+                if y >= 14 && y < 28 {
+                    state.web_menu_selected = 0;
+                } else if y >= 30 && y < 44 {
+                    state.web_menu_selected = 1;
+                }
+
+                if state.web_menu_selected == 0 {
+                    crate::web_server::enable_web_server();
+                    crate::wifi::mark_connecting();
+                    state.expression = EyeExpression::Happy;
+                } else {
+                    crate::web_server::disable_web_server();
+                    state.expression = EyeExpression::Neutral;
+                }
+            }
+        }
+        UiMode::ViennaLines => {
+            state.ui_mode = UiMode::ViennaDetail;
+        }
+        UiMode::ViennaDetail => {
+            state.ui_mode = UiMode::ViennaLines;
+            state.vienna_scroll_x = 0;
+        }
+        UiMode::Flashlight | UiMode::PartyMode | UiMode::Pomodoro | UiMode::SystemMonitor | UiMode::ClockView => {
+            return_to_face(state);
+        }
+    }
+}
+
+fn handle_touch_swipe_left(state: &mut FaceState) {
+    state.last_button_time = Instant::now();
+    match state.ui_mode {
+        UiMode::Face => {
+            state.ui_mode = UiMode::TopMenu;
+            state.top_menu_selected = 0;
+        }
+        UiMode::TopMenu => {
+            state.top_menu_selected = (state.top_menu_selected + 1) % TOP_MENU.len() as u8;
+        }
+        UiMode::SubMenu(cat) => {
+            let items = get_menu_items(&UiMode::SubMenu(cat));
+            state.sub_menu_selected = (state.sub_menu_selected + 1) % items.len() as u8;
+        }
+        UiMode::WebMenu => state.web_menu_selected = (state.web_menu_selected + 1) % 2,
+        UiMode::ViennaLines => {
+            let data = crate::vienna_fetch::get_lines();
+            if !data.stops.is_empty() {
+                state.vienna_selected = (state.vienna_selected + 1) % data.stops.len();
+                state.vienna_scroll_x = -20;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_touch_swipe_right(state: &mut FaceState) {
+    state.last_button_time = Instant::now();
+    if !matches!(state.ui_mode, UiMode::Face) {
+        return_to_face(state);
+    }
+}
+
 fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
     match ev {
+        ButtonEvent::Touch(TouchNavEvent::Tap { x, y }) => handle_touch_tap(x, y, state),
+        ButtonEvent::Touch(TouchNavEvent::SwipeLeft) => handle_touch_swipe_left(state),
+        ButtonEvent::Touch(TouchNavEvent::SwipeRight) => handle_touch_swipe_right(state),
         ButtonEvent::ShortPress => {
             let now = Instant::now();
 
@@ -771,30 +905,25 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                     state.web_menu_selected = (state.web_menu_selected + 1) % 2;
                 }
                 UiMode::Flashlight => {
-                    // Any press exits flashlight
                     state.flashlight_on = false;
                     crate::led_state::set_led_color(0, 0, 0);
                     state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
                 }
                 UiMode::PartyMode => {
-                    // Any press exits party mode
                     state.party_mode_on = false;
                     crate::led_state::set_led_color(0, 0, 0);
                     state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
                 }
                 UiMode::Pomodoro => {
-                    // Short press: pause/resume
                     if state.pomodoro_done {
                         state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
                     } else if let Some(paused_ms) = state.pomodoro_paused_remaining {
-                        // Resume: set start so that elapsed = total - paused_ms
                         let total_ms = 25u64 * 60 * 1000;
                         let elapsed = total_ms.saturating_sub(paused_ms);
                         state.pomodoro_start =
                             Some(Instant::now() - Duration::from_millis(elapsed));
                         state.pomodoro_paused_remaining = None;
                     } else if let Some(start) = state.pomodoro_start {
-                        // Pause: store remaining
                         let total_ms = 25u64 * 60 * 1000;
                         let elapsed = (Instant::now() - start).as_millis();
                         state.pomodoro_paused_remaining = Some(total_ms.saturating_sub(elapsed));
@@ -862,7 +991,6 @@ fn handle_button_event(ev: ButtonEvent, state: &mut FaceState) {
                     state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
                 }
                 UiMode::Pomodoro => {
-                    // Long press: cancel timer and return
                     state.pomodoro_start = None;
                     state.pomodoro_paused_remaining = None;
                     state.pomodoro_done = false;
