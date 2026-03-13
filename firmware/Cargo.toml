@@ -53,9 +53,6 @@ esp-backtrace = { version = "0.15", features = [
 # ── Heap allocator (for Wasm engine on PSRAM) ─────────────────────────────────
 esp-alloc = "0.6"
 
-# ── WebAssembly interpreter ────────────────────────────────────────────────────
-wasmi = { version = "0.31", default-features = false }
-
 # ── Phase 2 — Display ─────────────────────────────────────────────────────────
 embedded-graphics = { version = "0.8", default-features = false }
 mipidsi = { version = "0.8", default-features = false }
@@ -72,6 +69,9 @@ portable-atomic = { version = "1", features = ["unsafe-assume-single-core"] }
 
 # Shared ABI definitions
 abi = { path = "../abi", default-features = false }
+vl53l0x = "1.0.1"
+st7789 = "0.7.0"
+embedded-hal-async = "1.0.0"
 
 [build-dependencies]
 esp-build = "0.2"
