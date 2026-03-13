@@ -66,8 +66,8 @@ impl TftDisplay {
         self.write_cmd(0x11).await; // Sleep Out
         Timer::after(Duration::from_millis(120)).await;
 
-        self.write_cmd(0x3A).await; // Memory Access Control
-        self.write_data(&[0x48]).await; // MX, BGR
+        self.write_cmd(0x36).await; // Memory Access Control
+        self.write_data(&[0x08]).await; // BGR
 
         self.write_cmd(0x3A).await; // Pixel Format
         self.write_data(&[0x55]).await; // 16-bit
