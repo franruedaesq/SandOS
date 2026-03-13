@@ -37,6 +37,7 @@ use static_cell::StaticCell;
 mod core0;
 mod core1;
 mod display;
+mod hardware_profile;
 mod inference;
 mod led_state;
 mod message_bus;
@@ -117,14 +118,14 @@ async fn main(spawner: Spawner) {
 
     let io = Io::new(peripherals.IO_MUX);
 
-    // ── RGB LED init (GPIO 48 via RMT) ────────────────────────────────────────
-    let rmt = esp_hal::rmt::Rmt::new(peripherals.RMT, 80_u32.MHz())
-        .expect("Failed to initialize RMT");
+    // ── RGB LED init (GPIO 42 via RMT) ────────────────────────────────────────
+    let rmt =
+        esp_hal::rmt::Rmt::new(peripherals.RMT, 80_u32.MHz()).expect("Failed to initialize RMT");
 
-    let tx_channel_48 = rmt
+    let tx_channel_42 = rmt
         .channel1
         .configure(
-            peripherals.GPIO48,
+            peripherals.GPIO42,
             TxChannelConfig {
                 clk_divider: 4,
                 idle_output_level: false,
@@ -132,16 +133,16 @@ async fn main(spawner: Spawner) {
                 ..Default::default()
             },
         )
-        .expect("Failed to configure RMT TX channel 1 (GPIO48)");
+        .expect("Failed to configure RMT TX channel 1 (GPIO42)");
 
     unsafe {
         rgb_led::RGB_LED = Some(rgb_led::RgbLedDriver::new());
         if let Some(led) = (*core::ptr::addr_of_mut!(rgb_led::RGB_LED)).as_mut() {
-            led.attach_tx_channel_gpio48(tx_channel_48);
+            led.attach_tx_channel_gpio42(tx_channel_42);
             led.off();
         }
     }
-    log::info!("RGB LED initialized on GPIO48 with RMT");
+    log::info!("RGB LED initialized on GPIO42 with RMT");
 
     // ── 6. Core 1 — start before Wasm VM ────────────────────────────────────
     let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
@@ -170,6 +171,65 @@ async fn main(spawner: Spawner) {
     );
     log::info!("Display + button tasks spawned");
 
+    log::warn!(
+        "DISPLAY BACKEND: current build still uses SSD1306(I2C0) task; ILI9341 SPI migration pending"
+    );
+    // Runtime module health starts as UNKNOWN unless actively verified.
+    // The display task upgrades display state to ONLINE once the panel init succeeds.
+    hardware_profile::set_display_state(hardware_profile::ModuleState::Unknown);
+    hardware_profile::set_touch_state(hardware_profile::ModuleState::Unknown);
+    hardware_profile::set_audio_state(hardware_profile::ModuleState::Unknown);
+    hardware_profile::set_sd_state(hardware_profile::ModuleState::Unknown);
+    hardware_profile::set_battery_state(hardware_profile::ModuleState::Unknown);
+    hardware_profile::set_rgb_state(hardware_profile::ModuleState::Online);
+    hardware_profile::set_uart_state(hardware_profile::ModuleState::Online);
+    // ── Hardware profile boot diagnostics (target board pin map) ─────────────
+    log::info!("Board profile: {}", hardware_profile::CHIP_NAME);
+    log::info!("External flash: {}MB QSPI", hardware_profile::FLASH_SIZE_MB);
+    log::info!(
+        "LCD ILI9341 SPI pins: CS={} DC={} SCK={} MOSI={} MISO={} BL={}",
+        hardware_profile::LCD_CS,
+        hardware_profile::LCD_DC,
+        hardware_profile::LCD_SCK,
+        hardware_profile::LCD_MOSI,
+        hardware_profile::LCD_MISO,
+        hardware_profile::LCD_BL
+    );
+    log::info!(
+        "Touch I2C pins: SDA={} SCL={} RST={} INT={}",
+        hardware_profile::TOUCH_SDA,
+        hardware_profile::TOUCH_SCL,
+        hardware_profile::TOUCH_RST,
+        hardware_profile::TOUCH_INT
+    );
+    log::info!(
+        "Audio I2S pins: EN={} MCLK={} BCLK={} DOUT={} WS={} DIN={}",
+        hardware_profile::AUDIO_EN,
+        hardware_profile::AUDIO_MCLK,
+        hardware_profile::AUDIO_BCLK,
+        hardware_profile::AUDIO_DOUT,
+        hardware_profile::AUDIO_WS,
+        hardware_profile::AUDIO_DIN
+    );
+    log::info!(
+        "SDIO pins: CLK={} CMD={} D0={} D1={} D2={} D3={}",
+        hardware_profile::SD_CLK,
+        hardware_profile::SD_CMD,
+        hardware_profile::SD_DATA0,
+        hardware_profile::SD_DATA1,
+        hardware_profile::SD_DATA2,
+        hardware_profile::SD_DATA3
+    );
+    log::info!(
+        "Misc pins: RGB={} UART0_RX={} UART0_TX={} BAT_ADC={}",
+        hardware_profile::RGB_LED,
+        hardware_profile::UART0_RX,
+        hardware_profile::UART0_TX,
+        hardware_profile::BATTERY_ADC
+    );
+    let diag_line = hardware_profile::boot_status_line();
+    display::set_status_text(diag_line.as_str());
+
     // ── 9. WiFi radio init ───────────────────────────────────────────────────
     //
     // TIMG1 is used for the esp-wifi timer so it does not conflict with the
@@ -191,12 +251,9 @@ async fn main(spawner: Spawner) {
     // which was found to break STA connections on this hardware).
     // The ESP-NOW token is a zero-sized type — we transmute () into it since
     // WiFi is already initialized above.
-    let (wifi_interface, wifi_controller) = esp_wifi::wifi::new_with_mode(
-        wifi_init,
-        peripherals.WIFI,
-        esp_wifi::wifi::WifiStaDevice,
-    )
-    .expect("Failed to create WiFi STA interface");
+    let (wifi_interface, wifi_controller) =
+        esp_wifi::wifi::new_with_mode(wifi_init, peripherals.WIFI, esp_wifi::wifi::WifiStaDevice)
+            .expect("Failed to create WiFi STA interface");
     // ── 11. Embassy-net stack ────────────────────────────────────────────────
     let (stack, runner) = wifi::make_stack(wifi_interface);
 
@@ -205,7 +262,9 @@ async fn main(spawner: Spawner) {
     // net_task: drives the embassy-net packet processor (must run alongside wifi_task).
     // wifi_task: manages WiFi association, DHCP, and reconnect.
     spawner.spawn(wifi::net_task(runner)).unwrap();
-    spawner.spawn(wifi::wifi_task(wifi_controller, stack)).unwrap();
+    spawner
+        .spawn(wifi::wifi_task(wifi_controller, stack))
+        .unwrap();
     log::info!("WiFi tasks spawned");
 
     // ── 13. Web server task (starts disabled) ────────────────────────────────
@@ -224,12 +283,25 @@ async fn main(spawner: Spawner) {
     // ── 13c. NTP time sync task ──────────────────────────────────────────────
     spawner.spawn(ntp::ntp_sync_task(stack)).unwrap();
     log::info!("NTP sync task spawned");
+    spawner
+        .spawn(hardware_profile::diagnostics_log_task())
+        .unwrap();
+    log::info!("Hardware diagnostics logger task spawned");
+    spawner
+        .spawn(hardware_profile::touch_probe_task(
+            peripherals.I2C1,
+            peripherals.GPIO16,
+            peripherals.GPIO15,
+        ))
+        .unwrap();
+    log::info!("Touch probe task spawned (FT6336 on I2C1)");
 
     // ── 14. Core 0 brain task ────────────────────────────────────────────────
     //
     // Spawns the ESP-NOW receiver, the Wasm engine, and the OS router tasks.
     #[cfg(feature = "espnow")]
-    let esp_now_token = unsafe { core::mem::transmute::<(), esp_wifi::esp_now::EspNowWithWifiCreateToken>(()) };
+    let esp_now_token =
+        unsafe { core::mem::transmute::<(), esp_wifi::esp_now::EspNowWithWifiCreateToken>(()) };
 
     #[cfg(feature = "espnow")]
     spawner

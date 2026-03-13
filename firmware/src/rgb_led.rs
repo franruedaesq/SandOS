@@ -1,6 +1,6 @@
 //! # RGB LED Driver for ESP32-S3
 //!
-//! Controls the WS2812B addressable RGB LED on GPIO 38.
+//! Controls the WS2812B addressable RGB LED on GPIO 42.
 
 use esp_hal::rmt::{Channel, PulseCode, TxChannel};
 use esp_hal::Blocking;
@@ -15,12 +15,12 @@ const WS2812_BIT_1_HIGH_TICKS: u16 = 16;
 const WS2812_BIT_1_LOW_TICKS: u16 = 9;
 const WS2812_RESET_TICKS: u16 = 1200;
 
-/// RGB LED driver for WS2812B addressable LED on GPIO 38
+/// RGB LED driver for WS2812B addressable LED on GPIO 42
 ///
 /// Stores current color state and drives hardware via RMT channel 0.
 pub struct RgbLedDriver {
     current_color: RGB8,
-    tx_channel_48: Option<Channel<Blocking, 1>>,
+    tx_channel_42: Option<Channel<Blocking, 1>>,
 }
 
 impl RgbLedDriver {
@@ -29,20 +29,25 @@ impl RgbLedDriver {
         log::info!("[rgb_led] RGB LED driver initialized");
         Self {
             current_color: RGB8::new(0, 0, 0),
-            tx_channel_48: None,
+            tx_channel_42: None,
         }
     }
 
-    pub fn attach_tx_channel_gpio48(&mut self, tx_channel: Channel<Blocking, 1>) {
-        self.tx_channel_48 = Some(tx_channel);
-        log::info!("[rgb_led] RMT TX channel attached on GPIO48");
+    pub fn attach_tx_channel_gpio42(&mut self, tx_channel: Channel<Blocking, 1>) {
+        self.tx_channel_42 = Some(tx_channel);
+        log::info!("[rgb_led] RMT TX channel attached on GPIO42");
     }
 
     /// Set the RGB LED to a specific color (0-255 per channel)
     pub fn set_color(&mut self, red: u8, green: u8, blue: u8) {
         self.current_color = RGB8::new(red, green, blue);
         self.transmit_ws2812();
-        log::info!("[rgb_led] LED color set to R={} G={} B={}", red, green, blue);
+        log::info!(
+            "[rgb_led] LED color set to R={} G={} B={}",
+            red,
+            green,
+            blue
+        );
     }
 
     fn transmit_ws2812(&mut self) {
@@ -68,20 +73,20 @@ impl RgbLedDriver {
 
         frame[24] = u32::new(false, WS2812_RESET_TICKS, false, 0);
 
-        if let Some(channel48) = self.tx_channel_48.take() {
-            match channel48.transmit(&frame) {
+        if let Some(channel42) = self.tx_channel_42.take() {
+            match channel42.transmit(&frame) {
                 Ok(transaction) => match transaction.wait() {
                     Ok(channel_back) => {
-                        self.tx_channel_48 = Some(channel_back);
-                        log::info!("[rgb_led] RMT frame transmitted on GPIO48");
+                        self.tx_channel_42 = Some(channel_back);
+                        log::info!("[rgb_led] RMT frame transmitted on GPIO42");
                     }
                     Err((e, channel_back)) => {
-                        self.tx_channel_48 = Some(channel_back);
-                        log::warn!("[rgb_led] RMT wait failed on GPIO48: {:?}", e);
+                        self.tx_channel_42 = Some(channel_back);
+                        log::warn!("[rgb_led] RMT wait failed on GPIO42: {:?}", e);
                     }
                 },
                 Err(e) => {
-                    log::warn!("[rgb_led] RMT transmit failed on GPIO48: {:?}", e);
+                    log::warn!("[rgb_led] RMT transmit failed on GPIO42: {:?}", e);
                 }
             }
         } else {
