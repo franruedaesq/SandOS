@@ -314,9 +314,12 @@ async fn main(spawner: Spawner) {
         .unwrap();
     log::info!("Audio probe task spawned (speaker amp enable)");
     spawner
-        .spawn(drivers::battery::probe_task())
+        .spawn(drivers::battery::probe_task(
+            peripherals.ADC1,
+            peripherals.GPIO9,
+        ))
         .unwrap();
-    log::info!("Battery probe task spawned (ULP voltage monitor)");
+    log::info!("Battery probe task spawned (ADC GPIO9 + ULP fallback)");
     spawner
         .spawn(drivers::sd::probe_task(
             peripherals.GPIO38,
@@ -327,7 +330,7 @@ async fn main(spawner: Spawner) {
             peripherals.GPIO47,
         ))
         .unwrap();
-    log::info!("SD probe task spawned (SDIO line sanity monitor)");
+    log::info!("SD probe task spawned (SDIO probe + storage mount check)");
 
     // ── 14. Core 0 brain task ────────────────────────────────────────────────
     //
