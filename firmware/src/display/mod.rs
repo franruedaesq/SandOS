@@ -351,6 +351,101 @@ async fn display_task(
             handle_button_event(btn_event, &mut state);
         }
 
+
+        // 2c. Drain touch events.
+        let touch_coords = crate::sensors::load_touch_coords();
+        if let Some((x, y)) = touch_coords {
+            if !state.was_touched {
+                state.was_touched = true;
+                state.last_button_time = Instant::now();
+                log::info!("[display] touch start at {},{}", x, y);
+                // Map to virtual 128x64 display coordinates assuming the display scales up or is drawn top-left.
+                // The prompt mentions physical touch, we need to know the physical mapping.
+                // Assuming X is 0-240 and Y is 0-320 mapping to UI.
+                // Let's assume UI is drawn at top left 128x64 but the screen is 240x320. Wait, no, the driver code shows:
+                // DISPLAY_WIDTH = 240, DISPLAY_HEIGHT = 320. The draw loops use X: 0..240, Y: 0..320, but the rendering bounds in display/mod.rs are hardcoded like 128 and 64!
+                // Let's map X to 0-128 and Y to 0-64 simply by scaling.
+                // x is roughly 0..240 (or 240..0 if flipped? We'll see). Let's just assume simple scaling:
+                let vx = (x as u32 * 128 / 240) as i32;
+                let vy = (y as u32 * 64 / 320) as i32;
+
+                match state.ui_mode {
+                    UiMode::Face => {
+                        // "Face should be full screen, and then if we touch on the face, i get small and to the right, and we show the menu on the left"
+                        state.ui_mode = UiMode::TopMenu;
+                        state.top_menu_selected = 0;
+                        log::info!("[display] touch face -> TopMenu");
+                    }
+                    UiMode::TopMenu | UiMode::SubMenu(_) | UiMode::WebMenu => {
+                        // Menu is on the left (x < 63). Check if touch is in the menu area.
+                        if vx < 64 {
+                            let slot = (vy / 16) as usize;
+                            if let UiMode::TopMenu = state.ui_mode {
+                                let items = get_menu_items(&state.ui_mode);
+                                // Determine current scroll offset
+                                let sel = state.top_menu_selected as usize;
+                                let max_visible = 4;
+                                let scroll_start = if sel >= max_visible { sel - (max_visible - 1) } else { 0 };
+                                let target_idx = scroll_start + slot;
+                                if target_idx < items.len() {
+                                    state.top_menu_selected = target_idx as u8;
+                                    execute_menu_action(items[target_idx].action, &mut state);
+                                }
+                            } else if let UiMode::SubMenu(cat) = state.ui_mode {
+                                let items = get_menu_items(&UiMode::SubMenu(cat));
+                                let sel = state.sub_menu_selected as usize;
+                                let max_visible = 4;
+                                let scroll_start = if sel >= max_visible { sel - (max_visible - 1) } else { 0 };
+                                let target_idx = scroll_start + slot;
+                                if target_idx < items.len() {
+                                    state.sub_menu_selected = target_idx as u8;
+                                    execute_menu_action(items[target_idx].action, &mut state);
+                                }
+                            } else if let UiMode::WebMenu = state.ui_mode {
+                                if slot < 2 {
+                                    state.web_menu_selected = slot as u8;
+                                    if state.web_menu_selected == 0 {
+                                        crate::web_server::enable_web_server();
+                                        crate::wifi::mark_connecting();
+                                        state.expression = EyeExpression::Happy;
+                                    } else {
+                                        crate::web_server::disable_web_server();
+                                        state.expression = EyeExpression::Neutral;
+                                    }
+                                }
+                            }
+                        } else {
+                            // Touch right side -> maybe go back to face?
+                            return_to_face(&mut state);
+                        }
+                    }
+                    UiMode::ViennaLines => {
+                        state.ui_mode = UiMode::ViennaDetail;
+                    }
+                    UiMode::ViennaDetail => {
+                        state.ui_mode = UiMode::ViennaLines;
+                        state.vienna_scroll_x = 0;
+                    }
+                    _ => {
+                        // Any other mode exits to face or menu. We'll exit to menu for tools.
+                        if state.flashlight_on {
+                            state.flashlight_on = false;
+                            crate::led_state::set_led_color(0, 0, 0);
+                            state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+                        } else if state.party_mode_on {
+                            state.party_mode_on = false;
+                            crate::led_state::set_led_color(0, 0, 0);
+                            state.ui_mode = UiMode::SubMenu(MenuCategory::Tools);
+                        } else {
+                            return_to_face(&mut state);
+                        }
+                    }
+                }
+            }
+        } else {
+            state.was_touched = false;
+        }
+
         // 2b. Drive LED effects (flashlight / party mode).
         tick_led_effects(&mut state);
 
@@ -868,6 +963,7 @@ struct FaceState {
     brightness_level: u8,
     // ── Double press detection ──
     last_short_press_time: Instant,
+    was_touched: bool,
     // ── Rich animation state ──
     rng: Rng,
     /// Millisecond timestamp when the next blink should start.
@@ -910,6 +1006,7 @@ impl Default for FaceState {
             pomodoro_done: false,
             brightness_level: 2, // High (255)
             last_short_press_time: Instant::from_ticks(0),
+            was_touched: false,
             rng: Rng(0xDEAD_BEEF),
             next_blink_ms: 2500,
             blink_end_ms: 0,
@@ -1050,6 +1147,15 @@ fn render_full_face(oled: &mut TftDisplay, state: &mut FaceState) {
     let le_cx = 38 + state.eye_look_x; // left-eye centre X
     let re_cx = 90 + state.eye_look_x; // right-eye centre X
     draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 1);
+
+
+    // ── Cheeks (Blush) ──
+    let blush_color = Rgb565::new(31, 32, 16); // light pink
+    let cheek_r = 6;
+    let _ = Circle::new(Point::new(le_cx - 16, eye_cy + 8), (cheek_r * 2) as u32)
+        .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
+    let _ = Circle::new(Point::new(re_cx + 4, eye_cy + 8), (cheek_r * 2) as u32)
+        .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
 
     // ── Mouth ──
     let mouth_cy = 46 + bob_y;
@@ -1941,6 +2047,15 @@ fn render_mini_face(oled: &mut TftDisplay, state: &FaceState) {
     let eye_cy = 22 + bob_y;
 
     draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 0);
+
+
+    // ── Cheeks (Blush) ──
+    let blush_color = Rgb565::new(31, 32, 16); // light pink
+    let cheek_r = 3;
+    let _ = Circle::new(Point::new(le_cx - 8, eye_cy + 4), (cheek_r * 2) as u32)
+        .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
+    let _ = Circle::new(Point::new(re_cx + 2, eye_cy + 4), (cheek_r * 2) as u32)
+        .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
 
     // Mini mouth
     draw_mouth(oled, state.expression, 95, 38 + bob_y, 0, now_ms);
