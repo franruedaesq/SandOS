@@ -101,6 +101,9 @@ pub async fn router_task() {
                 // Zero all motor outputs to halt the robot safely.
                 motors::store_motor_command(0, 0);
 
+                // Fallback to "Neutral" expression on timeout
+                let _ = crate::display::DISPLAY_CHANNEL.sender().try_send(crate::display::DisplayCommand::SetExpression(abi::EyeExpression::Neutral));
+
                 // Phase 7: if the radio link is also silent, activate the
                 // local inference pipeline with any pending audio snapshot.
                 #[cfg(feature = "espnow")]
