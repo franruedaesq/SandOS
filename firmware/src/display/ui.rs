@@ -15,6 +15,10 @@ pub enum UiState {
     Menu,
     SettingsMenu,
     Metrics,
+    ToolsMenu,
+    InfoMenu,
+    Clock,
+    Pomodoro,
 }
 
 // Landscape display: 320 wide × 240 tall
@@ -63,6 +67,15 @@ pub struct UiManager {
 
     // Menu
     pub selected_menu_item: usize,
+    pub menu_scroll_index: usize,
+    pub prev_menu_scroll_index: usize,
+    pub tools_button_pop: [i32; 4],
+    pub info_button_pop: [i32; 3],
+    pub pomodoro_button_pop: [i32; 4],
+    pub flashlight_on: bool,
+    pub party_mode_on: bool,
+    pub pomodoro_ms: u32,
+    pub pomodoro_running: bool,
     pub button_pop: [i32; 4],
     pub prev_menu_offset: i32,
 
@@ -185,6 +198,15 @@ impl UiManager {
             prev_r_kun_y: RKUN_CENTER_Y,
             prev_idle_bounce: 0,
             selected_menu_item: 0,
+            menu_scroll_index: 0,
+            prev_menu_scroll_index: 0,
+            tools_button_pop: [0; 4],
+            info_button_pop: [0; 3],
+            pomodoro_button_pop: [0; 4],
+            flashlight_on: false,
+            party_mode_on: false,
+            pomodoro_ms: 25 * 60 * 1000,
+            pomodoro_running: false,
             button_pop: [0; 4],
             prev_menu_offset: MENU_HIDE_OFFSET,
             ripple_x: 0,
@@ -234,6 +256,27 @@ impl UiManager {
         self.last_frame_time = Some(now);
 
         let dt = self.dt_ms;
+        if self.party_mode_on {
+            let r = ((self.elapsed_ms / 10) % 255) as u8;
+            let g = ((self.elapsed_ms / 15) % 255) as u8;
+            let b = ((self.elapsed_ms / 20) % 255) as u8;
+            unsafe {
+                if let Some(led) = crate::rgb_led::RGB_LED.as_mut() {
+                    led.set_color(r, g, b);
+                }
+            }
+        }
+        if self.pomodoro_running {
+            self.pomodoro_ms = self.pomodoro_ms.saturating_sub(dt);
+            if self.pomodoro_ms == 0 {
+                self.pomodoro_running = false;
+                crate::audio::play_blip(); // Alert when done
+            }
+            if self.state == UiState::Pomodoro {
+                self.force_redraw = true;
+            }
+        }
+
 
         // ── Periodic animations (time-based) ───────────────────────────────
         if self.state == UiState::Idle {
@@ -266,6 +309,14 @@ impl UiManager {
             }
         }
 
+        // ── Global Pop Animation Decay ─────────────────────────────────────
+        let pop_decay = (dt as i32 * 100 / 1000).max(1);
+        for pop in &mut self.button_pop { if *pop > 0 { *pop = (*pop - pop_decay).max(0); } }
+        for pop in &mut self.settings_button_pop { if *pop > 0 { *pop = (*pop - pop_decay).max(0); } }
+        for pop in &mut self.tools_button_pop { if *pop > 0 { *pop = (*pop - pop_decay).max(0); } }
+        for pop in &mut self.info_button_pop { if *pop > 0 { *pop = (*pop - pop_decay).max(0); } }
+        for pop in &mut self.pomodoro_button_pop { if *pop > 0 { *pop = (*pop - pop_decay).max(0); } }
+
         // ── State machine (dt-scaled easing) ───────────────────────────────
         match self.state {
             UiState::Menu => {
@@ -290,15 +341,8 @@ impl UiManager {
                     }
                 }
 
-                // Pop animations decay: 100 units/sec (pop 5 → 0 in ~50 ms)
-                let pop_decay = (dt as i32 * 100 / 1000).max(1);
-                for pop in &mut self.button_pop {
-                    if *pop > 0 {
-                        *pop = (*pop - pop_decay).max(0);
-                    }
-                }
             }
-            UiState::SettingsMenu => {
+            UiState::SettingsMenu | UiState::ToolsMenu | UiState::InfoMenu | UiState::Clock | UiState::Pomodoro => {
                 // Push R-Kun off screen to the right
                 if self.r_kun_x < SCREEN_W + 50 {
                     let diff = (SCREEN_W + 50) - self.r_kun_x;
@@ -320,13 +364,6 @@ impl UiManager {
                     }
                 }
 
-                // Pop animations for settings buttons
-                let pop_decay = (dt as i32 * 100 / 1000).max(1);
-                for pop in &mut self.settings_button_pop {
-                    if *pop > 0 {
-                        *pop = (*pop - pop_decay).max(0);
-                    }
-                }
             }
             UiState::Metrics => {
                 // Push R-Kun off screen
@@ -390,12 +427,32 @@ impl UiManager {
                         self.state = UiState::Idle;
                         crate::audio::play_blip();
                     }
-                    UiState::SettingsMenu => {
+                    UiState::SettingsMenu | UiState::ToolsMenu | UiState::InfoMenu | UiState::Clock | UiState::Pomodoro => {
                         self.state = UiState::Menu;
                         crate::audio::play_blip();
                     }
                     UiState::Metrics => {
-                        self.state = UiState::SettingsMenu;
+                        self.state = UiState::InfoMenu;
+                        self.force_redraw = true;
+                        crate::audio::play_blip();
+                    }
+                    UiState::ToolsMenu => {
+                        self.state = UiState::Menu;
+                        self.menu_scroll_index = 0;
+                        crate::audio::play_blip();
+                    }
+                    UiState::InfoMenu => {
+                        self.state = UiState::Menu;
+                        self.menu_scroll_index = 0;
+                        crate::audio::play_blip();
+                    }
+                    UiState::Clock => {
+                        self.state = UiState::InfoMenu;
+                        self.force_redraw = true;
+                        crate::audio::play_blip();
+                    }
+                    UiState::Pomodoro => {
+                        self.state = UiState::ToolsMenu;
                         self.force_redraw = true;
                         crate::audio::play_blip();
                     }
@@ -403,6 +460,18 @@ impl UiManager {
                 }
             }
             crate::touch::TouchAction::SwipeUp => {
+                let max_items = match self.state {
+                    UiState::Menu => 2,
+                    UiState::ToolsMenu => 4,
+                    UiState::InfoMenu => 3,
+                    _ => 0,
+                };
+
+                if max_items > 4 && self.menu_scroll_index < max_items - 4 {
+                    self.menu_scroll_index += 1;
+                    self.force_redraw = true;
+                }
+
                 if self.state == UiState::Metrics {
                     // Scrolling down (content goes up, so metrics_scroll_y decreases)
                     self.metrics_scroll_y = (self.metrics_scroll_y - 40).max(-160);
@@ -410,6 +479,13 @@ impl UiManager {
                 }
             }
             crate::touch::TouchAction::SwipeDown => {
+                if matches!(self.state, UiState::Menu | UiState::ToolsMenu | UiState::InfoMenu) {
+                    if self.menu_scroll_index > 0 {
+                        self.menu_scroll_index -= 1;
+                        self.force_redraw = true;
+                    }
+                }
+
                 if self.state == UiState::Metrics {
                     // Scrolling up (content goes down, so metrics_scroll_y increases)
                     self.metrics_scroll_y = (self.metrics_scroll_y + 40).min(0);
@@ -425,28 +501,106 @@ impl UiManager {
 
                 match self.state {
                     UiState::Menu => {
-                        // Check taps on vertical menu items
-                        for i in 0..4 {
+                        let button_labels_len = 2;
+                        let visible_count = core::cmp::min(4, button_labels_len - self.menu_scroll_index);
+                        for i in 0..visible_count {
                             let bx = self.menu_offset;
                             let by = MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32;
-
-                            if x >= bx && x <= bx + MENU_ITEM_WIDTH
-                                && y >= by && y <= by + MENU_ITEM_HEIGHT
-                            {
-                                self.selected_menu_item = i;
-                                self.button_pop[i] = 5;
+                            if x >= bx && x <= bx + MENU_ITEM_WIDTH && y >= by && y <= by + MENU_ITEM_HEIGHT {
+                                let actual_idx = i + self.menu_scroll_index;
+                                self.selected_menu_item = actual_idx;
+                                self.button_pop[actual_idx] = 5;
                                 crate::audio::play_blip();
-
-                                // Navigate into Settings sub-menu
-                                if i == 3 {
-                                    self.state = UiState::SettingsMenu;
-                                    self.selected_settings_item = 0;
+                                if actual_idx == 0 {
+                                    self.state = UiState::ToolsMenu;
+                                    self.menu_scroll_index = 0;
+                                    self.force_redraw = true;
+                                } else if actual_idx == 1 {
+                                    self.state = UiState::InfoMenu;
+                                    self.menu_scroll_index = 0;
                                     self.force_redraw = true;
                                 }
                             }
                         }
                     }
-                    UiState::SettingsMenu => {
+                    UiState::ToolsMenu => {
+                        let button_labels_len = 4;
+                        let visible_count = core::cmp::min(4, button_labels_len - self.menu_scroll_index);
+                        for i in 0..visible_count {
+                            let bx = self.menu_offset;
+                            let by = MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32;
+                            if x >= bx && x <= bx + MENU_ITEM_WIDTH && y >= by && y <= by + MENU_ITEM_HEIGHT {
+                                let actual_idx = i + self.menu_scroll_index;
+                                self.tools_button_pop[actual_idx] = 5;
+                                crate::audio::play_blip();
+                                if actual_idx == 0 {
+                                    self.flashlight_on = !self.flashlight_on;
+                                    unsafe {
+                                        if let Some(led) = crate::rgb_led::RGB_LED.as_mut() {
+                                            if self.flashlight_on { led.set_color(255, 255, 255); } else { led.set_color(0, 0, 0); }
+                                        }
+                                    }
+                                } else if actual_idx == 1 {
+                                    self.state = UiState::Pomodoro;
+                                } else if actual_idx == 2 {
+                                    self.party_mode_on = !self.party_mode_on;
+                                    if !self.party_mode_on {
+                                        unsafe {
+                                            if let Some(led) = crate::rgb_led::RGB_LED.as_mut() { led.set_color(0, 0, 0); }
+                                        }
+                                    }
+                                } else if actual_idx == 3 {
+                                    self.state = UiState::Menu;
+                                    self.menu_scroll_index = 0;
+                                }
+                                self.force_redraw = true;
+                            }
+                        }
+                    }
+                    UiState::InfoMenu => {
+                        let button_labels_len = 3;
+                        let visible_count = core::cmp::min(4, button_labels_len - self.menu_scroll_index);
+                        for i in 0..visible_count {
+                            let bx = self.menu_offset;
+                            let by = MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32;
+                            if x >= bx && x <= bx + MENU_ITEM_WIDTH && y >= by && y <= by + MENU_ITEM_HEIGHT {
+                                let actual_idx = i + self.menu_scroll_index;
+                                self.info_button_pop[actual_idx] = 5;
+                                crate::audio::play_blip();
+                                if actual_idx == 0 {
+                                    self.state = UiState::Metrics;
+                                    self.metrics_scroll_y = 0;
+                                } else if actual_idx == 1 {
+                                    self.state = UiState::Clock;
+                                } else if actual_idx == 2 {
+                                    self.state = UiState::Menu;
+                                    self.menu_scroll_index = 0;
+                                }
+                                self.force_redraw = true;
+                            }
+                        }
+                    }
+                    UiState::Pomodoro => {
+                        for i in 0..4 {
+                            let bx = self.menu_offset;
+                            let by = MENU_START_Y + 60 + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32;
+                            if x >= bx && x <= bx + MENU_ITEM_WIDTH && y >= by && y <= by + MENU_ITEM_HEIGHT {
+                                self.pomodoro_button_pop[i] = 5;
+                                crate::audio::play_blip();
+                                if i == 0 {
+                                    self.pomodoro_ms += 5 * 60 * 1000;
+                                } else if i == 1 {
+                                    self.pomodoro_ms = self.pomodoro_ms.saturating_sub(5 * 60 * 1000);
+                                } else if i == 2 {
+                                    self.pomodoro_running = !self.pomodoro_running;
+                                } else if i == 3 {
+                                    self.state = UiState::ToolsMenu;
+                                }
+                                self.force_redraw = true;
+                            }
+                        }
+                    }
+                    UiState::SettingsMenu | UiState::ToolsMenu | UiState::InfoMenu | UiState::Clock | UiState::Pomodoro => {
                         // Check tap on settings sub-menu items
                         let bx = self.menu_offset;
                         let by = MENU_START_Y;
@@ -488,10 +642,12 @@ impl UiManager {
             || self.is_blinking != self.prev_is_blinking;
         let menu_moved = self.menu_offset != self.prev_menu_offset;
         let buttons_animating = self.button_pop.iter().any(|&p| p > 0)
-            || self.settings_button_pop.iter().any(|&p| p > 0);
+            || self.settings_button_pop.iter().any(|&p| p > 0)
+            || self.tools_button_pop.iter().any(|&p| p > 0)
+            || self.info_button_pop.iter().any(|&p| p > 0)
+            || self.pomodoro_button_pop.iter().any(|&p| p > 0);
 
-        full_redraw || r_kun_moved || menu_moved || buttons_animating
-            || self.ripple_active || self.ripple_dirty
+        full_redraw || r_kun_moved || menu_moved || buttons_animating || self.ripple_active || self.ripple_dirty || self.pomodoro_running
     }
 
     /// Save current state as "previous" so the next frame can detect changes.
@@ -521,6 +677,12 @@ impl UiManager {
             UiState::Metrics => {
                 self.draw_metrics(display)?;
             }
+            UiState::Clock => {
+                self.draw_clock(display)?;
+            }
+            UiState::Pomodoro => {
+                self.draw_pomodoro(display)?;
+            }
             _ => {
                 // R-Kun face
                 self.draw_r_kun(display)?;
@@ -529,6 +691,8 @@ impl UiManager {
                 if self.menu_offset > MENU_HIDE_OFFSET {
                     match self.state {
                         UiState::SettingsMenu => self.draw_settings_menu(display)?,
+                        UiState::ToolsMenu => self.draw_tools_menu(display)?,
+                        UiState::InfoMenu => self.draw_info_menu(display)?,
                         _ => self.draw_menu(display)?,
                     }
                 }
@@ -689,10 +853,12 @@ impl UiManager {
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        let button_labels = ["Talk", "Play", "Memory", "Settings"];
+        let button_labels = ["Tools", "Info"];
+        let visible_count = core::cmp::min(4, button_labels.len().saturating_sub(self.menu_scroll_index));
 
-        for i in 0..4 {
-            let pop = self.button_pop[i];
+        for i in 0..visible_count {
+            let actual_idx = i + self.menu_scroll_index;
+            let pop = self.button_pop[actual_idx];
 
             let w = MENU_ITEM_WIDTH + pop * 2;
             let h = MENU_ITEM_HEIGHT + pop * 2;
@@ -703,7 +869,6 @@ impl UiManager {
             let is_pressed = pop > 0;
 
             if is_pressed {
-                // Pressed: white pill with black text
                 let btn_style = PrimitiveStyleBuilder::new()
                     .fill_color(Rgb565::WHITE)
                     .build();
@@ -716,13 +881,12 @@ impl UiManager {
                 .draw(display)?;
 
                 let text_style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
-                let label_len = button_labels[i].len() as i32;
+                let label_len = button_labels[actual_idx].len() as i32;
                 let label_width = label_len * 10;
                 let text_x = bx + (w - label_width) / 2;
                 let text_y = by + (h + 14) / 2;
-                Text::new(button_labels[i], Point::new(text_x, text_y), text_style).draw(display)?;
+                Text::new(button_labels[actual_idx], Point::new(text_x, text_y), text_style).draw(display)?;
             } else {
-                // Default: filled bg pill with subtle outline
                 let bg_color = Rgb565::new(31, 62, 29);
                 let btn_style = PrimitiveStyleBuilder::new()
                     .fill_color(bg_color)
@@ -738,13 +902,221 @@ impl UiManager {
                 .draw(display)?;
 
                 let text_style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
-                let label_len = button_labels[i].len() as i32;
+                let label_len = button_labels[actual_idx].len() as i32;
                 let label_width = label_len * 10;
                 let text_x = bx + (w - label_width) / 2;
                 let text_y = by + (h + 14) / 2;
-                Text::new(button_labels[i], Point::new(text_x, text_y), text_style).draw(display)?;
+                Text::new(button_labels[actual_idx], Point::new(text_x, text_y), text_style).draw(display)?;
             }
         }
+
+        if button_labels.len() > 4 {
+            let arrow_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
+            if self.menu_scroll_index > 0 {
+                Text::new("^", Point::new(self.menu_offset + MENU_ITEM_WIDTH / 2 - 5, MENU_START_Y - 5), arrow_style).draw(display)?;
+            }
+            if self.menu_scroll_index + 4 < button_labels.len() {
+                Text::new("v", Point::new(self.menu_offset + MENU_ITEM_WIDTH / 2 - 5, MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * 4 + 10), arrow_style).draw(display)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn draw_tools_menu<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let header_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+        Text::new("< Tools", Point::new(self.menu_offset, MENU_START_Y - 4), header_style).draw(display)?;
+
+        let button_labels = ["Flashlight", "Pomodoro", "Party Mode", "< Back"];
+        let visible_count = core::cmp::min(4, button_labels.len().saturating_sub(self.menu_scroll_index));
+
+        for i in 0..visible_count {
+            let actual_idx = i + self.menu_scroll_index;
+            let pop = self.tools_button_pop[actual_idx];
+
+            let w = MENU_ITEM_WIDTH + pop * 2;
+            let h = MENU_ITEM_HEIGHT + pop * 2;
+            let bx = self.menu_offset - pop;
+            let by = MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32 - pop;
+            let is_pressed = pop > 0;
+
+            let (fill, text_color) = if is_pressed {
+                (Rgb565::WHITE, Rgb565::BLACK)
+            } else {
+                if actual_idx == 0 && self.flashlight_on {
+                    (Rgb565::new(20, 40, 60), Rgb565::WHITE)
+                } else if actual_idx == 2 && self.party_mode_on {
+                    (Rgb565::new(60, 20, 40), Rgb565::WHITE)
+                } else {
+                    (Rgb565::new(31, 62, 29), Rgb565::BLACK)
+                }
+            };
+
+            let btn_style = if is_pressed {
+                PrimitiveStyleBuilder::new().fill_color(fill).build()
+            } else {
+                PrimitiveStyleBuilder::new()
+                    .fill_color(fill)
+                    .stroke_color(Rgb565::new(25, 50, 25))
+                    .stroke_width(1)
+                    .build()
+            };
+
+            let radii = CornerRadii::new(Size::new(MENU_CORNER_RADIUS, MENU_CORNER_RADIUS));
+            RoundedRectangle::new(
+                Rectangle::new(Point::new(bx, by), Size::new(w as u32, h as u32)),
+                radii,
+            )
+            .into_styled(btn_style)
+            .draw(display)?;
+
+            let text_style = MonoTextStyle::new(&FONT_10X20, text_color);
+            let label_len = button_labels[actual_idx].len() as i32;
+            let label_width = label_len * 10;
+            let text_x = bx + (w - label_width) / 2;
+            let text_y = by + (h + 14) / 2;
+            Text::new(button_labels[actual_idx], Point::new(text_x, text_y), text_style).draw(display)?;
+        }
+        Ok(())
+    }
+
+    fn draw_info_menu<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let header_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+        Text::new("< Info", Point::new(self.menu_offset, MENU_START_Y - 4), header_style).draw(display)?;
+
+        let button_labels = ["Metrics", "Clock", "< Back"];
+        let visible_count = core::cmp::min(4, button_labels.len().saturating_sub(self.menu_scroll_index));
+
+        for i in 0..visible_count {
+            let actual_idx = i + self.menu_scroll_index;
+            let pop = self.info_button_pop[actual_idx];
+
+            let w = MENU_ITEM_WIDTH + pop * 2;
+            let h = MENU_ITEM_HEIGHT + pop * 2;
+            let bx = self.menu_offset - pop;
+            let by = MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32 - pop;
+            let is_pressed = pop > 0;
+
+            let (fill, text_color) = if is_pressed {
+                (Rgb565::WHITE, Rgb565::BLACK)
+            } else {
+                (Rgb565::new(31, 62, 29), Rgb565::BLACK)
+            };
+
+            let btn_style = if is_pressed {
+                PrimitiveStyleBuilder::new().fill_color(fill).build()
+            } else {
+                PrimitiveStyleBuilder::new()
+                    .fill_color(fill)
+                    .stroke_color(Rgb565::new(25, 50, 25))
+                    .stroke_width(1)
+                    .build()
+            };
+
+            let radii = CornerRadii::new(Size::new(MENU_CORNER_RADIUS, MENU_CORNER_RADIUS));
+            RoundedRectangle::new(
+                Rectangle::new(Point::new(bx, by), Size::new(w as u32, h as u32)),
+                radii,
+            )
+            .into_styled(btn_style)
+            .draw(display)?;
+
+            let text_style = MonoTextStyle::new(&FONT_10X20, text_color);
+            let label_len = button_labels[actual_idx].len() as i32;
+            let label_width = label_len * 10;
+            let text_x = bx + (w - label_width) / 2;
+            let text_y = by + (h + 14) / 2;
+            Text::new(button_labels[actual_idx], Point::new(text_x, text_y), text_style).draw(display)?;
+        }
+        Ok(())
+    }
+
+    fn draw_pomodoro<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let title_style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
+        Text::new("Pomodoro", Point::new(self.menu_offset, 20), title_style).draw(display)?;
+
+        let mut time_str: String<16> = String::new();
+        let secs = self.pomodoro_ms / 1000;
+        let m = secs / 60;
+        let s = secs % 60;
+        let _ = core::fmt::Write::write_fmt(&mut time_str, format_args!("{:02}:{:02}", m, s));
+        Text::new(time_str.as_str(), Point::new(self.menu_offset + 25, 50), title_style).draw(display)?;
+
+        let button_labels = ["+5 Min", "-5 Min", if self.pomodoro_running { "Stop" } else { "Start" }, "< Back"];
+
+        for i in 0..4 {
+            let pop = self.pomodoro_button_pop[i];
+            let w = MENU_ITEM_WIDTH + pop * 2;
+            let h = MENU_ITEM_HEIGHT + pop * 2;
+            let bx = self.menu_offset - pop;
+            let by = MENU_START_Y + 60 + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32 - pop;
+            let is_pressed = pop > 0;
+
+            let (fill, text_color) = if is_pressed {
+                (Rgb565::WHITE, Rgb565::BLACK)
+            } else {
+                (Rgb565::new(31, 62, 29), Rgb565::BLACK)
+            };
+
+            let btn_style = if is_pressed {
+                PrimitiveStyleBuilder::new().fill_color(fill).build()
+            } else {
+                PrimitiveStyleBuilder::new()
+                    .fill_color(fill)
+                    .stroke_color(Rgb565::new(25, 50, 25))
+                    .stroke_width(1)
+                    .build()
+            };
+
+            let radii = CornerRadii::new(Size::new(MENU_CORNER_RADIUS, MENU_CORNER_RADIUS));
+            RoundedRectangle::new(
+                Rectangle::new(Point::new(bx, by), Size::new(w as u32, h as u32)),
+                radii,
+            )
+            .into_styled(btn_style)
+            .draw(display)?;
+
+            let text_style = MonoTextStyle::new(&FONT_10X20, text_color);
+            let label_len = button_labels[i].len() as i32;
+            let label_width = label_len * 10;
+            let text_x = bx + (w - label_width) / 2;
+            let text_y = by + (h + 14) / 2;
+            Text::new(button_labels[i], Point::new(text_x, text_y), text_style).draw(display)?;
+        }
+        Ok(())
+    }
+
+    fn draw_clock<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let title_style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
+        Text::new("Clock", Point::new(8, 20), title_style).draw(display)?;
+
+        let mut time_str: String<32> = String::new();
+        if let Some(secs) = crate::ntp::wall_clock_secs() {
+            let h = (secs / 3600) % 24;
+            let m = (secs / 60) % 60;
+            let s = secs % 60;
+            let _ = core::fmt::Write::write_fmt(&mut time_str, format_args!("{:02}:{:02}:{:02}", h, m, s));
+        } else {
+            let _ = core::fmt::Write::write_fmt(&mut time_str, format_args!("Uptime: {}s", self.metrics.uptime_secs));
+        }
+
+        let text_style = MonoTextStyle::new(&FONT_10X20, Rgb565::new(20, 60, 20));
+        Text::new(time_str.as_str(), Point::new(100, 120), text_style).draw(display)?;
+
+        let hint_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(20, 40, 20));
+        Text::new("< swipe left to go back", Point::new(8, SCREEN_H - 6), hint_style).draw(display)?;
 
         Ok(())
     }
