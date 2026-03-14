@@ -58,8 +58,6 @@ wasmi = { version = "0.31", default-features = false }
 
 # ── Phase 2 — Display ─────────────────────────────────────────────────────────
 embedded-graphics = { version = "0.8", default-features = false }
-mipidsi = { version = "0.8", default-features = false }
-display-interface-spi = { version = "0.5", default-features = false }
 
 # ── RGB LED (WS2812 NeoPixel) ─────────────────────────────────────────────────
 smart-leds = "0.3"
@@ -75,7 +73,6 @@ abi = { path = "../abi", default-features = false }
 embedded-sdmmc = "0.9.0"
 embedded-hal-bus = "0.3.0"
 embedded-io = "0.6.1"
-ili9341 = { version = "0.6.0", default-features = false, features = ["graphics"] }
 ft6x36 = { version = "0.6.2", default-features = false }
 
 [build-dependencies]

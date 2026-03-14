@@ -141,9 +141,11 @@ pub async fn wifi_task(controller: WifiController<'static>, stack: &'static Stac
         return;
     }
     log::info!("[wifi] radio started — warm-up delay");
-    // Give the radio firmware a moment to finish internal init (blacklist,
+    // Give the radio firmware time to finish internal init (blacklist,
     // scan cache, channel-management tables) before attempting association.
-    Timer::after_millis(500).await;
+    // 500 ms was insufficient — cnx_clear_blacklist crashed with a corrupted
+    // g_cnxMgr pointer when connect_async() was called too early.
+    Timer::after_millis(2_000).await;
 
     log::info!("[wifi] connecting to '{}'…", SSID);
 

@@ -69,6 +69,7 @@ async fn touch_task(
             }
         }
 
-        Timer::after(Duration::from_millis(10)).await; // debounce
+
+        Timer::after(Duration::from_millis(2)).await; // debounce
     }
 }

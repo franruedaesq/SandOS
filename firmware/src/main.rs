@@ -101,9 +101,12 @@ async fn main(spawner: Spawner) {
     // The WiFi blob allocates ~60-80 KB from this via the Rust global
     // allocator (wifi_malloc → alloc).  Those buffers MUST land in internal
     // SRAM — PSRAM pointers cause null-deref crashes in the blob's DMA paths.
-    // 72 KB leaves headroom after WiFi creation for the scan channel list.
+    // With PSRAM enabled, keep this small so WiFi fits here; everything else
+    // overflows to PSRAM automatically.
     esp_alloc::heap_allocator!(72 * 1024);
     // Add external PSRAM (octal/quad) as a large, lower-priority region.
+    // Internal SRAM is tried first (WiFi blob needs it for DMA), then PSRAM
+    // absorbs everything else (Wasm VM, audio buffers, etc.).
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
 
     // ── 3. Logger over UART ──────────────────────────────────────────────────
@@ -114,7 +117,43 @@ async fn main(spawner: Spawner) {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
 
-    // ── 5. GPIO ──────────────────────────────────────────────────────────────
+    // ── 5. WiFi radio init (EARLY — before display/DMA/audio allocations) ───
+    //
+    // The WiFi blob allocates from internal SRAM via the global allocator.
+    // Initialising it before any other tasks ensures the blob gets fresh,
+    // unfragmented internal SRAM.  Later allocations (display DMA buffers,
+    // audio, Wasm VM) safely overflow to PSRAM.
+    //
+    // TIMG1 is used for the esp-wifi timer so it does not conflict with the
+    // Embassy time driver on TIMG0.  RNG and RADIO_CLK are consumed here and
+    // must not be used elsewhere.
+    let timg1 = TimerGroup::new(peripherals.TIMG1);
+    let wifi_controller_init = esp_wifi::init(
+        timg1.timer0,
+        esp_hal::rng::Rng::new(peripherals.RNG),
+        peripherals.RADIO_CLK,
+    )
+    .expect("Failed to initialize esp-wifi");
+    let wifi_init: &'static EspWifiController<'static> = WIFI_INIT.init(wifi_controller_init);
+    log::info!("esp-wifi initialized");
+
+    // ── 6. WiFi STA interface ────────────────────────────────────────────────
+    let (wifi_interface, wifi_controller) = esp_wifi::wifi::new_with_mode(
+        wifi_init,
+        peripherals.WIFI,
+        esp_wifi::wifi::WifiStaDevice,
+    )
+    .expect("Failed to create WiFi STA interface");
+
+    // ── 7. Embassy-net stack ─────────────────────────────────────────────────
+    let (stack, runner) = wifi::make_stack(wifi_interface);
+
+    // ── 8. Network tasks ─────────────────────────────────────────────────────
+    spawner.spawn(wifi::net_task(runner)).unwrap();
+    spawner.spawn(wifi::wifi_task(wifi_controller, stack)).unwrap();
+    log::info!("WiFi tasks spawned");
+
+    // ── 9. GPIO ──────────────────────────────────────────────────────────────
     // BOOT button (GPIO 0, active-LOW with hardware pull-up) — must be taken
     // from peripherals before Io::new() consumes IO_MUX.
     let boot_btn = esp_hal::gpio::Input::new(peripherals.GPIO0, esp_hal::gpio::Pull::Up);
@@ -147,24 +186,17 @@ async fn main(spawner: Spawner) {
     }
     log::info!("RGB LED initialized on GPIO42 with RMT");
 
-    // ── 6. Core 1 — start before Wasm VM ────────────────────────────────────
+    // ── 10. Core 1 — start before Wasm VM ───────────────────────────────────
     let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
     let _core1_guard = cpu_control
         .start_app_core(unsafe { &mut *addr_of_mut!(APP_CORE_STACK) }, core1_entry)
         .unwrap();
     log::info!("Core 1 started");
 
-    // ── 7. ULP paramedic ─────────────────────────────────────────────────────
+    // ── 11. ULP paramedic ────────────────────────────────────────────────────
     ulp::start(peripherals.LPWR);
 
-    // ── 8. Display + button tasks ────────────────────────────────────────────
-    //
-    // spawn_display_task spawns two Embassy tasks:
-    //   • display_task  — renders frames via SPI
-    //   • button_task   — monitors GPIO0 with hardware edge interrupts
-    //
-    // With async SPI the display no longer blocks Core 0, so it is safe to
-    // run the Wi-Fi stack and web server alongside the display.
+    // ── 12. Display + button tasks ───────────────────────────────────────────
     display::spawn_display_task(
         spawner,
         peripherals.SPI2,
@@ -174,51 +206,11 @@ async fn main(spawner: Spawner) {
         peripherals.GPIO46, // DC
         peripherals.GPIO45, // RST
         boot_btn,
+        peripherals.DMA_CH1,
     );
     log::info!("Display + button tasks spawned");
 
-    // ── 9. WiFi radio init ───────────────────────────────────────────────────
-    //
-    // TIMG1 is used for the esp-wifi timer so it does not conflict with the
-    // Embassy time driver on TIMG0.  RNG and RADIO_CLK are consumed here and
-    // must not be used elsewhere.
-    let timg1 = TimerGroup::new(peripherals.TIMG1);
-    let wifi_controller_init = esp_wifi::init(
-        timg1.timer0,
-        esp_hal::rng::Rng::new(peripherals.RNG),
-        peripherals.RADIO_CLK,
-    )
-    .expect("Failed to initialize esp-wifi");
-    let wifi_init: &'static EspWifiController<'static> = WIFI_INIT.init(wifi_controller_init);
-    log::info!("esp-wifi initialized");
-
-    // ── 10. WiFi STA interface + ESP-NOW coexistence token ───────────────────
-    //
-    // Create the WiFi STA interface directly (without enable_esp_now_with_wifi,
-    // which was found to break STA connections on this hardware).
-    // The ESP-NOW token is a zero-sized type — we transmute () into it since
-    // WiFi is already initialized above.
-    let (wifi_interface, wifi_controller) = esp_wifi::wifi::new_with_mode(
-        wifi_init,
-        peripherals.WIFI,
-        esp_wifi::wifi::WifiStaDevice,
-    )
-    .expect("Failed to create WiFi STA interface");
-    // ── 11. Embassy-net stack ────────────────────────────────────────────────
-    let (stack, runner) = wifi::make_stack(wifi_interface);
-
-    // ── 12. Network tasks ────────────────────────────────────────────────────
-    //
-    // net_task: drives the embassy-net packet processor (must run alongside wifi_task).
-    // wifi_task: manages WiFi association, DHCP, and reconnect.
-    spawner.spawn(wifi::net_task(runner)).unwrap();
-    spawner.spawn(wifi::wifi_task(wifi_controller, stack)).unwrap();
-    log::info!("WiFi tasks spawned");
-
     // ── 13. Web server task (starts disabled) ────────────────────────────────
-    //
-    // Sleeps until the user enables it via the display menu.  Once enabled it
-    // waits for a DHCP lease and then serves the dashboard on port 80.
     spawner.spawn(web_server::web_server_task(stack)).unwrap();
     log::info!("Web server task spawned (disabled by default)");
 
@@ -233,7 +225,6 @@ async fn main(spawner: Spawner) {
     log::info!("NTP sync task spawned");
 
     // ── 14. SD Card Init (SDIO pins mapped to SPI3) ──────────────────────────
-    // IO38: CLK, IO40: CMD (MOSI), IO39: DATA0 (MISO), IO47: DATA3 (CS)
     let spi3 = esp_hal::spi::master::Spi::new(peripherals.SPI3, esp_hal::spi::master::Config::default())
         .expect("Failed to initialize SPI3 for SD Card")
         .with_mosi(peripherals.GPIO40)
@@ -276,17 +267,13 @@ async fn main(spawner: Spawner) {
     log::info!("Audio tasks spawned on I2S0");
 
     // ── 17. Expansion & UART Serial Port ─────────────────────────────────────
-    // Dedicated 4P UART socket (IO43: RX, IO44: TX) and Expansion Socket (IO2, IO3, IO14, IO21)
     let _uart_rx = peripherals.GPIO43;
     let _uart_tx = peripherals.GPIO44;
     let _exp_io2 = peripherals.GPIO2;
     let _exp_io3 = peripherals.GPIO3;
-    // IO14 is used for SD Card MOSI, but here is referenced as expansion if not using SD Card
     let _exp_io21 = peripherals.GPIO21;
 
     // ── 18. Core 0 brain task ────────────────────────────────────────────────
-    //
-    // Spawns the ESP-NOW receiver, the Wasm engine, and the OS router tasks.
     spawner
         .spawn(core0::brain_task(spawner, io, wifi_init))
         .unwrap();

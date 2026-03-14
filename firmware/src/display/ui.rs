@@ -140,7 +140,7 @@ impl UiManager {
 
         if self.state == UiState::Idle {
             // Smooth breathing using sine-approximation LUT
-            let bounce_period: u32 = 120;
+            let bounce_period: u32 = 60;
             let cycle_pos = (self.frame_count % bounce_period) as usize;
             let lut_index = cycle_pos * 8 / bounce_period as usize;
             self.idle_bounce = SINE_LUT[lut_index.min(7)];
@@ -158,7 +158,7 @@ impl UiManager {
 
         // Update Ripple
         if self.ripple_active {
-            self.ripple_radius += 4;
+            self.ripple_radius += 10;
             if self.ripple_radius > 40 {
                 self.ripple_active = false;
             }
@@ -168,13 +168,17 @@ impl UiManager {
         if self.state == UiState::Menu {
             // Slide R-Kun right
             if self.r_kun_x < RKUN_MENU_X {
-                let step = ((RKUN_MENU_X - self.r_kun_x) / 4).max(1);
+                // this value is relevant for the menu animation speed, so it shouldn't be too high or low
+                // IMPORTANT FOR UI
+                let step = ((RKUN_MENU_X - self.r_kun_x) / 3).max(3);
                 self.r_kun_x += step;
             }
 
             // Slide menu in
             if self.menu_offset < MENU_SHOW_OFFSET {
-                let step = ((MENU_SHOW_OFFSET - self.menu_offset) / 3).max(1);
+                // this value is relevant for the menu animation speed, so it shouldn't be too high or low
+                // IMPORTANT FOR UI
+                let step = ((MENU_SHOW_OFFSET - self.menu_offset) / 2).max(4);
                 self.menu_offset += step;
             }
 
@@ -251,14 +255,9 @@ impl UiManager {
         (Point::new(cx - 50, face_cy - 12), Size::new(100, 42))
     }
 
-    pub fn render<D>(&mut self, display: &mut D) -> Result<(), D::Error>
-    where
-        D: DrawTarget<Color = Rgb565>,
-    {
-        let bg = Rgb565::new(31, 62, 29);
-        let fill_bg = PrimitiveStyle::with_fill(bg);
+    /// Check whether the display needs to be redrawn this frame.
+    pub fn needs_draw(&self) -> bool {
         let full_redraw = self.force_redraw || self.text != self.prev_text;
-
         let r_kun_moved = self.r_kun_x != self.prev_r_kun_x
             || self.r_kun_y != self.prev_r_kun_y
             || self.idle_bounce != self.prev_idle_bounce
@@ -267,49 +266,34 @@ impl UiManager {
         let menu_moved = self.menu_offset != self.prev_menu_offset;
         let buttons_animating = self.button_pop.iter().any(|&p| p > 0);
 
-        let needs_draw = full_redraw || r_kun_moved || menu_moved || buttons_animating
-            || self.ripple_active || self.ripple_dirty;
-        if !needs_draw {
-            return Ok(());
+        full_redraw || r_kun_moved || menu_moved || buttons_animating
+            || self.ripple_active || self.ripple_dirty
+    }
+
+    /// Save current state as "previous" so the next frame can detect changes.
+    pub fn save_state(&mut self) {
+        self.prev_r_kun_x = self.r_kun_x;
+        self.prev_r_kun_y = self.r_kun_y;
+        self.prev_idle_bounce = self.idle_bounce;
+        self.prev_menu_offset = self.menu_offset;
+        self.prev_expression = self.expression;
+        self.prev_is_blinking = self.is_blinking;
+        self.prev_text = self.text.clone();
+        self.force_redraw = false;
+        if !self.ripple_active {
+            self.ripple_dirty = false;
         }
+    }
 
-        // === ERASE PHASE ===
-        if full_redraw {
-            display.clear(bg)?;
-        } else {
-            // Erase old R-Kun position
-            if r_kun_moved {
-                let (pt, sz) = Self::r_kun_bbox(self.prev_r_kun_x, self.prev_r_kun_y, self.prev_idle_bounce);
-                Rectangle::new(pt, sz).into_styled(fill_bg).draw(display)?;
-            }
-
-            // Erase menu trailing edge when sliding out
-            if menu_moved && self.menu_offset < self.prev_menu_offset {
-                let menu_h = 4 * (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING);
-                let strip_x = (self.menu_offset + MENU_ITEM_WIDTH).max(0);
-                let old_right = self.prev_menu_offset + MENU_ITEM_WIDTH + 10;
-                let strip_w = (old_right - strip_x).max(1);
-                Rectangle::new(
-                    Point::new(strip_x, MENU_START_Y),
-                    Size::new(strip_w as u32, menu_h as u32),
-                ).into_styled(fill_bg).draw(display)?;
-            }
-
-            // Erase ripple: always clear entire ripple zone when dirty
-            if self.ripple_dirty {
-                let r = 44; // max ripple radius + margin
-                Rectangle::new(
-                    Point::new(self.ripple_x - r, self.ripple_y - r),
-                    Size::new((r * 2) as u32, (r * 2) as u32),
-                ).into_styled(fill_bg).draw(display)?;
-                if !self.ripple_active {
-                    self.ripple_dirty = false;
-                }
-            }
-        }
-
-        // === DRAW PHASE ===
-        // R-Kun (always redraw when needs_draw — it's cheap)
+    /// Draw all UI elements into the given draw target.
+    ///
+    /// With strip rendering, the target is pre-cleared to the background color
+    /// before each call, so no explicit erase phase is needed.
+    pub fn draw<D>(&mut self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        // R-Kun face
         self.draw_r_kun(display)?;
 
         // Menu
@@ -336,25 +320,13 @@ impl UiManager {
             self.ripple_dirty = true;
         }
 
-        // FPS overlay (top-right, small font) — only update every 10 frames to save SPI time
-        if self.frame_count % 10 == 0 {
+        // FPS overlay (top-right, small font)
+        {
             let mut fps_buf: String<12> = String::new();
             let _ = core::fmt::Write::write_fmt(&mut fps_buf, format_args!("{}fps", self.fps));
             let small_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(20, 40, 20));
-            Rectangle::new(Point::new(SCREEN_W - 50, 2), Size::new(48, 12))
-                .into_styled(fill_bg).draw(display)?;
             Text::new(fps_buf.as_str(), Point::new(SCREEN_W - 48, 11), small_style).draw(display)?;
         }
-
-        // === SAVE STATE ===
-        self.prev_r_kun_x = self.r_kun_x;
-        self.prev_r_kun_y = self.r_kun_y;
-        self.prev_idle_bounce = self.idle_bounce;
-        self.prev_menu_offset = self.menu_offset;
-        self.prev_expression = self.expression;
-        self.prev_is_blinking = self.is_blinking;
-        self.prev_text = self.text.clone();
-        self.force_redraw = false;
 
         Ok(())
     }
