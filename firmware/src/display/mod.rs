@@ -279,6 +279,9 @@ async fn display_task(
     let mut oled = TftDisplay::new(spi, dc, cs);
     oled.init().await;
 
+    let target_fps = 1000 / FRAME_PERIOD.as_millis();
+    log::info!("[display] Config: {}x{}, Target FPS: ~{}, Refresh Period: {}ms", DISPLAY_WIDTH, DISPLAY_HEIGHT, target_fps, FRAME_PERIOD.as_millis());
+
     let mut state = FaceState::default();
 
     // Startup sequence
