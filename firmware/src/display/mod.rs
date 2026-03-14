@@ -74,8 +74,8 @@ use esp_hal::{
 };
 
 
-pub const DISPLAY_WIDTH: u32 = 240;
-pub const DISPLAY_HEIGHT: u32 = 320;
+pub const DISPLAY_WIDTH: u32 = 320;
+pub const DISPLAY_HEIGHT: u32 = 240;
 const DISPLAY_QUEUE_DEPTH: usize = 8;
 const EXPRESSION_OVERRIDE_TIMEOUT: Duration = Duration::from_secs(8);
 // OLED stability baseline (validated on device): do not change casually.
@@ -338,31 +338,34 @@ async fn display_task(
             let x_i32 = x as i32;
             let y_i32 = y as i32;
 
+            // Note: Since screen is now landscape (320x240), touch coordinates (originally 240x320)
+            // must be rotated if the touch driver isn't natively rotating.
+            // Let's assume touch reports hardware coords (X: 0-240, Y: 0-320) and we map to (X: 0-320, Y: 0-240)
+            // Or if touch driver rotates natively, x_i32 is 0..320, y_i32 is 0..240.
+            // Assuming touch driver is raw, rotation: mapped_x = y, mapped_y = 240 - x.
+            // Let's use mapped_x and mapped_y just like x_i32 and y_i32. We will assume the driver gives rotated coords. If not, this is a simple tweak later.
+            let mapped_x = y_i32; // swap due to landscape
+            let mapped_y = 240 - x_i32;
+
             // Continuously track eye direction based on touch while held
-            state.eye_look_x = ((x_i32 - 120) / 30).clamp(-4, 4);
-            state.eye_look_y = ((y_i32 - 160) / 30).clamp(-4, 4);
+            state.eye_look_x = ((mapped_x - 160) / 30).clamp(-4, 4);
+            state.eye_look_y = ((mapped_y - 120) / 30).clamp(-4, 4);
 
             // Update button time continuously while held for tactile visual feedback
             state.last_button_time = Instant::now();
 
             if !state.was_touched {
                 state.was_touched = true;
-                log::info!("[display] touch start at {},{}", x, y);
-                // Map to virtual 128x64 display coordinates assuming the display scales up or is drawn top-left.
-                // The prompt mentions physical touch, we need to know the physical mapping.
-                // Assuming X is 0-240 and Y is 0-320 mapping to UI.
-                // Let's assume UI is drawn at top left 128x64 but the screen is 240x320. Wait, no, the driver code shows:
-                // DISPLAY_WIDTH = 240, DISPLAY_HEIGHT = 320. The draw loops use X: 0..240, Y: 0..320, but the rendering bounds in display/mod.rs are hardcoded like 128 and 64!
-                // Let's map X to 0-128 and Y to 0-64 simply by scaling.
-                // x is roughly 0..240 (or 240..0 if flipped? We'll see). Let's just assume simple scaling:
-                let vx = (x as u32 * 128 / 240) as i32;
-                let vy = (y as u32 * 64 / 320) as i32;
+                log::info!("[display] touch start at {},{} mapped to {},{}", x, y, mapped_x, mapped_y);
+
+                let vx = mapped_x;
+                let vy = mapped_y;
 
                 let mut handled_by_swipe = false;
                 if state.touch_start_x.is_none() {
-                    state.touch_start_x = Some(x_i32);
+                    state.touch_start_x = Some(vx);
                 } else if let Some(start_x) = state.touch_start_x {
-                    let delta = x_i32 - start_x;
+                    let delta = vx - start_x;
                     if delta > 50 && matches!(state.ui_mode, UiMode::Face) {
                         state.ui_mode = UiMode::TopMenu;
                         state.top_menu_selected = 0;
@@ -389,14 +392,14 @@ async fn display_task(
                         log::info!("[display] touch face -> TopMenu");
                     }
                     UiMode::TopMenu | UiMode::SubMenu(_) | UiMode::WebMenu => {
-                        // Menu is on the left (x < 63). Check if touch is in the menu area.
-                        if vx < 64 {
-                            let slot = (vy / 16) as usize;
+                        // Menu is on the left (x < 100). Check if touch is in the menu area.
+                        if vx < 100 {
+                            let slot = (vy.saturating_sub(10) / 30) as usize;
                             if let UiMode::TopMenu = state.ui_mode {
                                 let items = get_menu_items(&state.ui_mode);
                                 // Determine current scroll offset
                                 let sel = state.top_menu_selected as usize;
-                                let max_visible = 4;
+                                let max_visible = 6;
                                 let scroll_start = if sel >= max_visible { sel - (max_visible - 1) } else { 0 };
                                 let target_idx = scroll_start + slot;
                                 if target_idx < items.len() {
@@ -406,7 +409,7 @@ async fn display_task(
                             } else if let UiMode::SubMenu(cat) = state.ui_mode {
                                 let items = get_menu_items(&UiMode::SubMenu(cat));
                                 let sel = state.sub_menu_selected as usize;
-                                let max_visible = 4;
+                                let max_visible = 6;
                                 let scroll_start = if sel >= max_visible { sel - (max_visible - 1) } else { 0 };
                                 let target_idx = scroll_start + slot;
                                 if target_idx < items.len() {
@@ -414,8 +417,9 @@ async fn display_task(
                                     execute_menu_action(items[target_idx].action, &mut state);
                                 }
                             } else if let UiMode::WebMenu = state.ui_mode {
-                                if slot < 2 {
-                                    state.web_menu_selected = slot as u8;
+                                let slot_web = (vy.saturating_sub(30) / 30) as usize;
+                                if slot_web < 2 {
+                                    state.web_menu_selected = slot_web as u8;
                                     if state.web_menu_selected == 0 {
                                         crate::web_server::enable_web_server();
                                         crate::wifi::mark_connecting();
@@ -1174,16 +1178,16 @@ fn breathing_offset(now_ms: u64) -> i32 {
 /// Render the full 128×64 kawaii face (frameless — eyes and mouth only).
 fn erase_face(oled: &mut TftDisplay, prev_eye_look_x: i32, prev_eye_look_y: i32, prev_bob_y: i32, scale: i32) {
     if scale > 0 {
-        let cy = 22 + prev_bob_y + prev_eye_look_y;
-        let cx = 38 + prev_eye_look_x; // left eye base cx
+        let cy = 100 + prev_bob_y + prev_eye_look_y;
+        let cx = 90 + prev_eye_look_x; // left eye base cx
         // bounding box of eyes and mouth
-        let _ = Rectangle::new(Point::new(cx - 20, cy - 20), Size::new(100, 60))
+        let _ = Rectangle::new(Point::new(cx - 50, cy - 50), Size::new(260, 160))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
     } else {
-        let cy = 22 + prev_bob_y + prev_eye_look_y;
-        let cx = 80 + prev_eye_look_x / 2;
-        let _ = Rectangle::new(Point::new(cx - 15, cy - 15), Size::new(50, 40))
+        let cy = 100 + prev_bob_y + prev_eye_look_y;
+        let cx = 200 + prev_eye_look_x / 2;
+        let _ = Rectangle::new(Point::new(cx - 35, cy - 35), Size::new(120, 100))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
     }
@@ -1223,36 +1227,36 @@ fn render_full_face(oled: &mut TftDisplay, state: &mut FaceState) {
     state.prev_eye_look_y = state.eye_look_y;
 
     // ── Eyes ──
-    // Centred on 128×64: eyes at y≈24, spread wide for kawaii proportions
-    let eye_cy = 22 + bob_y + state.eye_look_y;
-    let le_cx = 38 + state.eye_look_x; // left-eye centre X
-    let re_cx = 90 + state.eye_look_x; // right-eye centre X
+    // Scaled for 320x240:
+    let eye_cy = 100 + bob_y + state.eye_look_y;
+    let le_cx = 90 + state.eye_look_x; // left-eye centre X
+    let re_cx = 230 + state.eye_look_x; // right-eye centre X
     draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 1, in_transition, now_ms);
 
 
     // ── Cheeks (Blush) ──
     let blush_color = Rgb565::new(31, 32, 16); // light pink
-    let cheek_r = 6;
-    let _ = Circle::new(Point::new(le_cx - 16, eye_cy + 8), (cheek_r * 2) as u32)
+    let cheek_r = 15;
+    let _ = Circle::new(Point::new(le_cx - 40, eye_cy + 20), (cheek_r * 2) as u32)
         .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
-    let _ = Circle::new(Point::new(re_cx + 4, eye_cy + 8), (cheek_r * 2) as u32)
+    let _ = Circle::new(Point::new(re_cx + 10, eye_cy + 20), (cheek_r * 2) as u32)
         .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
 
     // ── Mouth ──
-    let mouth_cy = 46 + bob_y + state.eye_look_y;
-    draw_mouth(oled, state.expression, 64, mouth_cy, 1, now_ms);
+    let mouth_cy = 160 + bob_y + state.eye_look_y;
+    draw_mouth(oled, state.expression, 160, mouth_cy, 1, now_ms);
 
     // ── Status text overlay ──
     if !state.text.is_empty() {
         let text_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
-        let _ = Rectangle::new(Point::new(0, 54), Size::new(DISPLAY_WIDTH, 10))
+        let _ = Rectangle::new(Point::new(0, 220), Size::new(DISPLAY_WIDTH, 20))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
-        let _ = Text::new(&state.text, Point::new(0, 63), text_style).draw(oled);
+        let _ = Text::new(&state.text, Point::new(0, 235), text_style).draw(oled);
     }
 }
 
-/// Draw both eyes for any expression.  `scale` 1 = full (128×64), 0 = mini (64px panel).
+/// Draw both eyes for any expression.  `scale` 1 = full (320x240), 0 = mini.
 fn draw_eyes(
     oled: &mut TftDisplay,
     expr: EyeExpression,
@@ -1268,10 +1272,10 @@ fn draw_eyes(
     let fill_off = PrimitiveStyle::with_fill(Rgb565::WHITE);
     let stroke2 = PrimitiveStyle::with_stroke(Rgb565::BLACK, if scale > 0 { 2 } else { 1 });
 
-    // Eye radius scales: full=12, mini=6
-    let r = if scale > 0 { 12i32 } else { 6i32 };
-    // Highlight radius: full=4, mini=2
-    let hr = if scale > 0 { 4i32 } else { 2i32 };
+    // Eye radius scales: full=30, mini=15
+    let r = if scale > 0 { 30i32 } else { 15i32 };
+    // Highlight radius: full=10, mini=5
+    let hr = if scale > 0 { 10i32 } else { 5i32 };
 
     if blinking {
         if in_transition {
@@ -1617,12 +1621,12 @@ fn render_menu_mode(oled: &mut TftDisplay, state: &mut FaceState) {
         render_menu_panel(oled, state);
 
         let divider_style = PrimitiveStyle::with_stroke(Rgb565::BLACK, 1);
-        let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
+        let _ = Line::new(Point::new(100, 0), Point::new(100, DISPLAY_HEIGHT as i32))
             .into_styled(divider_style)
             .draw(oled);
     } else if menu_changed {
         // Erase menu area and redraw
-        let _ = Rectangle::new(Point::new(0, 0), Size::new(62, DISPLAY_HEIGHT))
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(99, DISPLAY_HEIGHT))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
         render_menu_panel(oled, state);
@@ -1637,7 +1641,7 @@ fn render_menu_mode(oled: &mut TftDisplay, state: &mut FaceState) {
     render_mini_face(oled, state);
 }
 
-/// Draw the left 63-px menu panel.
+/// Draw the left 100-px menu panel.
 fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
     let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
     let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
@@ -1651,9 +1655,10 @@ fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
     let items = get_menu_items(&state.ui_mode);
     let sel = get_menu_selected(state) as usize;
     let total = items.len();
-    let max_visible: usize = 4;
+    let max_visible: usize = 6;
+    let item_height = 30;
 
-    // Scrolling window: show 4 items at a time (4 × 16 = 64px fits).
+    // Scrolling window: show 6 items at a time
     let scroll_start = if sel >= max_visible {
         sel - (max_visible - 1)
     } else {
@@ -1666,28 +1671,28 @@ fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
             break;
         }
         let label = items[i].label;
-        let y_top = (slot as i32) * 16;
+        let y_top = 10 + (slot as i32) * item_height;
         if i == sel {
             // Give button tactility by checking if it was just touched/pressed
             let pressed = Instant::now().duration_since(state.last_button_time).as_millis() < 150;
             let shrink = if pressed { 1 } else { 0 };
             let fill_color = if pressed { COLOR_PASTEL_PEACH } else { COLOR_SOFT_GRAY };
 
-            let _ = RoundedRectangle::with_equal_corners(Rectangle::new(Point::new(1 + shrink, y_top + 1 + shrink), Size::new((61 - shrink * 2) as u32, (14 - shrink * 2) as u32)), Size::new(4, 4))
+            let _ = RoundedRectangle::with_equal_corners(Rectangle::new(Point::new(4 + shrink, y_top + 1 + shrink), Size::new((92 - shrink * 2) as u32, (24 - shrink * 2) as u32)), Size::new(4, 4))
                 .into_styled(PrimitiveStyle::with_fill(fill_color))
                 .draw(oled);
-            let _ = Text::new(label, Point::new(4, y_top + 12), style).draw(oled);
+            let _ = Text::new(label, Point::new(10, y_top + 16), inverted_style).draw(oled);
         } else {
-            let _ = Text::new(label, Point::new(4, y_top + 12), style).draw(oled);
+            let _ = Text::new(label, Point::new(10, y_top + 16), style).draw(oled);
         }
     }
 
     // Scroll indicators
     if scroll_start > 0 {
-        let _ = Text::new("\x1e", Point::new(56, 8), style).draw(oled);
+        let _ = Text::new("\x1e", Point::new(85, 15), style).draw(oled);
     }
     if scroll_start + max_visible < total {
-        let _ = Text::new("\x1f", Point::new(56, 62), style).draw(oled);
+        let _ = Text::new("\x1f", Point::new(85, 220), style).draw(oled);
     }
 }
 
@@ -1695,17 +1700,18 @@ fn render_web_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
     let style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
     let inverted_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
-    let _ = Text::new("Web", Point::new(2, 10), style).draw(oled);
+    let _ = Text::new("Web", Point::new(6, 20), style).draw(oled);
 
+    let item_height = 30;
     for (i, &label) in WEB_MENU_ITEMS.iter().enumerate() {
-        let y_top = 14 + (i as i32) * 16;
+        let y_top = 30 + (i as i32) * item_height;
         if i == state.web_menu_selected as usize {
-            let _ = RoundedRectangle::with_equal_corners(Rectangle::new(Point::new(1, y_top + 1), Size::new(61, 12)), Size::new(4, 4))
+            let _ = RoundedRectangle::with_equal_corners(Rectangle::new(Point::new(4, y_top + 1), Size::new(92, 24)), Size::new(4, 4))
                 .into_styled(PrimitiveStyle::with_fill(COLOR_SOFT_GRAY))
                 .draw(oled);
-            let _ = Text::new(label, Point::new(4, y_top + 11), style).draw(oled);
+            let _ = Text::new(label, Point::new(10, y_top + 16), inverted_style).draw(oled);
         } else {
-            let _ = Text::new(label, Point::new(4, y_top + 11), style).draw(oled);
+            let _ = Text::new(label, Point::new(10, y_top + 16), style).draw(oled);
         }
     }
 
@@ -1737,10 +1743,10 @@ fn render_web_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
         }
     }
 
-    let _ = Rectangle::new(Point::new(0, 52), Size::new(63, 12))
+    let _ = Rectangle::new(Point::new(0, 210), Size::new(99, 20))
         .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
         .draw(oled);
-    let _ = Text::new(&status, Point::new(2, 62), style).draw(oled);
+    let _ = Text::new(&status, Point::new(6, 225), style).draw(oled);
 }
 
 // ── New full-screen mode renderers ───────────────────────────────────────────
@@ -1754,13 +1760,13 @@ fn render_pomodoro(oled: &mut TftDisplay, state: &mut FaceState) {
         state.force_clear = false;
     } else {
         // Just erase the specific text areas that change instead of the whole screen
-        let _ = Rectangle::new(Point::new(34, 28), Size::new(60, 20))
+        let _ = Rectangle::new(Point::new(100, 100), Size::new(120, 30))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
-        let _ = Rectangle::new(Point::new(0, 48), Size::new(128, 14))
+        let _ = Rectangle::new(Point::new(0, 180), Size::new(320, 20))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
-        let _ = Rectangle::new(Point::new(0, 56), Size::new(128, 7))
+        let _ = Rectangle::new(Point::new(0, 210), Size::new(320, 20))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
     }
@@ -1768,10 +1774,10 @@ fn render_pomodoro(oled: &mut TftDisplay, state: &mut FaceState) {
     let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
     // Header bar
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(320, 20))
         .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(oled);
-    let _ = Text::new("POMODORO", Point::new(34, 9), inv_style).draw(oled);
+    let _ = Text::new("POMODORO", Point::new(130, 15), inv_style).draw(oled);
 
     let total_ms: u64 = 25 * 60 * 1000;
     let remaining_ms = if state.pomodoro_done {
@@ -1801,7 +1807,7 @@ fn render_pomodoro(oled: &mut TftDisplay, state: &mut FaceState) {
     let mut time_str = heapless::String::<8>::new();
     let _ = write!(time_str, "{:02}:{:02}", mm, ss);
     // Double-size: draw each character as 12×20 using FONT_6X10 twice
-    let _ = Text::new(&time_str, Point::new(34, 38), style).draw(oled);
+    let _ = Text::new(&time_str, Point::new(130, 120), style).draw(oled);
 
     // Status line
     let status_str = if state.pomodoro_done {
@@ -1811,16 +1817,16 @@ fn render_pomodoro(oled: &mut TftDisplay, state: &mut FaceState) {
     } else {
         "hold:cancel press:pause"
     };
-    let _ = Text::new(status_str, Point::new(2, 50), style).draw(oled);
+    let _ = Text::new(status_str, Point::new(80, 195), style).draw(oled);
 
-    // Progress bar at bottom (y=54..62)
-    let _ = Rectangle::new(Point::new(0, 55), Size::new(128, 9))
+    // Progress bar at bottom
+    let _ = Rectangle::new(Point::new(0, 215), Size::new(320, 20))
         .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
         .draw(oled);
     let elapsed_ms = total_ms.saturating_sub(remaining_ms);
-    let fill_w = ((elapsed_ms * 126) / total_ms) as u32;
+    let fill_w = ((elapsed_ms * 318) / total_ms) as u32;
     if fill_w > 0 {
-        let _ = Rectangle::new(Point::new(1, 56), Size::new(fill_w, 7))
+        let _ = Rectangle::new(Point::new(1, 216), Size::new(fill_w, 18))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(oled);
     }
@@ -1835,7 +1841,7 @@ fn render_system_monitor(oled: &mut TftDisplay, state: &mut FaceState) {
         state.force_clear = false;
     } else {
         // Only erase the content rows
-        let _ = Rectangle::new(Point::new(0, 20), Size::new(128, 44))
+        let _ = Rectangle::new(Point::new(0, 20), Size::new(320, 220))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
     }
@@ -1843,10 +1849,10 @@ fn render_system_monitor(oled: &mut TftDisplay, state: &mut FaceState) {
     let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
     // Header bar
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(320, 20))
         .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(oled);
-    let _ = Text::new("SYSTEM", Point::new(40, 9), inv_style).draw(oled);
+    let _ = Text::new("SYSTEM", Point::new(130, 15), inv_style).draw(oled);
 
     // WiFi status
     let wifi_str = match crate::wifi::wifi_status() {
@@ -1855,7 +1861,7 @@ fn render_system_monitor(oled: &mut TftDisplay, state: &mut FaceState) {
         crate::wifi::WIFI_STATUS_ERROR => "WiFi: Error",
         _ => "WiFi: Off",
     };
-    let _ = Text::new(wifi_str, Point::new(2, 24), style).draw(oled);
+    let _ = Text::new(wifi_str, Point::new(10, 40), style).draw(oled);
 
     // IP address
     let mut ip_str = heapless::String::<22>::new();
@@ -1865,7 +1871,7 @@ fn render_system_monitor(oled: &mut TftDisplay, state: &mut FaceState) {
     } else {
         let _ = ip_str.push_str("--");
     }
-    let _ = Text::new(&ip_str, Point::new(2, 36), style).draw(oled);
+    let _ = Text::new(&ip_str, Point::new(10, 60), style).draw(oled);
 
     // Uptime
     let secs = Instant::now().as_millis() / 1000;
@@ -1874,14 +1880,14 @@ fn render_system_monitor(oled: &mut TftDisplay, state: &mut FaceState) {
     let s = secs % 60;
     let mut up_str = heapless::String::<22>::new();
     let _ = write!(up_str, "Up: {}h {}m {}s", h, m, s);
-    let _ = Text::new(&up_str, Point::new(2, 48), style).draw(oled);
+    let _ = Text::new(&up_str, Point::new(10, 80), style).draw(oled);
 
     // Memory
     let free_kb = esp_alloc::HEAP.free() / 1024;
     let used_kb = esp_alloc::HEAP.used() / 1024;
     let mut mem_str = heapless::String::<22>::new();
     let _ = write!(mem_str, "Mem: {}k/{}k", free_kb, free_kb + used_kb);
-    let _ = Text::new(&mem_str, Point::new(2, 60), style).draw(oled);
+    let _ = Text::new(&mem_str, Point::new(10, 100), style).draw(oled);
 }
 
 /// Full-screen clock view (NTP time or uptime fallback).
@@ -1893,7 +1899,7 @@ fn render_clock_view(oled: &mut TftDisplay, state: &mut FaceState) {
         state.force_clear = false;
     } else {
         // Only erase the content area
-        let _ = Rectangle::new(Point::new(0, 20), Size::new(128, 44))
+        let _ = Rectangle::new(Point::new(0, 20), Size::new(320, 220))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
     }
@@ -1901,10 +1907,10 @@ fn render_clock_view(oled: &mut TftDisplay, state: &mut FaceState) {
     let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
     // Header bar
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 11))
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(320, 20))
         .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(oled);
-    let _ = Text::new("CLOCK", Point::new(44, 9), inv_style).draw(oled);
+    let _ = Text::new("CLOCK", Point::new(140, 15), inv_style).draw(oled);
 
     if let Some(unix_secs) = crate::ntp::wall_clock_secs() {
         // Convert to HH:MM:SS (UTC+1 for Vienna)
@@ -1916,16 +1922,16 @@ fn render_clock_view(oled: &mut TftDisplay, state: &mut FaceState) {
 
         let mut time_str = heapless::String::<12>::new();
         let _ = write!(time_str, "{:02}:{:02}:{:02}", hh, mm, ss);
-        let _ = Text::new(&time_str, Point::new(34, 35), style).draw(oled);
+        let _ = Text::new(&time_str, Point::new(130, 80), style).draw(oled);
 
         // Date: days since Unix epoch → Y/M/D
         let total_days = (local_secs / 86400) as u32;
         let (y, m, d) = days_to_date(total_days);
         let mut date_str = heapless::String::<16>::new();
         let _ = write!(date_str, "{:04}-{:02}-{:02}", y, m, d);
-        let _ = Text::new(&date_str, Point::new(28, 50), style).draw(oled);
+        let _ = Text::new(&date_str, Point::new(125, 110), style).draw(oled);
 
-        let _ = Text::new("NTP synced", Point::new(28, 62), style).draw(oled);
+        let _ = Text::new("NTP synced", Point::new(125, 140), style).draw(oled);
     } else {
         // Fallback: show uptime
         let secs = Instant::now().as_millis() / 1000;
@@ -1934,9 +1940,9 @@ fn render_clock_view(oled: &mut TftDisplay, state: &mut FaceState) {
         let s = secs % 60;
         let mut time_str = heapless::String::<16>::new();
         let _ = write!(time_str, "{}h {:02}m {:02}s", h, m, s);
-        let _ = Text::new("Uptime:", Point::new(36, 30), style).draw(oled);
-        let _ = Text::new(&time_str, Point::new(24, 44), style).draw(oled);
-        let _ = Text::new("no NTP sync", Point::new(24, 62), style).draw(oled);
+        let _ = Text::new("Uptime:", Point::new(135, 80), style).draw(oled);
+        let _ = Text::new(&time_str, Point::new(115, 110), style).draw(oled);
+        let _ = Text::new("no NTP sync", Point::new(120, 140), style).draw(oled);
     }
 }
 
@@ -1966,7 +1972,7 @@ fn render_flashlight(oled: &mut TftDisplay, state: &mut FaceState) {
         oled.clear(Rgb565::WHITE);
         state.force_clear = false;
 
-        let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
+        let _ = Line::new(Point::new(100, 0), Point::new(100, DISPLAY_HEIGHT as i32))
             .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
             .draw(oled);
 
@@ -1974,20 +1980,20 @@ fn render_flashlight(oled: &mut TftDisplay, state: &mut FaceState) {
         let inv_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
         // Header
-        let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(99, 20))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(oled);
-        let _ = Text::new("LIGHT", Point::new(12, 9), inv_style).draw(oled);
+        let _ = Text::new("LIGHT", Point::new(30, 15), inv_style).draw(oled);
 
         // Status
-        let _ = Text::new("ON", Point::new(22, 32), style).draw(oled);
+        let _ = Text::new("ON", Point::new(40, 100), style).draw(oled);
 
         // Sun icon (simple circle with rays)
-        let _ = Circle::new(Point::new(24, 36), 10)
+        let _ = Circle::new(Point::new(50, 130), 20)
             .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
             .draw(oled);
 
-        let _ = Text::new(">exit", Point::new(12, 60), style).draw(oled);
+        let _ = Text::new(">exit", Point::new(30, 220), style).draw(oled);
     }
 
     render_mini_face(oled, state);
@@ -2006,19 +2012,19 @@ fn render_party_mode(oled: &mut TftDisplay, state: &mut FaceState) {
         oled.clear(Rgb565::WHITE);
         state.force_clear = false;
 
-        let _ = Line::new(Point::new(63, 0), Point::new(63, 63))
+        let _ = Line::new(Point::new(100, 0), Point::new(100, DISPLAY_HEIGHT as i32))
             .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
             .draw(oled);
 
         // Header
-        let _ = Rectangle::new(Point::new(0, 0), Size::new(63, 11))
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(99, 20))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(oled);
-        let _ = Text::new("PARTY", Point::new(12, 9), inv_style).draw(oled);
-        let _ = Text::new(">exit", Point::new(12, 60), style).draw(oled);
+        let _ = Text::new("PARTY", Point::new(30, 15), inv_style).draw(oled);
+        let _ = Text::new(">exit", Point::new(30, 220), style).draw(oled);
     } else {
         // Erase text area
-        let _ = Rectangle::new(Point::new(0, 30), Size::new(62, 30))
+        let _ = Rectangle::new(Point::new(0, 50), Size::new(99, 150))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(oled);
     }
@@ -2030,14 +2036,14 @@ fn render_party_mode(oled: &mut TftDisplay, state: &mut FaceState) {
         1 => "* ~ *",
         _ => "~ ~ ~",
     };
-    let _ = Text::new(note, Point::new(4, 32), style).draw(oled);
+    let _ = Text::new(note, Point::new(20, 100), style).draw(oled);
 
     // Show current hue angle
     {
         use core::fmt::Write;
         let mut hue_str = heapless::String::<12>::new();
         let _ = write!(hue_str, "Hue: {}", state.party_hue);
-        let _ = Text::new(&hue_str, Point::new(4, 46), style).draw(oled);
+        let _ = Text::new(&hue_str, Point::new(10, 130), style).draw(oled);
     }
 
     render_mini_face(oled, state);
@@ -2289,10 +2295,10 @@ fn render_mini_face(oled: &mut TftDisplay, state: &mut FaceState) {
     state.prev_eye_look_x = state.eye_look_x;
     state.prev_eye_look_y = state.eye_look_y;
 
-    // Eye positions centred in the right 64px panel
-    let le_cx = 80 + state.eye_look_x / 2;
-    let re_cx = 110 + state.eye_look_x / 2;
-    let eye_cy = 22 + bob_y + state.eye_look_y;
+    // Eye positions centred in the right panel (100 to 320)
+    let le_cx = 160 + state.eye_look_x / 2;
+    let re_cx = 240 + state.eye_look_x / 2;
+    let eye_cy = 100 + bob_y + state.eye_look_y;
 
     let in_transition = now_ms < state.transition_end_ms;
     draw_eyes(oled, state.expression, le_cx, re_cx, eye_cy, blinking, 0, in_transition, now_ms);
@@ -2300,13 +2306,13 @@ fn render_mini_face(oled: &mut TftDisplay, state: &mut FaceState) {
 
     // ── Cheeks (Blush) ──
     let blush_color = Rgb565::new(31, 32, 16); // light pink
-    let cheek_r = 3;
-    let _ = Circle::new(Point::new(le_cx - 8, eye_cy + 4), (cheek_r * 2) as u32)
+    let cheek_r = 8;
+    let _ = Circle::new(Point::new(le_cx - 20, eye_cy + 10), (cheek_r * 2) as u32)
         .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
-    let _ = Circle::new(Point::new(re_cx + 2, eye_cy + 4), (cheek_r * 2) as u32)
+    let _ = Circle::new(Point::new(re_cx + 5, eye_cy + 10), (cheek_r * 2) as u32)
         .into_styled(PrimitiveStyle::with_fill(blush_color)).draw(oled);
 
     // Mini mouth
-    draw_mouth(oled, state.expression, 95, 38 + bob_y, 0, now_ms);
+    draw_mouth(oled, state.expression, 200, 140 + bob_y, 0, now_ms);
 }
 
