@@ -79,7 +79,7 @@ pub const DISPLAY_HEIGHT: u32 = 240;
 const DISPLAY_QUEUE_DEPTH: usize = 8;
 const EXPRESSION_OVERRIDE_TIMEOUT: Duration = Duration::from_secs(8);
 // OLED stability baseline (validated on device): do not change casually.
-const FRAME_PERIOD: Duration = Duration::from_millis(50);
+const FRAME_PERIOD: Duration = Duration::from_millis(33); // approx 30 fps
 const DIAG_SKIP_FLUSH: bool = false;
 
 // ── Tiny xorshift32 PRNG (no-std, no-alloc) ──────────────────────────────────
@@ -279,6 +279,9 @@ async fn display_task(
     let mut oled = TftDisplay::new(spi, dc, cs);
     oled.init().await;
 
+    let target_fps = 1000 / FRAME_PERIOD.as_millis();
+    log::info!("[display] Config: {}x{}, Target FPS: ~{}, Refresh Period: {}ms", DISPLAY_WIDTH, DISPLAY_HEIGHT, target_fps, FRAME_PERIOD.as_millis());
+
     let mut state = FaceState::default();
 
     // Startup sequence
@@ -344,8 +347,8 @@ async fn display_task(
             // Or if touch driver rotates natively, x_i32 is 0..320, y_i32 is 0..240.
             // Assuming touch driver is raw, rotation: mapped_x = y, mapped_y = 240 - x.
             // Let's use mapped_x and mapped_y just like x_i32 and y_i32. We will assume the driver gives rotated coords. If not, this is a simple tweak later.
-            let mapped_x = y_i32; // swap due to landscape
-            let mapped_y = 240 - x_i32;
+            let mapped_x = 320 - y_i32; // swap due to landscape
+            let mapped_y = x_i32;
 
             // Continuously track eye direction based on touch while held
             state.eye_look_x = ((mapped_x - 160) / 30).clamp(-4, 4);
@@ -404,6 +407,7 @@ async fn display_task(
                                 let target_idx = scroll_start + slot;
                                 if target_idx < items.len() {
                                     state.top_menu_selected = target_idx as u8;
+                                    log::info!("[display] menu touch -> item selected {}", state.top_menu_selected);
                                     execute_menu_action(items[target_idx].action, &mut state);
                                 }
                             } else if let UiMode::SubMenu(cat) = state.ui_mode {
@@ -414,12 +418,14 @@ async fn display_task(
                                 let target_idx = scroll_start + slot;
                                 if target_idx < items.len() {
                                     state.sub_menu_selected = target_idx as u8;
+                                    log::info!("[display] submenu touch -> item selected {}", state.sub_menu_selected);
                                     execute_menu_action(items[target_idx].action, &mut state);
                                 }
                             } else if let UiMode::WebMenu = state.ui_mode {
                                 let slot_web = (vy.saturating_sub(30) / 30) as usize;
                                 if slot_web < 2 {
                                     state.web_menu_selected = slot_web as u8;
+                                    log::info!("[display] web menu touch -> item selected {}", state.web_menu_selected);
                                     if state.web_menu_selected == 0 {
                                         crate::web_server::enable_web_server();
                                         crate::wifi::mark_connecting();
@@ -432,6 +438,7 @@ async fn display_task(
                             }
                         } else {
                             // Touch right side -> maybe go back to face?
+                            log::info!("[display] touch right panel -> returning to face");
                             return_to_face(&mut state);
                         }
                     }
@@ -1002,6 +1009,10 @@ struct FaceState {
     touch_start_x: Option<i32>,
     // ── Rich animation state ──
     rng: Rng,
+    // ── FPS tracking ──
+    fps_counter: u32,
+    last_fps_time: u64,
+    current_fps: u32,
     /// Millisecond timestamp when the next blink should start.
     next_blink_ms: u64,
     /// Millisecond timestamp when the current blink ends (0 = not blinking).
@@ -1058,6 +1069,9 @@ impl Default for FaceState {
             was_touched: false,
             touch_start_x: None,
             rng: Rng(0xDEAD_BEEF),
+            fps_counter: 0,
+            last_fps_time: 0,
+            current_fps: 0,
             next_blink_ms: 2500,
             blink_end_ms: 0,
             next_expression_ms: 4000,
@@ -1121,6 +1135,27 @@ fn render_frame(oled: &mut TftDisplay, state: &mut FaceState) {
         _ => render_menu_mode(oled, state), // TopMenu, SubMenu, WebMenu
     }
     state.prev_ui_mode = state.ui_mode;
+
+    // Track and display FPS
+    let now_ms = Instant::now().as_millis() as u64;
+    state.fps_counter += 1;
+    if now_ms - state.last_fps_time >= 1000 {
+        state.current_fps = state.fps_counter;
+        log::info!("[display] FPS tracking: counter={}, current={}, last_time={}", state.fps_counter, state.current_fps, state.last_fps_time);
+        state.fps_counter = 0;
+        state.last_fps_time = now_ms;
+    }
+
+    use core::fmt::Write;
+    let mut fps_str = heapless::String::<16>::new();
+    let _ = write!(fps_str, "FPS: {}", state.current_fps);
+    let fps_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(10, 20, 10)); // Dark but visible
+
+    // Draw small background block so text is legible
+    let _ = Rectangle::new(Point::new(DISPLAY_WIDTH as i32 - 50, 0), Size::new(50, 10))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+        .draw(oled);
+    let _ = Text::new(&fps_str, Point::new(DISPLAY_WIDTH as i32 - 45, 8), fps_style).draw(oled);
 }
 
 // ── Full-screen face rendering ────────────────────────────────────────────────
