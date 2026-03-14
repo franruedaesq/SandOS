@@ -68,8 +68,8 @@ use esp_backtrace as _;
 
 // ── Core 1 stack ──────────────────────────────────────────────────────────────
 
-/// Dedicated stack for Core 1 (32 KiB — enough for Embassy + motor loops).
-static mut APP_CORE_STACK: Stack<32768> = Stack::new();
+/// Dedicated stack for Core 1 (80 KiB — enough for Embassy + display/UI buffers).
+static mut APP_CORE_STACK: Stack<81920> = Stack::new();
 
 // ── Core 1 executor ───────────────────────────────────────────────────────────
 
