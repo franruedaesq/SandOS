@@ -119,6 +119,14 @@ pub enum EyeExpression {
     Blink     = 6,
     Heart     = 7,
     Sleepy    = 8,
+    HappySmile = 9,
+    BigGrin = 10,
+    Confused = 11,
+    Shocked = 12,
+    SadCrying = 13,
+    Wink = 14,
+    SmugSmirk = 15,
+    Concerned = 16,
 }
 
 impl EyeExpression {
@@ -138,6 +146,14 @@ impl EyeExpression {
             6 => Some(Self::Blink),
             7 => Some(Self::Heart),
             8 => Some(Self::Sleepy),
+            9 => Some(Self::HappySmile),
+            10 => Some(Self::BigGrin),
+            11 => Some(Self::Confused),
+            12 => Some(Self::Shocked),
+            13 => Some(Self::SadCrying),
+            14 => Some(Self::Wink),
+            15 => Some(Self::SmugSmirk),
+            16 => Some(Self::Concerned),
             _ => None,
         }
     }
