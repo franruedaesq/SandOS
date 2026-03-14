@@ -37,7 +37,7 @@ fn draw_eye_all_valid_expressions() {
 #[test]
 fn draw_eye_invalid_expression_returns_error() {
     let mut host = MockHost::default();
-    assert_eq!(host.draw_eye(7),   status::ERR_INVALID_ARG);
+    assert_eq!(host.draw_eye(99),   status::ERR_INVALID_ARG);
     assert_eq!(host.draw_eye(-1),  status::ERR_INVALID_ARG);
     assert_eq!(host.draw_eye(255), status::ERR_INVALID_ARG);
     // Expression must not have changed.
