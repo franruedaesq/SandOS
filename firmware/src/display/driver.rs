@@ -14,8 +14,8 @@ use esp_hal::{
 };
 use embedded_hal_async::spi::SpiBus;
 
-pub const DISPLAY_WIDTH: u32 = 240;
-pub const DISPLAY_HEIGHT: u32 = 320;
+pub const DISPLAY_WIDTH: u32 = 320;
+pub const DISPLAY_HEIGHT: u32 = 240;
 const DISPLAY_BUF_SIZE: usize = (DISPLAY_WIDTH as usize) * (DISPLAY_HEIGHT as usize);
 
 pub struct TftDisplay {
@@ -67,7 +67,7 @@ impl TftDisplay {
         Timer::after(Duration::from_millis(120)).await;
 
         self.write_cmd(0x36).await; // Memory Access Control
-        self.write_data(&[0x08]).await; // BGR
+        self.write_data(&[0x28]).await; // BGR, MV=1 (Landscape)
 
         self.write_cmd(0x3A).await; // Pixel Format
         self.write_data(&[0x55]).await; // 16-bit
