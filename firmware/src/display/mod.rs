@@ -301,9 +301,9 @@ async fn display_task(
                             ui_manager.state = ui::UiState::Menu;
                         }
                         ui::UiState::Menu => {
-                            ui_manager.selected_menu_item = (ui_manager.selected_menu_item + 1) % 4;
+                            ui_manager.selected_menu_item = (ui_manager.selected_menu_item + 1) % 2;
                         }
-                        ui::UiState::SettingsMenu | ui::UiState::Metrics => {
+                        ui::UiState::SettingsMenu | ui::UiState::Metrics | ui::UiState::ToolsMenu | ui::UiState::InfoMenu | ui::UiState::Clock | ui::UiState::Pomodoro => {
                             // Button press goes back
                             ui_manager.state = ui::UiState::Menu;
                             ui_manager.force_redraw = true;
