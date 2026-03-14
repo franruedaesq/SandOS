@@ -56,8 +56,13 @@ pub async fn espnow_rx_task(
                     if s.contains("happy") {
                         // Dispatch happy intent
                         log::info!("Received intent: Happy");
+                        let _ = crate::display::DISPLAY_CHANNEL.sender().try_send(crate::display::DisplayCommand::SetExpression(abi::EyeExpression::Happy));
                     } else if s.contains("sad") {
                         log::info!("Received intent: Sad");
+                        let _ = crate::display::DISPLAY_CHANNEL.sender().try_send(crate::display::DisplayCommand::SetExpression(abi::EyeExpression::Sad));
+                    } else if s.contains("neutral") {
+                        log::info!("Received intent: Neutral");
+                        let _ = crate::display::DISPLAY_CHANNEL.sender().try_send(crate::display::DisplayCommand::SetExpression(abi::EyeExpression::Neutral));
                     } else {
                         log::info!("Received intent: {:?}", s);
                     }

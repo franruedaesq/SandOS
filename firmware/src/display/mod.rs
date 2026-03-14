@@ -124,7 +124,7 @@ const IDLE_EXPRESSIONS: [EyeExpression; 9] = [
     EyeExpression::Happy,
 ];
 
-static DISPLAY_CHANNEL: Channel<CriticalSectionRawMutex, DisplayCommand, DISPLAY_QUEUE_DEPTH> =
+pub static DISPLAY_CHANNEL: Channel<CriticalSectionRawMutex, DisplayCommand, DISPLAY_QUEUE_DEPTH> =
     Channel::new();
 
 /// Channel through which the async `button_task` sends press events to the
@@ -139,7 +139,7 @@ enum ButtonEvent {
 }
 
 #[derive(Clone)]
-enum DisplayCommand {
+pub enum DisplayCommand {
     SetExpression(EyeExpression),
     SetText(heapless::String<64>),
     SetBrightness(u8),
