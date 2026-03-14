@@ -2,14 +2,14 @@ use abi::EyeExpression;
 use embedded_graphics::{
     pixelcolor::Rgb565,
     prelude::*,
-    // Added Line and Triangle here
     primitives::{
         PrimitiveStyle, PrimitiveStyleBuilder, RoundedRectangle,
-        Rectangle, CornerRadii, Arc, Line, Triangle, Ellipse
+        Arc, Line, Ellipse, Rectangle, CornerRadii, // ← added
     },
     text::Text,
-    mono_font::{ascii::{FONT_6X10, FONT_10X20}, MonoTextStyle},
-    geometry::{Point, Size}, // Moved these here for cleanliness
+    mono_font::ascii::{FONT_6X10, FONT_10X20}, // ← added FONT_10X20
+    mono_font::MonoTextStyle,
+    geometry::{Point, Size},
 };
 use embassy_time::Instant;
 use heapless::String;
@@ -595,52 +595,65 @@ impl UiManager {
         Ok(())
     }
 
-    fn draw_r_kun<D>(&self, display: &mut D) -> Result<(), D::Error>
-    where
-        D: DrawTarget<Color = Rgb565>,
-    {
-        let center_x = self.r_kun_x;
-        let center_y = self.r_kun_y - 10 + self.idle_bounce;
+fn draw_r_kun<D>(&self, display: &mut D) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let center_x = self.r_kun_x;
+    let center_y = self.r_kun_y - 10 + self.idle_bounce;
 
-        // 1. Draw universal base features (Blush, etc.)
-        self.draw_blush(display, center_x, center_y)?;
+    // Universal blush (now pink to match the image exactly)
+    self.draw_blush(display, center_x, center_y)?;
 
-        // 2. Override expression if blinking
-        if self.is_blinking {
-            return self.draw_blink_face(display, center_x, center_y);
-        }
-
-        // 3. Dispatch to specific expression renderers
-        match self.expression {
-            EyeExpression::Neutral => self.draw_neutral_face(display, center_x, center_y),
-            EyeExpression::Thinking => self.draw_thinking_face(display, center_x, center_y),
-            EyeExpression::Heart => self.draw_heart_face(display, center_x, center_y),
-            // Add other expressions as needed
-            EyeExpression::Happy => self.draw_happy_face(display, center_x, center_y),
-            EyeExpression::Sad => self.draw_sad_face(display, center_x, center_y),
-            EyeExpression::Angry => self.draw_angry_face(display, center_x, center_y),
-            EyeExpression::Surprised => self.draw_surprised_face(display, center_x, center_y),
-            EyeExpression::Sleepy => self.draw_sleepy_face(display, center_x, center_y),
-            EyeExpression::Blink => self.draw_blink_face(display, center_x, center_y),
-            _ => self.draw_neutral_face(display, center_x, center_y), // Fallback
-        }
+    if self.is_blinking {
+        return self.draw_blink_face(display, center_x, center_y);
     }
+
+    match self.expression {
+        // === NEW IMAGE EXPRESSIONS (exact match to your screenshot) ===
+        EyeExpression::HappySmile  => self.draw_happy_smile_face(display, center_x, center_y),
+        EyeExpression::BigGrin     => self.draw_big_grin_face(display, center_x, center_y),
+        EyeExpression::Confused    => self.draw_confused_face(display, center_x, center_y),
+        EyeExpression::Shocked     => self.draw_shocked_face(display, center_x, center_y),
+        EyeExpression::SadCrying   => self.draw_sad_crying_face(display, center_x, center_y),
+        EyeExpression::Wink        => self.draw_wink_face(display, center_x, center_y),
+        EyeExpression::SmugSmirk   => self.draw_smug_smirk_face(display, center_x, center_y),
+        EyeExpression::Concerned   => self.draw_concerned_face(display, center_x, center_y),
+
+        // === OLD ONES YOU WANTED TO KEEP (unchanged) ===
+        EyeExpression::Neutral     => self.draw_neutral_face(display, center_x, center_y),
+        EyeExpression::Thinking    => self.draw_thinking_face(display, center_x, center_y),
+        EyeExpression::Heart       => self.draw_heart_face(display, center_x, center_y),
+        EyeExpression::Happy       => self.draw_happy_face(display, center_x, center_y),
+        EyeExpression::Sad         => self.draw_sad_face(display, center_x, center_y),
+        EyeExpression::Surprised   => self.draw_surprised_face(display, center_x, center_y),
+
+        // already-updated ones (they now look exactly like the image)
+        EyeExpression::Angry       => self.draw_angry_face(display, center_x, center_y),
+        EyeExpression::Sleepy      => self.draw_sleepy_face(display, center_x, center_y),
+        EyeExpression::Blink       => self.draw_blink_face(display, center_x, center_y),
+
+        _ => self.draw_happy_smile_face(display, center_x, center_y),
+    }
+}
 
     // Universal blush drawing
-    fn draw_blush<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
-    where
-        D: DrawTarget<Color = Rgb565,
-    > {
-        let blush_style = PrimitiveStyle::with_fill(Rgb565::new(31, 40, 24));
-        let eye_offset_x = 35;
-        Ellipse::new(Point::new(cx - eye_offset_x - 12, cy + 12), Size::new(14, 6))
-            .into_styled(blush_style)
-            .draw(display)?;
-        Ellipse::new(Point::new(cx + eye_offset_x - 2, cy + 12), Size::new(14, 6))
-            .into_styled(blush_style)
-            .draw(display)?;
-        Ok(())
-    }
+fn draw_blush<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let blush_style = PrimitiveStyle::with_fill(Rgb565::new(31, 15, 20)); // soft pink
+    let eye_offset_x = 35;
+    Ellipse::new(Point::new(cx - eye_offset_x - 12, cy + 12), Size::new(14, 6))
+        .into_styled(blush_style)
+        .draw(display)?;
+    Ellipse::new(Point::new(cx + eye_offset_x - 2, cy + 12), Size::new(14, 6))
+        .into_styled(blush_style)
+        .draw(display)?;
+    Ok(())
+}
+
+
 
     // Neutral face
     fn draw_neutral_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
@@ -665,6 +678,135 @@ impl UiManager {
         Ok(())
     }
 
+    fn draw_happy_smile_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let eye_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let eye_offset = 35;
+    let eye_w = 14;
+    let eye_h = 16;
+
+    // Round eyes exactly like the image
+    Ellipse::new(Point::new(cx - eye_offset - (eye_w / 2), cy - (eye_h / 2)), Size::new(eye_w as u32, eye_h as u32))
+        .into_styled(eye_style)
+        .draw(display)?;
+    Ellipse::new(Point::new(cx + eye_offset - (eye_w / 2), cy - (eye_h / 2)), Size::new(eye_w as u32, eye_h as u32))
+        .into_styled(eye_style)
+        .draw(display)?;
+
+    // Small upward smile
+    let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(3).build();
+    Arc::new(Point::new(cx - 8, cy + 8), 16, 0.0.deg(), 180.0.deg())
+        .into_styled(stroke_style)
+        .draw(display)?;
+    Ok(())
+}
+
+fn draw_big_grin_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    // Same round eyes as Happy Smile
+    let eye_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let eye_offset = 35;
+    let eye_w = 14;
+    let eye_h = 16;
+    Ellipse::new(Point::new(cx - eye_offset - (eye_w / 2), cy - (eye_h / 2)), Size::new(eye_w as u32, eye_h as u32))
+        .into_styled(eye_style)
+        .draw(display)?;
+    Ellipse::new(Point::new(cx + eye_offset - (eye_w / 2), cy - (eye_h / 2)), Size::new(eye_w as u32, eye_h as u32))
+        .into_styled(eye_style)
+        .draw(display)?;
+
+    // Big open mouth with teeth block (exact image look)
+    let mouth_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    Ellipse::new(Point::new(cx - 12, cy + 5), Size::new(26, 18))
+        .into_styled(mouth_style)
+        .draw(display)?;
+
+    let tooth_style = PrimitiveStyle::with_fill(Rgb565::WHITE);
+    for i in 0..4 {
+        Rectangle::new(Point::new(cx - 10 + i * 6, cy + 6), Size::new(4, 6))
+            .into_styled(tooth_style)
+            .draw(display)?;
+    }
+    Ok(())
+}
+fn draw_confused_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let eye_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let eye_offset = 35;
+    let eye_w = 14;
+    let eye_h = 16;
+
+    // One eye slightly tilted (with tiny animation like your old Thinking)
+    let (ox, oy) = if self.expression_ms > 500 { (5, -3) } else { (0, 0) };
+    Ellipse::new(Point::new(cx - eye_offset - (eye_w / 2) + ox, cy - (eye_h / 2) + oy), Size::new(eye_w as u32, eye_h as u32))
+        .into_styled(eye_style)
+        .draw(display)?;
+    Ellipse::new(Point::new(cx + eye_offset - (eye_w / 2), cy - (eye_h / 2)), Size::new(eye_w as u32, eye_h as u32))
+        .into_styled(eye_style)
+        .draw(display)?;
+
+    // Flat "hmm" mouth
+    let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(3).build();
+    Line::new(Point::new(cx - 8, cy + 12), Point::new(cx + 8, cy + 12))
+        .into_styled(stroke_style)
+        .draw(display)?;
+
+    // Pointing hand (exactly like image)
+    self.draw_pointing_hand(display, cx - 38, cy + 28)?;
+    Ok(())
+}
+
+fn draw_shocked_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let eye_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let eye_offset = 35;
+
+    // Wide round eyes
+    Ellipse::new(Point::new(cx - eye_offset - 8, cy - 8), Size::new(16, 16))
+        .into_styled(eye_style)
+        .draw(display)?;
+    Ellipse::new(Point::new(cx + eye_offset - 8, cy - 8), Size::new(16, 16))
+        .into_styled(eye_style)
+        .draw(display)?;
+
+    // Open "O" mouth (filled black)
+    let mouth_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    Ellipse::new(Point::new(cx - 6, cy + 10), Size::new(10, 16))
+        .into_styled(mouth_style)
+        .draw(display)?;
+    Ok(())
+}
+
+fn draw_wink_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let eye_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(3).build();
+    let eye_offset = 35;
+
+    // Left eye open, right eye closed wink
+    Ellipse::new(Point::new(cx - eye_offset - 7, cy - 7), Size::new(14, 16))
+        .into_styled(eye_style)
+        .draw(display)?;
+    Line::new(Point::new(cx + eye_offset - 10, cy - 1), Point::new(cx + eye_offset + 10, cy - 1))
+        .into_styled(stroke_style)
+        .draw(display)?;
+
+    // Small happy mouth
+    Arc::new(Point::new(cx - 8, cy + 9), 14, 0.0.deg(), 140.0.deg())
+        .into_styled(stroke_style)
+        .draw(display)?;
+    Ok(())
+}
     // Thinking face with animation
     fn draw_thinking_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
     where
@@ -813,26 +955,53 @@ impl UiManager {
     }
 
     // Angry face: Diagonal "angry" eyes and a flat/tense mouth
-    fn draw_angry_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
-    where D: DrawTarget<Color = Rgb565> {
-        let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(4).build();
-        let eye_offset = 35;
+fn draw_angry_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(4).build();
+    let eye_offset = 35;
 
-        // Angry Slanted Eyes (\ /)
-        Line::new(Point::new(cx - eye_offset - 10, cy - 8), Point::new(cx - eye_offset + 6, cy + 2))
-            .into_styled(stroke_style)
-            .draw(display)?;
-        Line::new(Point::new(cx + eye_offset + 10, cy - 8), Point::new(cx + eye_offset - 6, cy + 2))
-            .into_styled(stroke_style)
-            .draw(display)?;
+    // Slanted angry eyes (exact image angle)
+    Line::new(Point::new(cx - eye_offset - 12, cy - 10), Point::new(cx - eye_offset + 8, cy - 2))
+        .into_styled(stroke_style)
+        .draw(display)?;
+    Line::new(Point::new(cx + eye_offset + 12, cy - 10), Point::new(cx + eye_offset - 8, cy - 2))
+        .into_styled(stroke_style)
+        .draw(display)?;
 
-        // Tense Flat Mouth
-        Line::new(Point::new(cx - 10, cy + 15), Point::new(cx + 10, cy + 15))
-            .into_styled(stroke_style)
-            .draw(display)?;
+    // Downward frown mouth
+    Arc::new(Point::new(cx, cy + 12), 16, 180.0.deg(), 360.0.deg())
+        .into_styled(stroke_style)
+        .draw(display)?;
+    Ok(())
+}
 
-        Ok(())
-    }
+fn draw_sad_crying_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let eye_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(3).build();
+    let eye_offset = 35;
+
+    // Droopy eyes (slightly flattened and lowered)
+    Ellipse::new(Point::new(cx - eye_offset - 6, cy - 2), Size::new(13, 12))
+        .into_styled(eye_style)
+        .draw(display)?;
+    Ellipse::new(Point::new(cx + eye_offset - 6, cy - 2), Size::new(13, 12))
+        .into_styled(eye_style)
+        .draw(display)?;
+
+    // Deep frown
+    Arc::new(Point::new(cx, cy + 14), 16, 180.0.deg(), 360.0.deg())
+        .into_styled(stroke_style)
+        .draw(display)?;
+
+    // Blue teardrop (exact image position)
+    self.draw_teardrop(display, cx - 45, cy + 18)?;
+    Ok(())
+}
 // Surprised face: Wide circular eyes and an 'O' mouth
     fn draw_surprised_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
     where D: DrawTarget<Color = Rgb565> {
@@ -857,26 +1026,143 @@ impl UiManager {
     }
 
     // Sleepy face: Flat line eyes and a tiny yawn mouth
-    fn draw_sleepy_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
-    where D: DrawTarget<Color = Rgb565> {
-        let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(3).build();
-        let eye_offset = 35;
+fn draw_sleepy_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(3).build();
+    let eye_offset = 35;
 
-        // Flat "closed" eyes (- -)
-        Line::new(Point::new(cx - eye_offset - 10, cy), Point::new(cx - eye_offset + 10, cy))
-            .into_styled(stroke_style)
-            .draw(display)?;
-        Line::new(Point::new(cx + eye_offset - 10, cy), Point::new(cx + eye_offset + 10, cy))
-            .into_styled(stroke_style)
-            .draw(display)?;
+    // Half-closed sleepy eyes (curved lids)
+    Arc::new(Point::new(cx - eye_offset - 8, cy + 1), 14, 150.0.deg(), 210.0.deg())
+        .into_styled(stroke_style)
+        .draw(display)?;
+    Arc::new(Point::new(cx + eye_offset - 8, cy + 1), 14, 150.0.deg(), 210.0.deg())
+        .into_styled(stroke_style)
+        .draw(display)?;
 
-        // Tiny little 'u' mouth
-        Arc::new(Point::new(cx - 4, cy + 12), 8, 0.0.deg(), 180.0.deg())
-            .into_styled(stroke_style)
-            .draw(display)?;
+    // Tiny yawn mouth
+    Arc::new(Point::new(cx - 4, cy + 12), 8, 0.0.deg(), 180.0.deg())
+        .into_styled(stroke_style)
+        .draw(display)?;
 
-        Ok(())
-    }
+    // Zzz floating above (exact image style)
+    self.draw_zzz(display, cx - 20, cy - 35)?;
+    Ok(())
+}
+
+fn draw_smug_smirk_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let eye_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let eye_offset = 35;
+    let eye_w = 14;
+    let eye_h = 16;
+
+    // Round eyes
+    Ellipse::new(Point::new(cx - eye_offset - (eye_w / 2), cy - (eye_h / 2)), Size::new(eye_w as u32, eye_h as u32))
+        .into_styled(eye_style)
+        .draw(display)?;
+    Ellipse::new(Point::new(cx + eye_offset - (eye_w / 2), cy - (eye_h / 2)), Size::new(eye_w as u32, eye_h as u32))
+        .into_styled(eye_style)
+        .draw(display)?;
+
+    // Smug asymmetrical smirk (right side lifted)
+    let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(3).build();
+    Arc::new(Point::new(cx + 3, cy + 9), 12, 20.0.deg(), 110.0.deg())
+        .into_styled(stroke_style)
+        .draw(display)?;
+
+    // Pointing hand on the right
+    self.draw_pointing_hand(display, cx + 35, cy + 27)?;
+    Ok(())
+}
+
+fn draw_concerned_face<D>(&self, display: &mut D, cx: i32, cy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let eye_style = PrimitiveStyle::with_fill(Rgb565::BLACK);
+    let stroke_style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(3).build();
+    let eye_offset = 35;
+
+    // One eye slightly higher + slanted (concerned look)
+    Ellipse::new(Point::new(cx - eye_offset - 7, cy - 9), Size::new(13, 15))
+        .into_styled(eye_style)
+        .draw(display)?;
+    Line::new(Point::new(cx + eye_offset - 12, cy - 6), Point::new(cx + eye_offset + 6, cy - 1))
+        .into_styled(stroke_style)
+        .draw(display)?;
+
+    // Flat worried mouth
+    Line::new(Point::new(cx - 9, cy + 13), Point::new(cx + 9, cy + 13))
+        .into_styled(stroke_style)
+        .draw(display)?;
+
+    // Blue sweat drop + pointing hand
+    self.draw_teardrop(display, cx + 47, cy - 12)?; // sweat drop
+    self.draw_pointing_hand(display, cx + 37, cy + 27)?;
+    Ok(())
+}
+
+fn draw_pointing_hand<D>(&self, display: &mut D, hx: i32, hy: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let yellow = Rgb565::new(31, 27, 0);
+    let fill = PrimitiveStyle::with_fill(yellow);
+    let line = PrimitiveStyleBuilder::new().stroke_color(yellow).stroke_width(3).build();
+
+    // Palm
+    Ellipse::new(Point::new(hx - 4, hy - 3), Size::new(11, 13))
+        .into_styled(fill)
+        .draw(display)?;
+
+    // Index finger pointing up
+    Line::new(Point::new(hx + 2, hy - 6), Point::new(hx + 2, hy - 19))
+        .into_styled(line)
+        .draw(display)?;
+
+    // Other fingers
+    Line::new(Point::new(hx + 5, hy - 8), Point::new(hx + 7, hy - 14))
+        .into_styled(line)
+        .draw(display)?;
+    Line::new(Point::new(hx - 1, hy - 8), Point::new(hx - 3, hy - 13))
+        .into_styled(line)
+        .draw(display)?;
+
+    Ok(())
+}
+
+fn draw_teardrop<D>(&self, display: &mut D, x: i32, y: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let blue = Rgb565::new(0, 22, 31);
+    let style = PrimitiveStyle::with_fill(blue);
+    Ellipse::new(Point::new(x, y), Size::new(5, 8))
+        .into_styled(style)
+        .draw(display)?;
+    Ok(())
+}
+
+fn draw_zzz<D>(&self, display: &mut D, x: i32, y: i32) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let style = PrimitiveStyleBuilder::new().stroke_color(Rgb565::BLACK).stroke_width(2).build();
+    // Z1
+    Line::new(Point::new(x, y), Point::new(x + 7, y)).into_styled(style).draw(display)?;
+    Line::new(Point::new(x + 7, y), Point::new(x, y + 6)).into_styled(style).draw(display)?;
+    Line::new(Point::new(x, y + 6), Point::new(x + 7, y + 6)).into_styled(style).draw(display)?;
+    // Z2 (shifted)
+    let x2 = x + 9; let y2 = y + 2;
+    Line::new(Point::new(x2, y2), Point::new(x2 + 7, y2)).into_styled(style).draw(display)?;
+    Line::new(Point::new(x2 + 7, y2), Point::new(x2, y2 + 5)).into_styled(style).draw(display)?;
+    Line::new(Point::new(x2, y2 + 5), Point::new(x2 + 7, y2 + 5)).into_styled(style).draw(display)?;
+    Ok(())
+}
 
     fn draw_menu<D>(&self, display: &mut D) -> Result<(), D::Error>
     where
