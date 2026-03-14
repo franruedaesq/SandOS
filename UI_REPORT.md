@@ -15,14 +15,16 @@ The interface is designed around distinct modes, with the primary experience bei
 The central feature of the UI is a dynamic, animated companion face. The face conveys state and emotion through various distinct expressions:
 
 * **Neutral:** The default, calm state.
-* **Happy:** Wide, curved crescent eyes.
-* **Sad:** Downturned, inverted crescent eyes.
-* **Angry:** Focused expression with gritted teeth.
-* **Surprised:** Eyes wide open with an "O"-shaped mouth.
-* **Thinking:** Eyes accompanied by a wavy, squiggly mouth.
-* **Blink:** A transitional state showing closed eyes.
-* **Heart:** Pixel-art heart-shaped eyes.
-* **Sleepy:** Downward U-shaped closed eyes with a tiny "w"-shaped mouth.
+* **Happy:** Wide, curved crescent eyes. Used when WiFi connects.
+* **Sad:** Downturned, inverted crescent eyes. Displayed on WiFi errors or timeouts.
+* **Angry:** Focused expression with gritted teeth. Appears after repeated connection failures.
+* **Surprised:** Eyes wide open with an "O"-shaped mouth. Triggered when a new ESP-NOW message is received, or when the Pomodoro timer completes.
+* **Thinking:** Eyes accompanied by a wavy, squiggly mouth. Displayed while attempting to connect to WiFi.
+* **Blink:** A transitional state showing closed eyes (happens randomly during idle).
+* **Heart:** Pixel-art heart-shaped eyes. Used as a greeting when a button is pressed.
+* **Sleepy:** Downward U-shaped closed eyes with a tiny "w"-shaped mouth. Triggered after a long idle period (>60s).
+
+*(Note: During regular idle states, the face naturally cycles between a subset of these expressions to appear lively).*
 
 ## Menu Mode
 
