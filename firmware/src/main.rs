@@ -75,14 +75,6 @@ static mut APP_CORE_STACK: Stack<32768> = Stack::new();
 
 static CORE1_EXECUTOR: StaticCell<esp_hal_embassy::Executor> = StaticCell::new();
 
-/// Entry point for Core 1 (The Muscle). Never returns.
-fn core1_entry() {
-    let executor = CORE1_EXECUTOR.init(esp_hal_embassy::Executor::new());
-    executor.run(|spawner| {
-        spawner.spawn(core1::realtime_task()).unwrap();
-        spawner.spawn(cpu_usage::core1_idle_task()).unwrap();
-    });
-}
 
 // ── Shared WiFi radio init ────────────────────────────────────────────────────
 static WIFI_INIT: StaticCell<EspWifiController<'static>> = StaticCell::new();
@@ -188,41 +180,20 @@ async fn main(spawner: Spawner) {
     }
     log::info!("RGB LED initialized on GPIO42 with RMT");
 
-    // ── 10. Core 1 — start before Wasm VM ───────────────────────────────────
-    let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
-    let _core1_guard = cpu_control
-        .start_app_core(unsafe { &mut *addr_of_mut!(APP_CORE_STACK) }, core1_entry)
-        .unwrap();
-    log::info!("Core 1 started");
-
-    // ── 11. ULP paramedic ────────────────────────────────────────────────────
+    // ── 10. ULP paramedic ────────────────────────────────────────────────────
     ulp::start(peripherals.LPWR);
 
-    // ── 12. Display + button tasks ───────────────────────────────────────────
-    display::spawn_display_task(
-        spawner,
-        peripherals.SPI2,
-        peripherals.GPIO11, // MOSI
-        peripherals.GPIO12, // SCK
-        peripherals.GPIO10, // CS
-        peripherals.GPIO46, // DC
-        peripherals.GPIO45, // RST
-        boot_btn,
-        peripherals.DMA_CH1,
-    );
-    log::info!("Display + button tasks spawned");
-
-    // ── 13. Web server task (starts disabled) ────────────────────────────────
+    // ── 11. Web server task (starts disabled) ────────────────────────────────
     spawner.spawn(web_server::web_server_task(stack)).unwrap();
     log::info!("Web server task spawned (disabled by default)");
 
-    // ── 13b. Vienna departures fetch task ───────────────────────────────────
+    // ── 12. Vienna departures fetch task ───────────────────────────────────
     spawner
         .spawn(vienna_fetch::vienna_fetch_task(stack))
         .unwrap();
     log::info!("Vienna fetch task spawned");
 
-    // ── 13c. NTP time sync task ──────────────────────────────────────────────
+    // ── 13. NTP time sync task ──────────────────────────────────────────────
     spawner.spawn(ntp::ntp_sync_task(stack)).unwrap();
     log::info!("NTP sync task spawned");
 
@@ -236,55 +207,96 @@ async fn main(spawner: Spawner) {
     sd_card::init_sd_card(spi3, sd_cs);
     log::info!("SD Card initialized on SPI3 using SDIO pins");
 
-    // ── 15. Capacitive Touch (FT6336G) ───────────────────────────────────────
-    let touch_rst = esp_hal::gpio::Output::new(peripherals.GPIO18, esp_hal::gpio::Level::Low);
-    let touch_int = esp_hal::gpio::Input::new(peripherals.GPIO17, esp_hal::gpio::Pull::Up);
-    touch::spawn_touch_task(
-        spawner,
-        peripherals.I2C0,
-        peripherals.GPIO16, // SDA
-        peripherals.GPIO15, // SCL
-        touch_rst,
-        touch_int,
-    );
-    log::info!("Touch task spawned on I2C0");
-
-    // ── 15b. Battery Sensing ─────────────────────────────────────────────────
+    // ── 15. Battery Sensing ─────────────────────────────────────────────────
     battery::spawn_battery_task(spawner, peripherals.ADC1, peripherals.GPIO9);
     log::info!("Battery task spawned on ADC1 IO9");
 
-    // ── 16. Audio (I2S Speaker & Microphone) ─────────────────────────────────
-    let dma_channel = peripherals.DMA_CH0;
-    audio::spawn_audio_tasks(
-        spawner,
-        peripherals.I2S0,
-        peripherals.GPIO4, // MCLK
-        peripherals.GPIO5, // BCLK
-        peripherals.GPIO7, // LRCK/WS
-        peripherals.GPIO6, // DOUT (Speaker)
-        peripherals.GPIO8, // DIN (Mic)
-        peripherals.GPIO1, // Amp EN
-        dma_channel,
-    );
-    log::info!("Audio tasks spawned on I2S0");
-
-    // ── 17. Expansion & UART Serial Port ─────────────────────────────────────
+    // ── 16. Expansion & UART Serial Port ─────────────────────────────────────
     let _uart_rx = peripherals.GPIO43;
     let _uart_tx = peripherals.GPIO44;
     let _exp_io2 = peripherals.GPIO2;
     let _exp_io3 = peripherals.GPIO3;
     let _exp_io21 = peripherals.GPIO21;
 
-    // ── 18. CPU usage monitor ────────────────────────────────────────────────
+    // ── 17. CPU usage monitor ────────────────────────────────────────────────
     cpu_usage::spawn_cpu_monitor(spawner);
     spawner.spawn(cpu_usage::core0_idle_task()).unwrap();
     log::info!("CPU usage monitor spawned");
 
-    // ── 19. Core 0 brain task ────────────────────────────────────────────────
+    // ── 18. Core 0 brain task ────────────────────────────────────────────────
     spawner
         .spawn(core0::brain_task(spawner, io, wifi_init))
         .unwrap();
     log::info!("Brain task spawned");
+
+    // ── 19. Core 1 peripherals ownership & start ─────────────────────────────
+    let spi2 = peripherals.SPI2;
+    let gpio11 = peripherals.GPIO11;
+    let gpio12 = peripherals.GPIO12;
+    let gpio10 = peripherals.GPIO10;
+    let gpio46 = peripherals.GPIO46;
+    let gpio45 = peripherals.GPIO45;
+    let dma_ch1 = peripherals.DMA_CH1;
+
+    let i2c0 = peripherals.I2C0;
+    let gpio16 = peripherals.GPIO16;
+    let gpio15 = peripherals.GPIO15;
+    let touch_rst = esp_hal::gpio::Output::new(peripherals.GPIO18, esp_hal::gpio::Level::Low);
+    let touch_int = esp_hal::gpio::Input::new(peripherals.GPIO17, esp_hal::gpio::Pull::Up);
+
+    let i2s0 = peripherals.I2S0;
+    let gpio4 = peripherals.GPIO4;
+    let gpio5 = peripherals.GPIO5;
+    let gpio7 = peripherals.GPIO7;
+    let gpio6 = peripherals.GPIO6;
+    let gpio8 = peripherals.GPIO8;
+    let gpio1 = peripherals.GPIO1;
+    let dma_ch0 = peripherals.DMA_CH0;
+
+    let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
+    let _core1_guard = cpu_control
+        .start_app_core(unsafe { &mut *addr_of_mut!(APP_CORE_STACK) }, move || {
+            let executor = CORE1_EXECUTOR.init(esp_hal_embassy::Executor::new());
+            executor.run(|spawner| {
+                display::spawn_display_task(
+                    spawner,
+                    spi2,
+                    gpio11,
+                    gpio12,
+                    gpio10,
+                    gpio46,
+                    gpio45,
+                    boot_btn,
+                    dma_ch1,
+                );
+
+                touch::spawn_touch_task(
+                    spawner,
+                    i2c0,
+                    gpio16,
+                    gpio15,
+                    touch_rst,
+                    touch_int,
+                );
+
+                audio::spawn_audio_tasks(
+                    spawner,
+                    i2s0,
+                    gpio4,
+                    gpio5,
+                    gpio7,
+                    gpio6,
+                    gpio8,
+                    gpio1,
+                    dma_ch0,
+                );
+
+                spawner.spawn(core1::command_dispatcher_task()).unwrap();
+                spawner.spawn(cpu_usage::core1_idle_task()).unwrap();
+            });
+        })
+        .unwrap();
+    log::info!("Core 1 started (Multimedia, UI, Audio, Command Dispatcher)");
 
     // Keep main alive forever so _core1_guard and other locals are not dropped.
     loop {
