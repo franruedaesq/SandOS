@@ -25,7 +25,7 @@ const DISPLAY_QUEUE_DEPTH: usize = 8;
 /// Strip height in scanlines. 40 lines × 320px × 2 bytes = 25,600 bytes per strip.
 // This is a tradeoff between CPU overhead (lower is better) and DMA buffer size (higher is better).
 // IMPORTANT FOR UI: This value affects the animation smoothness and touch response latency. Too high and the UI will feel sluggish, too low and CPU overhead may cause frame drops. 40 is a good balance for this application. Adjust with care.
-const STRIP_HEIGHT: i32 = 20;
+const STRIP_HEIGHT: i32 = 30;
 
 // ILI9341 commands
 const CMD_SOFTWARE_RESET: u8 = 0x01;
@@ -339,6 +339,6 @@ async fn display_task(
         // ~30 fps — leaves CPU headroom for WiFi/Wasm on Core 0
         // this value is relevant for the idle animation speed and touch ripple effect, so it shouldn't be too high or low
         // IMPORTANT FOR UI
-        Timer::after(Duration::from_millis(33)).await;
+        Timer::after(Duration::from_millis(25)).await;
     }
 }

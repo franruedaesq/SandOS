@@ -35,7 +35,7 @@ pub struct StripBuffer {
 
 impl StripBuffer {
     /// Maximum strip size: 40 scanlines × 320 pixels × 2 bytes/pixel.
-    const MAX_BYTES: usize = 20 * (DISPLAY_WIDTH as usize) * 2;
+    const MAX_BYTES: usize = 30 * (DISPLAY_WIDTH as usize) * 2;
 
     pub fn new(width: i32, height: i32, bg: Rgb565) -> Self {
         let mut s = Self {
