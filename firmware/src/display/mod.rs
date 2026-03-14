@@ -295,12 +295,19 @@ async fn display_task(
         while let Ok(evt) = btn_receiver.try_receive() {
             match evt {
                 ButtonEvent::ShortPress => {
-                    if ui_manager.state == ui::UiState::Idle {
-                        ui_manager.state = ui::UiState::Menu;
-                        ui_manager.last_interaction_time = Some(embassy_time::Instant::now());
-                    } else {
-                        ui_manager.selected_menu_item = (ui_manager.selected_menu_item + 1) % 4;
-                        ui_manager.last_interaction_time = Some(embassy_time::Instant::now());
+                    ui_manager.last_interaction_time = Some(embassy_time::Instant::now());
+                    match ui_manager.state {
+                        ui::UiState::Idle => {
+                            ui_manager.state = ui::UiState::Menu;
+                        }
+                        ui::UiState::Menu => {
+                            ui_manager.selected_menu_item = (ui_manager.selected_menu_item + 1) % 4;
+                        }
+                        ui::UiState::SettingsMenu | ui::UiState::Metrics => {
+                            // Button press goes back
+                            ui_manager.state = ui::UiState::Menu;
+                            ui_manager.force_redraw = true;
+                        }
                     }
                 }
             }

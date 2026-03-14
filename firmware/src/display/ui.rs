@@ -13,6 +13,8 @@ use heapless::String;
 pub enum UiState {
     Idle,
     Menu,
+    SettingsMenu,
+    Metrics,
 }
 
 // Landscape display: 320 wide × 240 tall
@@ -81,6 +83,54 @@ pub struct UiManager {
     pub text: String<64>,
     pub prev_text: String<64>,
     pub force_redraw: bool,
+
+    // Settings sub-menu
+    pub selected_settings_item: usize,
+    pub settings_button_pop: [i32; 1],
+
+    // Metrics data (refreshed each frame from atomics)
+    pub metrics_scroll_y: i32,
+    pub metrics: MetricsData,
+}
+
+/// Snapshot of system metrics displayed on the Metrics screen.
+#[derive(Clone, Copy)]
+pub struct MetricsData {
+    pub uptime_secs: u64,
+    pub heap_free: usize,
+    pub heap_used: usize,
+    pub battery_mv: u32,
+    pub wifi_status: u8,
+    pub wifi_ip: Option<[u8; 4]>,
+    pub temp_tenths: u32,
+    pub fps: u16,
+}
+
+impl MetricsData {
+    pub const fn new() -> Self {
+        Self {
+            uptime_secs: 0,
+            heap_free: 0,
+            heap_used: 0,
+            battery_mv: 0,
+            wifi_status: 0,
+            wifi_ip: None,
+            temp_tenths: 0,
+            fps: 0,
+        }
+    }
+
+    /// Refresh metrics from global atomics / system calls.
+    pub fn refresh(&mut self, fps: u16) {
+        self.uptime_secs = Instant::now().as_millis() / 1000;
+        self.heap_free = esp_alloc::HEAP.free();
+        self.heap_used = esp_alloc::HEAP.used();
+        self.battery_mv = crate::battery::BATTERY_VOLTAGE_MV.load(portable_atomic::Ordering::Relaxed);
+        self.wifi_status = crate::wifi::wifi_status();
+        self.wifi_ip = crate::wifi::wifi_ipv4();
+        self.temp_tenths = crate::ulp::last_temp_tenths();
+        self.fps = fps;
+    }
 }
 
 impl UiManager {
@@ -118,6 +168,10 @@ impl UiManager {
             text: String::new(),
             prev_text: String::new(),
             force_redraw: true,
+            selected_settings_item: 0,
+            settings_button_pop: [0; 1],
+            metrics_scroll_y: 0,
+            metrics: MetricsData::new(),
         }
     }
 }
@@ -182,48 +236,109 @@ impl UiManager {
         }
 
         // ── State machine (dt-scaled easing) ───────────────────────────────
-        if self.state == UiState::Menu {
-            // Slide R-Kun right — exponential ease: diff * dt / 30
-            if self.r_kun_x < RKUN_MENU_X {
-                let diff = RKUN_MENU_X - self.r_kun_x;
-                let step = (diff * dt as i32 / 30).max(1);
-                self.r_kun_x = (self.r_kun_x + step).min(RKUN_MENU_X);
-            }
+        match self.state {
+            UiState::Menu => {
+                // Slide R-Kun right — exponential ease: diff * dt / 30
+                if self.r_kun_x < RKUN_MENU_X {
+                    let diff = RKUN_MENU_X - self.r_kun_x;
+                    let step = (diff * dt as i32 / 30).max(1);
+                    self.r_kun_x = (self.r_kun_x + step).min(RKUN_MENU_X);
+                }
 
-            // Slide menu in
-            if self.menu_offset < MENU_SHOW_OFFSET {
-                let diff = MENU_SHOW_OFFSET - self.menu_offset;
-                let step = (diff * dt as i32 / 20).max(1);
-                self.menu_offset = (self.menu_offset + step).min(MENU_SHOW_OFFSET);
-            }
+                // Slide menu in
+                if self.menu_offset < MENU_SHOW_OFFSET {
+                    let diff = MENU_SHOW_OFFSET - self.menu_offset;
+                    let step = (diff * dt as i32 / 20).max(1);
+                    self.menu_offset = (self.menu_offset + step).min(MENU_SHOW_OFFSET);
+                }
 
-            // Timeout return to idle (10 seconds wall-clock)
-            if let Some(last) = self.last_interaction_time {
-                if now.duration_since(last).as_millis() >= 10_000 {
-                    self.state = UiState::Idle;
+                // Timeout return to idle (10 seconds wall-clock)
+                if let Some(last) = self.last_interaction_time {
+                    if now.duration_since(last).as_millis() >= 10_000 {
+                        self.state = UiState::Idle;
+                    }
+                }
+
+                // Pop animations decay: 100 units/sec (pop 5 → 0 in ~50 ms)
+                let pop_decay = (dt as i32 * 100 / 1000).max(1);
+                for pop in &mut self.button_pop {
+                    if *pop > 0 {
+                        *pop = (*pop - pop_decay).max(0);
+                    }
                 }
             }
+            UiState::SettingsMenu => {
+                // Push R-Kun off screen to the right
+                if self.r_kun_x < SCREEN_W + 50 {
+                    let diff = (SCREEN_W + 50) - self.r_kun_x;
+                    let step = (diff * dt as i32 / 20).max(2);
+                    self.r_kun_x = (self.r_kun_x + step).min(SCREEN_W + 50);
+                }
 
-            // Pop animations decay: 100 units/sec (pop 5 → 0 in ~50 ms)
-            let pop_decay = (dt as i32 * 100 / 1000).max(1);
-            for pop in &mut self.button_pop {
-                if *pop > 0 {
-                    *pop = (*pop - pop_decay).max(0);
+                // Slide menu panel in
+                if self.menu_offset < MENU_SHOW_OFFSET {
+                    let diff = MENU_SHOW_OFFSET - self.menu_offset;
+                    let step = (diff * dt as i32 / 20).max(1);
+                    self.menu_offset = (self.menu_offset + step).min(MENU_SHOW_OFFSET);
+                }
+
+                // Timeout
+                if let Some(last) = self.last_interaction_time {
+                    if now.duration_since(last).as_millis() >= 15_000 {
+                        self.state = UiState::Idle;
+                    }
+                }
+
+                // Pop animations for settings buttons
+                let pop_decay = (dt as i32 * 100 / 1000).max(1);
+                for pop in &mut self.settings_button_pop {
+                    if *pop > 0 {
+                        *pop = (*pop - pop_decay).max(0);
+                    }
                 }
             }
-        } else {
-            // Slide R-Kun back to center
-            if self.r_kun_x > RKUN_CENTER_X {
-                let diff = self.r_kun_x - RKUN_CENTER_X;
-                let step = (diff * dt as i32 / 40).max(1);
-                self.r_kun_x = (self.r_kun_x - step).max(RKUN_CENTER_X);
-            }
+            UiState::Metrics => {
+                // Push R-Kun off screen
+                if self.r_kun_x < SCREEN_W + 50 {
+                    let diff = (SCREEN_W + 50) - self.r_kun_x;
+                    let step = (diff * dt as i32 / 20).max(2);
+                    self.r_kun_x = (self.r_kun_x + step).min(SCREEN_W + 50);
+                }
 
-            // Slide menu out
-            if self.menu_offset > MENU_HIDE_OFFSET {
-                let diff = self.menu_offset - MENU_HIDE_OFFSET;
-                let step = (diff * dt as i32 / 30).max(1);
-                self.menu_offset = (self.menu_offset - step).max(MENU_HIDE_OFFSET);
+                // Hide menu panel
+                if self.menu_offset > MENU_HIDE_OFFSET {
+                    let diff = self.menu_offset - MENU_HIDE_OFFSET;
+                    let step = (diff * dt as i32 / 30).max(1);
+                    self.menu_offset = (self.menu_offset - step).max(MENU_HIDE_OFFSET);
+                }
+
+                // Refresh metrics data every frame
+                self.metrics.refresh(self.fps);
+
+                // Timeout
+                if let Some(last) = self.last_interaction_time {
+                    if now.duration_since(last).as_millis() >= 30_000 {
+                        self.state = UiState::Idle;
+                    }
+                }
+
+                // Force redraw every frame for live data
+                self.force_redraw = true;
+            }
+            UiState::Idle => {
+                // Slide R-Kun back to center
+                if self.r_kun_x > RKUN_CENTER_X {
+                    let diff = self.r_kun_x - RKUN_CENTER_X;
+                    let step = (diff * dt as i32 / 40).max(1);
+                    self.r_kun_x = (self.r_kun_x - step).max(RKUN_CENTER_X);
+                }
+
+                // Slide menu out
+                if self.menu_offset > MENU_HIDE_OFFSET {
+                    let diff = self.menu_offset - MENU_HIDE_OFFSET;
+                    let step = (diff * dt as i32 / 30).max(1);
+                    self.menu_offset = (self.menu_offset - step).max(MENU_HIDE_OFFSET);
+                }
             }
         }
     }
@@ -239,9 +354,21 @@ impl UiManager {
                 }
             }
             crate::touch::TouchAction::SwipeLeft => {
-                if self.state == UiState::Menu {
-                    self.state = UiState::Idle;
-                    crate::audio::play_blip();
+                match self.state {
+                    UiState::Menu => {
+                        self.state = UiState::Idle;
+                        crate::audio::play_blip();
+                    }
+                    UiState::SettingsMenu => {
+                        self.state = UiState::Menu;
+                        crate::audio::play_blip();
+                    }
+                    UiState::Metrics => {
+                        self.state = UiState::SettingsMenu;
+                        self.force_redraw = true;
+                        crate::audio::play_blip();
+                    }
+                    _ => {}
                 }
             }
             crate::touch::TouchAction::Tap(x, y) => {
@@ -251,20 +378,49 @@ impl UiManager {
                 self.ripple_radius = 0;
                 self.ripple_active = true;
 
-                if self.state == UiState::Menu {
-                    // Check taps on vertical menu items
-                    for i in 0..4 {
-                        let bx = self.menu_offset;
-                        let by = MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32;
+                match self.state {
+                    UiState::Menu => {
+                        // Check taps on vertical menu items
+                        for i in 0..4 {
+                            let bx = self.menu_offset;
+                            let by = MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32;
 
+                            if x >= bx && x <= bx + MENU_ITEM_WIDTH
+                                && y >= by && y <= by + MENU_ITEM_HEIGHT
+                            {
+                                self.selected_menu_item = i;
+                                self.button_pop[i] = 5;
+                                crate::audio::play_blip();
+
+                                // Navigate into Settings sub-menu
+                                if i == 3 {
+                                    self.state = UiState::SettingsMenu;
+                                    self.selected_settings_item = 0;
+                                    self.force_redraw = true;
+                                }
+                            }
+                        }
+                    }
+                    UiState::SettingsMenu => {
+                        // Check tap on settings sub-menu items
+                        let bx = self.menu_offset;
+                        let by = MENU_START_Y;
                         if x >= bx && x <= bx + MENU_ITEM_WIDTH
                             && y >= by && y <= by + MENU_ITEM_HEIGHT
                         {
-                            self.selected_menu_item = i;
-                            self.button_pop[i] = 5;
+                            self.settings_button_pop[0] = 5;
                             crate::audio::play_blip();
+                            self.state = UiState::Metrics;
+                            self.metrics_scroll_y = 0;
+                            self.metrics.refresh(self.fps);
+                            self.force_redraw = true;
                         }
                     }
+                    UiState::Metrics => {
+                        // Tap anywhere on metrics screen scrolls down a bit or could be ignored
+                        // For now just refresh the interaction timer
+                    }
+                    _ => {}
                 }
             }
         }
@@ -286,7 +442,8 @@ impl UiManager {
             || self.expression != self.prev_expression
             || self.is_blinking != self.prev_is_blinking;
         let menu_moved = self.menu_offset != self.prev_menu_offset;
-        let buttons_animating = self.button_pop.iter().any(|&p| p > 0);
+        let buttons_animating = self.button_pop.iter().any(|&p| p > 0)
+            || self.settings_button_pop.iter().any(|&p| p > 0);
 
         full_redraw || r_kun_moved || menu_moved || buttons_animating
             || self.ripple_active || self.ripple_dirty
@@ -315,18 +472,28 @@ impl UiManager {
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        // R-Kun face
-        self.draw_r_kun(display)?;
+        match self.state {
+            UiState::Metrics => {
+                self.draw_metrics(display)?;
+            }
+            _ => {
+                // R-Kun face
+                self.draw_r_kun(display)?;
 
-        // Menu
-        if self.menu_offset > MENU_HIDE_OFFSET {
-            self.draw_menu(display)?;
-        }
+                // Menu
+                if self.menu_offset > MENU_HIDE_OFFSET {
+                    match self.state {
+                        UiState::SettingsMenu => self.draw_settings_menu(display)?,
+                        _ => self.draw_menu(display)?,
+                    }
+                }
 
-        // Status text
-        if !self.text.is_empty() {
-            let style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
-            Text::new(self.text.as_str(), Point::new(10, SCREEN_H - 10), style).draw(display)?;
+                // Status text
+                if !self.text.is_empty() {
+                    let style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
+                    Text::new(self.text.as_str(), Point::new(10, SCREEN_H - 10), style).draw(display)?;
+                }
+            }
         }
 
         // Ripple ring
@@ -342,8 +509,8 @@ impl UiManager {
             self.ripple_dirty = true;
         }
 
-        // FPS overlay (top-right, small font)
-        {
+        // FPS overlay (top-right, small font) — skip on metrics screen (already shown)
+        if self.state != UiState::Metrics {
             let mut fps_buf: String<12> = String::new();
             let _ = core::fmt::Write::write_fmt(&mut fps_buf, format_args!("{}fps", self.fps));
             let small_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(20, 40, 20));
@@ -533,6 +700,207 @@ impl UiManager {
                 Text::new(button_labels[i], Point::new(text_x, text_y), text_style).draw(display)?;
             }
         }
+
+        Ok(())
+    }
+
+    fn draw_settings_menu<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        // Header: "Settings" in small font
+        let header_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+        Text::new("< Settings", Point::new(self.menu_offset, MENU_START_Y - 4), header_style)
+            .draw(display)?;
+
+        // Single item: "Metrics"
+        let settings_labels = ["Metrics"];
+        let pop = self.settings_button_pop[0];
+        let w = MENU_ITEM_WIDTH + pop * 2;
+        let h = MENU_ITEM_HEIGHT + pop * 2;
+        let bx = self.menu_offset - pop;
+        let by = MENU_START_Y + 6 - pop;
+        let is_pressed = pop > 0;
+
+        let (fill, text_color) = if is_pressed {
+            (Rgb565::WHITE, Rgb565::BLACK)
+        } else {
+            (Rgb565::new(31, 62, 29), Rgb565::BLACK)
+        };
+
+        let btn_style = if is_pressed {
+            PrimitiveStyleBuilder::new().fill_color(fill).build()
+        } else {
+            PrimitiveStyleBuilder::new()
+                .fill_color(fill)
+                .stroke_color(Rgb565::new(25, 50, 25))
+                .stroke_width(1)
+                .build()
+        };
+
+        let radii = CornerRadii::new(Size::new(MENU_CORNER_RADIUS, MENU_CORNER_RADIUS));
+        RoundedRectangle::new(
+            Rectangle::new(Point::new(bx, by), Size::new(w as u32, h as u32)),
+            radii,
+        )
+        .into_styled(btn_style)
+        .draw(display)?;
+
+        let text_style = MonoTextStyle::new(&FONT_10X20, text_color);
+        let label_len = settings_labels[0].len() as i32;
+        let label_width = label_len * 10;
+        let text_x = bx + (w - label_width) / 2;
+        let text_y = by + (h + 14) / 2;
+        Text::new(settings_labels[0], Point::new(text_x, text_y), text_style).draw(display)?;
+
+        Ok(())
+    }
+
+    fn draw_metrics<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let title_style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
+        let label_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(10, 20, 10));
+        let value_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
+
+        let m = &self.metrics;
+        let mut y = 8;
+
+        // Title
+        Text::new("System Metrics", Point::new(8, y + 14), title_style).draw(display)?;
+        y += 22;
+
+        // Divider line
+        Rectangle::new(Point::new(8, y), Size::new(304, 1))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::new(20, 40, 20)))
+            .draw(display)?;
+        y += 6;
+
+        // -- Uptime --
+        Text::new("UPTIME", Point::new(8, y + 8), label_style).draw(display)?;
+        y += 12;
+        {
+            let secs = m.uptime_secs;
+            let days = secs / 86400;
+            let hours = (secs % 86400) / 3600;
+            let mins = (secs % 3600) / 60;
+            let s = secs % 60;
+            let mut buf: String<32> = String::new();
+            if days > 0 {
+                let _ = core::fmt::Write::write_fmt(&mut buf, format_args!("{}d {}h {}m {}s", days, hours, mins, s));
+            } else {
+                let _ = core::fmt::Write::write_fmt(&mut buf, format_args!("{}h {}m {}s", hours, mins, s));
+            }
+            Text::new(buf.as_str(), Point::new(14, y + 8), value_style).draw(display)?;
+        }
+        y += 14;
+
+        // -- CPU / Clock --
+        Text::new("CPU", Point::new(8, y + 8), label_style).draw(display)?;
+        y += 12;
+        {
+            let mut buf: String<48> = String::new();
+            let _ = core::fmt::Write::write_fmt(&mut buf,
+                format_args!("Dual-core 240MHz  {}fps", m.fps));
+            Text::new(buf.as_str(), Point::new(14, y + 8), value_style).draw(display)?;
+        }
+        y += 14;
+
+        // -- Memory --
+        Text::new("MEMORY", Point::new(8, y + 8), label_style).draw(display)?;
+        y += 12;
+        {
+            let used_kb = m.heap_used / 1024;
+            let free_kb = m.heap_free / 1024;
+            let total_kb = used_kb + free_kb;
+            let mut buf: String<48> = String::new();
+            let _ = core::fmt::Write::write_fmt(&mut buf,
+                format_args!("{}KB / {}KB ({}KB free)", used_kb, total_kb, free_kb));
+            Text::new(buf.as_str(), Point::new(14, y + 8), value_style).draw(display)?;
+        }
+        y += 14;
+
+        // Memory bar
+        {
+            let total = (m.heap_used + m.heap_free).max(1);
+            let bar_w: i32 = 200;
+            let used_w = ((m.heap_used as i64 * bar_w as i64) / total as i64) as i32;
+
+            // Background bar
+            Rectangle::new(Point::new(14, y), Size::new(bar_w as u32, 6))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(25, 50, 25)))
+                .draw(display)?;
+            // Used portion
+            if used_w > 0 {
+                Rectangle::new(Point::new(14, y), Size::new(used_w as u32, 6))
+                    .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 20, 0)))
+                    .draw(display)?;
+            }
+        }
+        y += 12;
+
+        // -- Battery --
+        Text::new("BATTERY", Point::new(8, y + 8), label_style).draw(display)?;
+        y += 12;
+        {
+            let mv = m.battery_mv;
+            let mut buf: String<32> = String::new();
+            if mv > 0 {
+                // Simple percentage: 3.0V=0%, 4.2V=100%
+                let pct = if mv >= 4200 { 100u32 }
+                    else if mv <= 3000 { 0 }
+                    else { ((mv - 3000) * 100) / 1200 };
+                let _ = core::fmt::Write::write_fmt(&mut buf,
+                    format_args!("{}.{}V  ~{}%", mv / 1000, (mv % 1000) / 100, pct));
+            } else {
+                let _ = core::fmt::Write::write_fmt(&mut buf, format_args!("No reading"));
+            }
+            Text::new(buf.as_str(), Point::new(14, y + 8), value_style).draw(display)?;
+        }
+        y += 14;
+
+        // -- WiFi --
+        Text::new("NETWORK", Point::new(8, y + 8), label_style).draw(display)?;
+        y += 12;
+        {
+            let mut buf: String<48> = String::new();
+            match m.wifi_status {
+                0 => { let _ = core::fmt::Write::write_fmt(&mut buf, format_args!("Disconnected")); }
+                1 => { let _ = core::fmt::Write::write_fmt(&mut buf, format_args!("Connecting...")); }
+                2 => {
+                    if let Some(ip) = m.wifi_ip {
+                        let _ = core::fmt::Write::write_fmt(&mut buf,
+                            format_args!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]));
+                    } else {
+                        let _ = core::fmt::Write::write_fmt(&mut buf, format_args!("Connected"));
+                    }
+                }
+                _ => { let _ = core::fmt::Write::write_fmt(&mut buf, format_args!("Error")); }
+            }
+            Text::new(buf.as_str(), Point::new(14, y + 8), value_style).draw(display)?;
+        }
+        y += 14;
+
+        // -- Temperature --
+        Text::new("TEMPERATURE", Point::new(8, y + 8), label_style).draw(display)?;
+        y += 12;
+        {
+            let mut buf: String<32> = String::new();
+            if m.temp_tenths > 0 {
+                let _ = core::fmt::Write::write_fmt(&mut buf,
+                    format_args!("{}.{}C", m.temp_tenths / 10, m.temp_tenths % 10));
+            } else {
+                let _ = core::fmt::Write::write_fmt(&mut buf, format_args!("ULP not active"));
+            }
+            Text::new(buf.as_str(), Point::new(14, y + 8), value_style).draw(display)?;
+        }
+        y += 14;
+
+        // -- Back hint --
+        let hint_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(20, 40, 20));
+        let _ = y;
+        Text::new("< swipe left to go back", Point::new(8, SCREEN_H - 6), hint_style).draw(display)?;
 
         Ok(())
     }
