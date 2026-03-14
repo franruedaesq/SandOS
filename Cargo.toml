@@ -21,6 +21,7 @@ opt-level = 3
 debug = false
 lto = "fat"
 codegen-units = 1
+panic = "abort"
 
 # Wasm guest app release profile (size-optimized for embedding in firmware).
 [profile.release-wasm]
