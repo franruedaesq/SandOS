@@ -4,6 +4,9 @@
 [build]
 target = "xtensa-esp32s3-none-elf"
 
+[env]
+EMBASSY_EXECUTOR_TASK_ARENA_SIZE = "65536"
+
 [target.xtensa-esp32s3-none-elf]
 # `cargo run --release` flashes and monitors a real ESP32-S3 board.
 # Requires: `cargo install espflash`
