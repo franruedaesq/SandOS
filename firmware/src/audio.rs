@@ -7,9 +7,25 @@ use esp_hal::dma::DmaChannelFor;
 use esp_hal::peripherals::I2S0;
 use esp_hal::time::RateExtU32;
 use esp_hal::Async;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 
 static mut RX_DESC: [DmaDescriptor; 3] = [DmaDescriptor::EMPTY; 3];
 static mut TX_DESC: [DmaDescriptor; 3] = [DmaDescriptor::EMPTY; 3];
+
+pub static AUDIO_TX_CHANNEL: Channel<CriticalSectionRawMutex, [u8; 1024], 4> = Channel::new();
+
+pub fn play_blip() {
+    let mut blip = [0u8; 1024];
+    for i in 0..1024 {
+        // Simple square wave
+        if (i / 16) % 2 == 0 {
+            blip[i] = 100;
+        } else {
+            blip[i] = 0;
+        }
+    }
+    let _ = AUDIO_TX_CHANNEL.try_send(blip);
+}
 
 pub fn spawn_audio_tasks<CH: DmaChannelFor<esp_hal::i2s::master::AnyI2s> + 'static>(
     spawner: Spawner,
@@ -86,15 +102,27 @@ async fn speaker_tx_task(tx: I2sTx<'static, Async>) {
     let mut transfer = tx.write_dma_circular_async(&mut tx_buf).unwrap();
 
     loop {
-        // Push bytes asynchronously without blocking the executor
-        if let Ok(avail) = transfer.available().await {
-            if avail > 0 {
-                let dummy_chunk = [0u8; 1024];
-                let write_len = core::cmp::min(avail, dummy_chunk.len());
-                let _ = transfer.push(&dummy_chunk[..write_len]).await;
+        // Check for new audio data to play
+        if let Ok(chunk) = AUDIO_TX_CHANNEL.try_receive() {
+            // Wait for buffer availability
+            while let Ok(avail) = transfer.available().await {
+                if avail >= chunk.len() {
+                    let _ = transfer.push(&chunk).await;
+                    break;
+                }
+                Timer::after(Duration::from_millis(5)).await;
+            }
+        } else {
+            // Push silence to prevent the circular DMA from repeating the last buffer
+            if let Ok(avail) = transfer.available().await {
+                if avail > 0 {
+                    let dummy_chunk = [0u8; 1024];
+                    let write_len = core::cmp::min(avail, dummy_chunk.len());
+                    let _ = transfer.push(&dummy_chunk[..write_len]).await;
+                }
             }
         }
 
-        Timer::after(Duration::from_millis(50)).await;
+        Timer::after(Duration::from_millis(10)).await;
     }
 }
