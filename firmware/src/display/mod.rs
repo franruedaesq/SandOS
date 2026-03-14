@@ -140,7 +140,7 @@ async fn display_task(
     rst: GpioPin<45>,
 ) {
     let mut spi_cfg = SpiConfig::default();
-    spi_cfg.frequency = 40.MHz();
+    spi_cfg.frequency = 80.MHz();
     spi_cfg.mode = esp_hal::spi::master::Config::default().mode;
 
     let spi = Spi::new(spi2, spi_cfg)
@@ -188,9 +188,27 @@ async fn display_task(
             }
         }
 
-        // Drain touch events
-        while let Ok((x, y)) = touch_receiver.try_receive() {
-            ui_manager.handle_touch(x as i32, y as i32);
+        // Drain touch events — remap portrait touch coords (240×320) to landscape display (320×240)
+        while let Ok((tx, ty)) = touch_receiver.try_receive() {
+            let x = ty as i32;           // portrait Y → landscape X
+            let y = 240 - tx as i32;     // portrait X → landscape Y (inverted)
+            ui_manager.handle_touch(x, y);
+        }
+
+        // Drain button events
+        let btn_receiver = BUTTON_EVENT_CHANNEL.receiver();
+        while let Ok(evt) = btn_receiver.try_receive() {
+            match evt {
+                ButtonEvent::ShortPress => {
+                    if ui_manager.state == ui::UiState::Idle {
+                        ui_manager.state = ui::UiState::Menu;
+                        ui_manager.last_interaction_frame = ui_manager.frame_count;
+                    } else {
+                        ui_manager.selected_menu_item = (ui_manager.selected_menu_item + 1) % 4;
+                        ui_manager.last_interaction_frame = ui_manager.frame_count;
+                    }
+                }
+            }
         }
 
         // Advance UI logic and render
@@ -202,7 +220,7 @@ async fn display_task(
             // let _ = display.flush().await; // Usually required when double buffering
         }
 
-        // 6. Sleep for a short interval (e.g. 10ms) to unblock the network/Wasm logic
-        Timer::after(Duration::from_millis(10)).await;
+        // ~30 fps — leaves CPU headroom for WiFi/Wasm on Core 0
+        Timer::after(Duration::from_millis(33)).await;
     }
 }
