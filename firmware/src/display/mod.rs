@@ -163,6 +163,7 @@ async fn display_task(
         Orientation::Landscape,
         DisplaySize240x320,
     ).expect("Failed to initialize ILI9341");
+    let _ = display.invert_mode(ili9341::ModeState::On);
 
     let receiver = DISPLAY_CHANNEL.receiver();
     let touch_receiver = crate::touch::TOUCH_EVENTS.receiver();
