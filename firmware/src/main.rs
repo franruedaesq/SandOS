@@ -33,7 +33,7 @@ mod ulp;
 
 use esp_backtrace as _;
 
-static mut APP_CORE_STACK: Stack<32768> = Stack::new();
+static mut APP_CORE_STACK: Stack<81920> = Stack::new();
 static CORE1_EXECUTOR: StaticCell<esp_hal_embassy::Executor> = StaticCell::new();
 static WIFI_INIT: StaticCell<EspWifiController<'static>> = StaticCell::new();
 
