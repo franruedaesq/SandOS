@@ -935,6 +935,7 @@ dependencies = [
  "abi",
  "defmt 0.3.100",
  "embassy-executor",
+ "embassy-futures",
  "embassy-net",
  "embassy-sync 0.6.2",
  "embassy-time",
