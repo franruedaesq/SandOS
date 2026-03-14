@@ -99,6 +99,12 @@ pub struct MetricsData {
     pub uptime_secs: u64,
     pub heap_free: usize,
     pub heap_used: usize,
+    pub psram_total: usize,
+    pub psram_free: usize,
+    pub sram_total: usize,
+    pub sram_free: usize,
+    pub cpu0_pct: u32,
+    pub cpu1_pct: u32,
     pub battery_mv: u32,
     pub wifi_status: u8,
     pub wifi_ip: Option<[u8; 4]>,
@@ -112,6 +118,12 @@ impl MetricsData {
             uptime_secs: 0,
             heap_free: 0,
             heap_used: 0,
+            psram_total: 0,
+            psram_free: 0,
+            sram_total: 0,
+            sram_free: 0,
+            cpu0_pct: 0,
+            cpu1_pct: 0,
             battery_mv: 0,
             wifi_status: 0,
             wifi_ip: None,
@@ -123,8 +135,27 @@ impl MetricsData {
     /// Refresh metrics from global atomics / system calls.
     pub fn refresh(&mut self, fps: u16) {
         self.uptime_secs = Instant::now().as_millis() / 1000;
+
+        // General heap info (combined SRAM/PSRAM by esp_alloc)
         self.heap_free = esp_alloc::HEAP.free();
         self.heap_used = esp_alloc::HEAP.used();
+
+        // Approximate split based on known heap allocation in main.rs:
+        // SRAM is roughly 72KB, rest is PSRAM
+        self.sram_total = 72 * 1024;
+        self.psram_total = (self.heap_free + self.heap_used).saturating_sub(self.sram_total);
+
+        // Best effort: assume SRAM is filled first or we show proportions. Since we can't get
+        // exact split from esp_alloc easily, we provide total/used as global and estimated free for each.
+        // Actually, for display purposes we will just split proportionally or display total,
+        // but it's better to show exact if possible. Since we can't, we show Total.
+        self.sram_free = (self.heap_free.min(self.sram_total)); // simple estimation
+        self.psram_free = self.heap_free.saturating_sub(self.sram_free);
+
+        // CPU Usage
+        self.cpu0_pct = crate::cpu_usage::CORE0_USAGE_PCT.load(portable_atomic::Ordering::Relaxed);
+        self.cpu1_pct = crate::cpu_usage::CORE1_USAGE_PCT.load(portable_atomic::Ordering::Relaxed);
+
         self.battery_mv = crate::battery::BATTERY_VOLTAGE_MV.load(portable_atomic::Ordering::Relaxed);
         self.wifi_status = crate::wifi::wifi_status();
         self.wifi_ip = crate::wifi::wifi_ipv4();
@@ -369,6 +400,20 @@ impl UiManager {
                         crate::audio::play_blip();
                     }
                     _ => {}
+                }
+            }
+            crate::touch::TouchAction::SwipeUp => {
+                if self.state == UiState::Metrics {
+                    // Scrolling down (content goes up, so metrics_scroll_y decreases)
+                    self.metrics_scroll_y = (self.metrics_scroll_y - 40).max(-160);
+                    self.force_redraw = true;
+                }
+            }
+            crate::touch::TouchAction::SwipeDown => {
+                if self.state == UiState::Metrics {
+                    // Scrolling up (content goes down, so metrics_scroll_y increases)
+                    self.metrics_scroll_y = (self.metrics_scroll_y + 40).min(0);
+                    self.force_redraw = true;
                 }
             }
             crate::touch::TouchAction::Tap(x, y) => {
@@ -765,7 +810,7 @@ impl UiManager {
         let value_style = MonoTextStyle::new(&FONT_6X10, Rgb565::BLACK);
 
         let m = &self.metrics;
-        let mut y = 8;
+        let mut y = 8 + self.metrics_scroll_y;
 
         // Title
         Text::new("System Metrics", Point::new(8, y + 14), title_style).draw(display)?;
@@ -797,12 +842,12 @@ impl UiManager {
         y += 14;
 
         // -- CPU / Clock --
-        Text::new("CPU", Point::new(8, y + 8), label_style).draw(display)?;
+        Text::new("CPU (240MHz)", Point::new(8, y + 8), label_style).draw(display)?;
         y += 12;
         {
             let mut buf: String<48> = String::new();
             let _ = core::fmt::Write::write_fmt(&mut buf,
-                format_args!("Dual-core 240MHz  {}fps", m.fps));
+                format_args!("Core0: {}%  Core1: {}%  {}fps", m.cpu0_pct, m.cpu1_pct, m.fps));
             Text::new(buf.as_str(), Point::new(14, y + 8), value_style).draw(display)?;
         }
         y += 14;
@@ -811,34 +856,28 @@ impl UiManager {
         Text::new("MEMORY", Point::new(8, y + 8), label_style).draw(display)?;
         y += 12;
         {
-            let used_kb = m.heap_used / 1024;
-            let free_kb = m.heap_free / 1024;
-            let total_kb = used_kb + free_kb;
+            // SRAM stats
+            let s_total_kb = m.sram_total / 1024;
+            let s_free_kb = m.sram_free / 1024;
+            let s_used_kb = s_total_kb - s_free_kb;
+
+            // PSRAM stats
+            let p_total_kb = m.psram_total / 1024;
+            let p_free_kb = m.psram_free / 1024;
+            let p_used_kb = p_total_kb.saturating_sub(p_free_kb);
+
             let mut buf: String<48> = String::new();
             let _ = core::fmt::Write::write_fmt(&mut buf,
-                format_args!("{}KB / {}KB ({}KB free)", used_kb, total_kb, free_kb));
+                format_args!("SRAM: {}KB/{}KB ({}KB free)", s_used_kb, s_total_kb, s_free_kb));
+            Text::new(buf.as_str(), Point::new(14, y + 8), value_style).draw(display)?;
+
+            y += 12;
+            buf.clear();
+            let _ = core::fmt::Write::write_fmt(&mut buf,
+                format_args!("PSRAM: {}KB/{}KB ({}KB free)", p_used_kb, p_total_kb, p_free_kb));
             Text::new(buf.as_str(), Point::new(14, y + 8), value_style).draw(display)?;
         }
         y += 14;
-
-        // Memory bar
-        {
-            let total = (m.heap_used + m.heap_free).max(1);
-            let bar_w: i32 = 200;
-            let used_w = ((m.heap_used as i64 * bar_w as i64) / total as i64) as i32;
-
-            // Background bar
-            Rectangle::new(Point::new(14, y), Size::new(bar_w as u32, 6))
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(25, 50, 25)))
-                .draw(display)?;
-            // Used portion
-            if used_w > 0 {
-                Rectangle::new(Point::new(14, y), Size::new(used_w as u32, 6))
-                    .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 20, 0)))
-                    .draw(display)?;
-            }
-        }
-        y += 12;
 
         // -- Battery --
         Text::new("BATTERY", Point::new(8, y + 8), label_style).draw(display)?;
@@ -897,10 +936,11 @@ impl UiManager {
         }
         y += 14;
 
-        // -- Back hint --
+        // -- Scroll/Back hint --
         let hint_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(20, 40, 20));
         let _ = y;
-        Text::new("< swipe left to go back", Point::new(8, SCREEN_H - 6), hint_style).draw(display)?;
+        // The hint is drawn at the absolute bottom, so we ignore metrics_scroll_y here
+        Text::new("< swipe left to go back | drag up/down", Point::new(8, SCREEN_H - 6), hint_style).draw(display)?;
 
         Ok(())
     }

@@ -37,6 +37,7 @@ use static_cell::StaticCell;
 mod audio;
 mod core0;
 mod core1;
+mod cpu_usage;
 mod display;
 mod inference;
 mod led_state;
@@ -79,6 +80,7 @@ fn core1_entry() {
     let executor = CORE1_EXECUTOR.init(esp_hal_embassy::Executor::new());
     executor.run(|spawner| {
         spawner.spawn(core1::realtime_task()).unwrap();
+        spawner.spawn(cpu_usage::core1_idle_task()).unwrap();
     });
 }
 
@@ -273,7 +275,12 @@ async fn main(spawner: Spawner) {
     let _exp_io3 = peripherals.GPIO3;
     let _exp_io21 = peripherals.GPIO21;
 
-    // ── 18. Core 0 brain task ────────────────────────────────────────────────
+    // ── 18. CPU usage monitor ────────────────────────────────────────────────
+    cpu_usage::spawn_cpu_monitor(spawner);
+    spawner.spawn(cpu_usage::core0_idle_task()).unwrap();
+    log::info!("CPU usage monitor spawned");
+
+    // ── 19. Core 0 brain task ────────────────────────────────────────────────
     spawner
         .spawn(core0::brain_task(spawner, io, wifi_init))
         .unwrap();

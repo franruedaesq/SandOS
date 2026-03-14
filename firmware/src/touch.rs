@@ -16,9 +16,11 @@ pub enum TouchAction {
     Tap(i32, i32),
     SwipeRight, // left → right: open menu
     SwipeLeft,  // right → left: close menu
+    SwipeUp,    // drag up (scroll down)
+    SwipeDown,  // drag down (scroll up)
 }
 
-/// Minimum horizontal displacement in landscape pixels to count as a swipe.
+/// Minimum horizontal/vertical displacement in landscape pixels to count as a swipe.
 const SWIPE_THRESHOLD: i32 = 40;
 
 /// If no interrupt arrives within this window, we assume the finger has lifted.
@@ -101,19 +103,42 @@ async fn touch_task(
             if let (Some((sx, sy)), Some((ex, ey))) = (press_start.take(), last_pos.take()) {
                 // Map portrait Y → landscape X to compute horizontal delta
                 let dx = ey as i32 - sy as i32;
+                // Map portrait X → landscape Y (with 240 inversion) to compute vertical delta
+                // tap_y = 240 - x
+                let start_y = 240 - sx as i32;
+                let end_y = 240 - ex as i32;
+                let dy = end_y - start_y;
 
-                if dx > SWIPE_THRESHOLD {
-                    log::debug!("[touch] SwipeRight dx={}", dx);
-                    let _ = TOUCH_EVENTS.try_send(TouchAction::SwipeRight);
-                } else if dx < -SWIPE_THRESHOLD {
-                    log::debug!("[touch] SwipeLeft dx={}", dx);
-                    let _ = TOUCH_EVENTS.try_send(TouchAction::SwipeLeft);
+                if dx.abs() > dy.abs() {
+                    // Horizontal swipe dominant
+                    if dx > SWIPE_THRESHOLD {
+                        log::debug!("[touch] SwipeRight dx={}", dx);
+                        let _ = TOUCH_EVENTS.try_send(TouchAction::SwipeRight);
+                    } else if dx < -SWIPE_THRESHOLD {
+                        log::debug!("[touch] SwipeLeft dx={}", dx);
+                        let _ = TOUCH_EVENTS.try_send(TouchAction::SwipeLeft);
+                    } else {
+                        // Small movement or stationary → treat as tap at end position
+                        let tap_x = ey as i32;          // portrait Y → landscape X
+                        let tap_y = 240 - ex as i32;    // portrait X → landscape Y
+                        log::debug!("[touch] Tap ({}, {})", tap_x, tap_y);
+                        let _ = TOUCH_EVENTS.try_send(TouchAction::Tap(tap_x, tap_y));
+                    }
                 } else {
-                    // Small movement or stationary → treat as tap at end position
-                    let tap_x = ey as i32;          // portrait Y → landscape X
-                    let tap_y = 240 - ex as i32;    // portrait X → landscape Y
-                    log::debug!("[touch] Tap ({}, {})", tap_x, tap_y);
-                    let _ = TOUCH_EVENTS.try_send(TouchAction::Tap(tap_x, tap_y));
+                    // Vertical swipe dominant
+                    if dy > SWIPE_THRESHOLD {
+                        log::debug!("[touch] SwipeDown dy={}", dy);
+                        let _ = TOUCH_EVENTS.try_send(TouchAction::SwipeDown);
+                    } else if dy < -SWIPE_THRESHOLD {
+                        log::debug!("[touch] SwipeUp dy={}", dy);
+                        let _ = TOUCH_EVENTS.try_send(TouchAction::SwipeUp);
+                    } else {
+                        // Small movement or stationary → treat as tap at end position
+                        let tap_x = ey as i32;
+                        let tap_y = 240 - ex as i32;
+                        log::debug!("[touch] Tap ({}, {})", tap_x, tap_y);
+                        let _ = TOUCH_EVENTS.try_send(TouchAction::Tap(tap_x, tap_y));
+                    }
                 }
             }
             // Reset in case only press_start was set (no subsequent samples)

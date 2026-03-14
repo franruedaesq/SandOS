@@ -20,6 +20,7 @@ esp-hal-embassy = { version = "0.6" }
 embassy-executor = { version = "0.7", features = ["task-arena-size-65536"] }
 embassy-time = { version = "0.4" }
 embassy-sync = { version = "0.6" }
+embassy-futures = { version = "0.1" }
 
 # ── ESP-NOW wireless + WiFi STA ──────────────────────────────────────────────
 esp-wifi = { version = "0.12", features = ["wifi"] }
