@@ -335,9 +335,18 @@ async fn display_task(
         // 2c. Drain touch events.
         let touch_coords = crate::sensors::load_touch_coords();
         if let Some((x, y)) = touch_coords {
+            let x_i32 = x as i32;
+            let y_i32 = y as i32;
+
+            // Continuously track eye direction based on touch while held
+            state.eye_look_x = ((x_i32 - 120) / 30).clamp(-4, 4);
+            state.eye_look_y = ((y_i32 - 160) / 30).clamp(-4, 4);
+
+            // Update button time continuously while held for tactile visual feedback
+            state.last_button_time = Instant::now();
+
             if !state.was_touched {
                 state.was_touched = true;
-                state.last_button_time = Instant::now();
                 log::info!("[display] touch start at {},{}", x, y);
                 // Map to virtual 128x64 display coordinates assuming the display scales up or is drawn top-left.
                 // The prompt mentions physical touch, we need to know the physical mapping.
@@ -349,24 +358,27 @@ async fn display_task(
                 let vx = (x as u32 * 128 / 240) as i32;
                 let vy = (y as u32 * 64 / 320) as i32;
 
-                let x_i32 = x as i32;
-                state.eye_look_x = ((x_i32 - 120) / 40).clamp(-3, 3);
-                state.eye_look_y = ((y as i32 - 160) / 40).clamp(-3, 3);
-
+                let mut handled_by_swipe = false;
                 if state.touch_start_x.is_none() {
                     state.touch_start_x = Some(x_i32);
                 } else if let Some(start_x) = state.touch_start_x {
                     let delta = x_i32 - start_x;
-                    if delta > 50 {
+                    if delta > 50 && matches!(state.ui_mode, UiMode::Face) {
                         state.ui_mode = UiMode::TopMenu;
                         state.top_menu_selected = 0;
                         state.touch_start_x = None;
+                        handled_by_swipe = true;
                         crate::audio::play_blip();
-                    } else if delta < -50 {
+                    } else if delta < -50 && !matches!(state.ui_mode, UiMode::Face) {
                         return_to_face(&mut state);
                         state.touch_start_x = None;
+                        handled_by_swipe = true;
                         crate::audio::play_blip();
                     }
+                }
+
+                if handled_by_swipe {
+                    continue; // Skip tap logic if a swipe triggered a state transition
                 }
 
                 match state.ui_mode {
@@ -444,7 +456,9 @@ async fn display_task(
             }
         } else {
             state.was_touched = false;
-            state.touch_start_x = None;
+            if state.touch_start_x.is_some() {
+                state.touch_start_x = None;
+            }
         }
 
         // 2b. Drive LED effects (flashlight / party mode).
@@ -1654,8 +1668,13 @@ fn render_menu_panel(oled: &mut TftDisplay, state: &FaceState) {
         let label = items[i].label;
         let y_top = (slot as i32) * 16;
         if i == sel {
-            let _ = RoundedRectangle::with_equal_corners(Rectangle::new(Point::new(1, y_top + 1), Size::new(61, 14)), Size::new(4, 4))
-                .into_styled(PrimitiveStyle::with_fill(COLOR_SOFT_GRAY))
+            // Give button tactility by checking if it was just touched/pressed
+            let pressed = Instant::now().duration_since(state.last_button_time).as_millis() < 150;
+            let shrink = if pressed { 1 } else { 0 };
+            let fill_color = if pressed { COLOR_PASTEL_PEACH } else { COLOR_SOFT_GRAY };
+
+            let _ = RoundedRectangle::with_equal_corners(Rectangle::new(Point::new(1 + shrink, y_top + 1 + shrink), Size::new((61 - shrink * 2) as u32, (14 - shrink * 2) as u32)), Size::new(4, 4))
+                .into_styled(PrimitiveStyle::with_fill(fill_color))
                 .draw(oled);
             let _ = Text::new(label, Point::new(4, y_top + 12), style).draw(oled);
         } else {
