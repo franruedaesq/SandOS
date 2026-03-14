@@ -299,10 +299,10 @@ async fn display_task(
                 ButtonEvent::ShortPress => {
                     if ui_manager.state == ui::UiState::Idle {
                         ui_manager.state = ui::UiState::Menu;
-                        ui_manager.last_interaction_frame = ui_manager.frame_count;
+                        ui_manager.last_interaction_time = Some(embassy_time::Instant::now());
                     } else {
                         ui_manager.selected_menu_item = (ui_manager.selected_menu_item + 1) % 4;
-                        ui_manager.last_interaction_frame = ui_manager.frame_count;
+                        ui_manager.last_interaction_time = Some(embassy_time::Instant::now());
                     }
                 }
             }

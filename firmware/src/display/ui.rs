@@ -46,7 +46,11 @@ pub struct UiManager {
     pub idle_bounce: i32,
     pub is_blinking: bool,
     pub prev_is_blinking: bool,
-    pub last_interaction_frame: u32,
+
+    // Delta-time fields
+    pub dt_ms: u32,         // milliseconds since last frame
+    pub elapsed_ms: u64,    // total elapsed time (for periodic animations)
+    pub last_interaction_time: Option<Instant>,
 
     // R-Kun properties
     pub r_kun_x: i32,
@@ -91,7 +95,9 @@ impl UiManager {
             idle_bounce: 0,
             is_blinking: false,
             prev_is_blinking: false,
-            last_interaction_frame: 0,
+            dt_ms: 10,
+            elapsed_ms: 0,
+            last_interaction_time: None,
             r_kun_x: RKUN_CENTER_X,
             r_kun_y: RKUN_CENTER_Y,
             prev_r_kun_x: RKUN_CENTER_X,
@@ -123,10 +129,14 @@ impl UiManager {
     pub fn update(&mut self) {
         self.frame_count = self.frame_count.wrapping_add(1);
 
-        // FPS measurement: average over 10 frames
+        // ── Delta time ─────────────────────────────────────────────────────
         let now = Instant::now();
         if let Some(prev) = self.last_frame_time {
             let elapsed_us = now.duration_since(prev).as_micros() as u32;
+            self.dt_ms = (elapsed_us / 1000).max(1); // at least 1 ms
+            self.elapsed_ms += self.dt_ms as u64;
+
+            // FPS measurement: average over 10 frames
             self.fps_accum += elapsed_us;
             self.fps_frame_count += 1;
             if self.fps_frame_count >= 10 {
@@ -138,78 +148,88 @@ impl UiManager {
         }
         self.last_frame_time = Some(now);
 
+        let dt = self.dt_ms;
+
+        // ── Periodic animations (time-based) ───────────────────────────────
         if self.state == UiState::Idle {
-            // Smooth breathing using sine-approximation LUT
-            let bounce_period: u32 = 60;
-            let cycle_pos = (self.frame_count % bounce_period) as usize;
-            let lut_index = cycle_pos * 8 / bounce_period as usize;
+            // Smooth breathing: 2-second cycle via sine-approximation LUT
+            let cycle_ms = 2000u64;
+            let cycle_pos = (self.elapsed_ms % cycle_ms) as usize;
+            let lut_index = cycle_pos * 8 / cycle_ms as usize;
             self.idle_bounce = SINE_LUT[lut_index.min(7)];
 
-            // Subtle eye movements
-            if self.frame_count % 400 == 0 {
-                self.r_kun_x = RKUN_CENTER_X + (self.frame_count % 3) as i32 * 2 - 2;
+            // Subtle eye drift every ~4 seconds
+            let prev_bucket = self.elapsed_ms.saturating_sub(dt as u64) / 4000;
+            let curr_bucket = self.elapsed_ms / 4000;
+            if curr_bucket != prev_bucket {
+                let variation = (curr_bucket % 3) as i32 * 2 - 2;
+                self.r_kun_x = RKUN_CENTER_X + variation;
             }
         } else {
             self.idle_bounce = 0;
         }
 
-        // Blink for 5 frames every 300 frames
-        self.is_blinking = self.frame_count % 300 < 5;
+        // Blink: 166 ms blink every 10 seconds
+        let blink_cycle = 10_000u64;
+        self.is_blinking = (self.elapsed_ms % blink_cycle) < 166;
 
-        // Update Ripple
+        // ── Ripple: 300 pixels/sec ─────────────────────────────────────────
         if self.ripple_active {
-            self.ripple_radius += 10;
+            self.ripple_radius += (300 * dt as i32) / 1000;
             if self.ripple_radius > 40 {
                 self.ripple_active = false;
             }
         }
 
-        // State machine
+        // ── State machine (dt-scaled easing) ───────────────────────────────
         if self.state == UiState::Menu {
-            // Slide R-Kun right
+            // Slide R-Kun right — exponential ease: diff * dt / 30
             if self.r_kun_x < RKUN_MENU_X {
-                // this value is relevant for the menu animation speed, so it shouldn't be too high or low
-                // IMPORTANT FOR UI
-                let step = ((RKUN_MENU_X - self.r_kun_x) / 3).max(3);
-                self.r_kun_x += step;
+                let diff = RKUN_MENU_X - self.r_kun_x;
+                let step = (diff * dt as i32 / 30).max(1);
+                self.r_kun_x = (self.r_kun_x + step).min(RKUN_MENU_X);
             }
 
             // Slide menu in
             if self.menu_offset < MENU_SHOW_OFFSET {
-                // this value is relevant for the menu animation speed, so it shouldn't be too high or low
-                // IMPORTANT FOR UI
-                let step = ((MENU_SHOW_OFFSET - self.menu_offset) / 2).max(4);
-                self.menu_offset += step;
+                let diff = MENU_SHOW_OFFSET - self.menu_offset;
+                let step = (diff * dt as i32 / 20).max(1);
+                self.menu_offset = (self.menu_offset + step).min(MENU_SHOW_OFFSET);
             }
 
-            // Timeout return to idle (10 seconds)
-            if self.frame_count > self.last_interaction_frame + 1000 {
-                self.state = UiState::Idle;
+            // Timeout return to idle (10 seconds wall-clock)
+            if let Some(last) = self.last_interaction_time {
+                if now.duration_since(last).as_millis() >= 10_000 {
+                    self.state = UiState::Idle;
+                }
             }
 
-            // Pop animations decay
+            // Pop animations decay: 100 units/sec (pop 5 → 0 in ~50 ms)
+            let pop_decay = (dt as i32 * 100 / 1000).max(1);
             for pop in &mut self.button_pop {
                 if *pop > 0 {
-                    *pop -= 1;
+                    *pop = (*pop - pop_decay).max(0);
                 }
             }
         } else {
             // Slide R-Kun back to center
             if self.r_kun_x > RKUN_CENTER_X {
-                let step = ((self.r_kun_x - RKUN_CENTER_X) / 4).max(1);
-                self.r_kun_x -= step;
+                let diff = self.r_kun_x - RKUN_CENTER_X;
+                let step = (diff * dt as i32 / 40).max(1);
+                self.r_kun_x = (self.r_kun_x - step).max(RKUN_CENTER_X);
             }
 
             // Slide menu out
             if self.menu_offset > MENU_HIDE_OFFSET {
-                let step = ((self.menu_offset - MENU_HIDE_OFFSET) / 3).max(1);
-                self.menu_offset -= step;
+                let diff = self.menu_offset - MENU_HIDE_OFFSET;
+                let step = (diff * dt as i32 / 30).max(1);
+                self.menu_offset = (self.menu_offset - step).max(MENU_HIDE_OFFSET);
             }
         }
     }
 
     pub fn handle_touch(&mut self, x: i32, y: i32) {
-        self.last_interaction_frame = self.frame_count;
+        self.last_interaction_time = Some(Instant::now());
 
         // Start new ripple at touch location
         self.ripple_x = x;
