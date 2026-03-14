@@ -228,42 +228,44 @@ impl UiManager {
         }
     }
 
-    pub fn handle_touch(&mut self, x: i32, y: i32) {
+    pub fn handle_touch_action(&mut self, action: crate::touch::TouchAction) {
         self.last_interaction_time = Some(Instant::now());
 
-        // Start new ripple at touch location
-        self.ripple_x = x;
-        self.ripple_y = y;
-        self.ripple_radius = 0;
-        self.ripple_active = true;
-
-        if self.state == UiState::Idle {
-            // Boop on R-Kun
-            let dx = x - self.r_kun_x;
-            let dy = y - self.r_kun_y;
-            if dx * dx + dy * dy < 60 * 60 {
-                self.state = UiState::Menu;
-                crate::audio::play_blip();
-            }
-        } else if self.state == UiState::Menu {
-            // Check taps on vertical menu items
-            for i in 0..4 {
-                let bx = self.menu_offset;
-                let by = MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32;
-
-                if x >= bx && x <= bx + MENU_ITEM_WIDTH
-                    && y >= by && y <= by + MENU_ITEM_HEIGHT
-                {
-                    self.selected_menu_item = i;
-                    self.button_pop[i] = 5;
+        match action {
+            crate::touch::TouchAction::SwipeRight => {
+                if self.state == UiState::Idle {
+                    self.state = UiState::Menu;
                     crate::audio::play_blip();
                 }
             }
+            crate::touch::TouchAction::SwipeLeft => {
+                if self.state == UiState::Menu {
+                    self.state = UiState::Idle;
+                    crate::audio::play_blip();
+                }
+            }
+            crate::touch::TouchAction::Tap(x, y) => {
+                // Ripple at tap location
+                self.ripple_x = x;
+                self.ripple_y = y;
+                self.ripple_radius = 0;
+                self.ripple_active = true;
 
-            // Tap right side to dismiss
-            if x > RKUN_MENU_X - 20 {
-                self.state = UiState::Idle;
-                crate::audio::play_blip();
+                if self.state == UiState::Menu {
+                    // Check taps on vertical menu items
+                    for i in 0..4 {
+                        let bx = self.menu_offset;
+                        let by = MENU_START_Y + (MENU_ITEM_HEIGHT + MENU_ITEM_SPACING) * i as i32;
+
+                        if x >= bx && x <= bx + MENU_ITEM_WIDTH
+                            && y >= by && y <= by + MENU_ITEM_HEIGHT
+                        {
+                            self.selected_menu_item = i;
+                            self.button_pop[i] = 5;
+                            crate::audio::play_blip();
+                        }
+                    }
+                }
             }
         }
     }

@@ -285,11 +285,9 @@ async fn display_task(
             }
         }
 
-        // Drain touch events — remap portrait touch coords (240×320) to landscape display (320×240)
-        while let Ok((tx, ty)) = touch_receiver.try_receive() {
-            let x = ty as i32;           // portrait Y → landscape X
-            let y = 240 - tx as i32;     // portrait X → landscape Y (inverted)
-            ui_manager.handle_touch(x, y);
+        // Drain touch actions (swipe/tap detection and coord remapping done in touch task)
+        while let Ok(action) = touch_receiver.try_receive() {
+            ui_manager.handle_touch_action(action);
         }
 
         // Drain button events
