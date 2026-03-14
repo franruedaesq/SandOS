@@ -227,11 +227,11 @@ impl UiManager {
     {
         let bg_color = Rgb565::new(31, 62, 29);
         let mut full_redraw = self.force_redraw
-            || self.expression != self.prev_expression
-            || self.is_blinking != self.prev_is_blinking
+
+
             || self.text != self.prev_text;
 
-        let r_kun_moved = self.r_kun_x != self.prev_r_kun_x || self.r_kun_y != self.prev_r_kun_y || self.idle_bounce != self.prev_idle_bounce;
+        let r_kun_moved = self.r_kun_x != self.prev_r_kun_x || self.r_kun_y != self.prev_r_kun_y || self.idle_bounce != self.prev_idle_bounce || self.expression != self.prev_expression || self.is_blinking != self.prev_is_blinking;
         let menu_moved = self.menu_offset != self.prev_menu_offset;
         let buttons_animating = self.button_pop.iter().any(|&p| p > 0);
 
@@ -241,7 +241,7 @@ impl UiManager {
             // Partial erasures
             if r_kun_moved && !full_redraw {
                 // Erase previous R-Kun bounds (approximate 100x100 region)
-                Rectangle::new(Point::new(self.prev_r_kun_x - 50, self.prev_r_kun_y - 30 + self.prev_idle_bounce), Size::new(100, 60))
+                Rectangle::new(Point::new(self.prev_r_kun_x - 60, self.prev_r_kun_y - 40 + self.prev_idle_bounce), Size::new(120, 80))
                     .into_styled(PrimitiveStyle::with_fill(bg_color))
                     .draw(display)?;
             }
